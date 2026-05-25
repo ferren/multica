@@ -1,0 +1,381 @@
+diff --git a/server/internal/daemon/client.go b/server/internal/daemon/client.go
+index 45b4833c..fc742d5b 100644
+--- a/server/internal/daemon/client.go
++++ b/server/internal/daemon/client.go
+@@ -77,9 +77,10 @@ func isRuntimeNotFoundError(err error) bool {
+ 
+ // Client handles HTTP communication with the Multica server daemon API.
+ type Client struct {
+-	baseURL string
+-	token   string
+-	client  *http.Client
++	baseURL    string
++	token      string
++	client     *http.Client
++	pathPrefix string // "/api" for native Multica, "/multica" for Odoo backend
+ 
+ 	// Identity headers sent on every request as X-Client-*. Populated by
+ 	// SetIdentity(); empty values are simply omitted.
+@@ -91,13 +92,19 @@ type Client struct {
+ // NewClient creates a new daemon API client.
+ func NewClient(baseURL string) *Client {
+ 	return &Client{
+-		baseURL:  baseURL,
+-		client:   &http.Client{Timeout: 30 * time.Second},
+-		platform: "daemon",
+-		os:       normalizeGOOS(runtime.GOOS),
++		baseURL:    baseURL,
++		client:     &http.Client{Timeout: 30 * time.Second},
++		platform:   "daemon",
++		os:         normalizeGOOS(runtime.GOOS),
++		pathPrefix: "/api",
+ 	}
+ }
+ 
++// SetPathPrefix sets the URL path prefix for all daemon API calls.
++func (c *Client) SetPathPrefix(prefix string) {
++	c.pathPrefix = prefix
++}
++
+ // normalizeGOOS maps Go's runtime.GOOS values to the protocol vocabulary
+ // used by X-Client-OS / client_os ("macos" / "windows" / "linux").
+ func normalizeGOOS(goos string) string {
+@@ -146,18 +153,18 @@ func (c *Client) ClaimTask(ctx context.Context, runtimeID string) (*Task, error)
+ 	var resp struct {
+ 		Task *Task `json:"task"`
+ 	}
+-	if err := c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/tasks/claim", runtimeID), map[string]any{}, &resp); err != nil {
++	if err := c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/tasks/claim", c.pathPrefix, runtimeID), map[string]any{}, &resp); err != nil {
+ 		return nil, err
+ 	}
+ 	return resp.Task, nil
+ }
+ 
+ func (c *Client) StartTask(ctx context.Context, taskID string) error {
+-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/start", taskID), map[string]any{}, nil)
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/tasks/%s/start", c.pathPrefix, taskID), map[string]any{}, nil)
+ }
+ 
+ func (c *Client) ReportProgress(ctx context.Context, taskID, summary string, step, total int) error {
+-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/progress", taskID), map[string]any{
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/tasks/%s/progress", c.pathPrefix, taskID), map[string]any{
+ 		"summary": summary,
+ 		"step":    step,
+ 		"total":   total,
+@@ -175,7 +182,7 @@ type TaskMessageData struct {
+ }
+ 
+ func (c *Client) ReportTaskMessages(ctx context.Context, taskID string, messages []TaskMessageData) error {
+-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/messages", taskID), map[string]any{
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/tasks/%s/messages", c.pathPrefix, taskID), map[string]any{
+ 		"messages": messages,
+ 	}, nil)
+ }
+@@ -191,14 +198,14 @@ func (c *Client) CompleteTask(ctx context.Context, taskID, output, branchName, s
+ 	if workDir != "" {
+ 		body["work_dir"] = workDir
+ 	}
+-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/complete", taskID), body, nil)
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/tasks/%s/complete", c.pathPrefix, taskID), body, nil)
+ }
+ 
+ func (c *Client) ReportTaskUsage(ctx context.Context, taskID string, usage []TaskUsageEntry) error {
+ 	if len(usage) == 0 {
+ 		return nil
+ 	}
+-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/usage", taskID), map[string]any{
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/tasks/%s/usage", c.pathPrefix, taskID), map[string]any{
+ 		"usage": usage,
+ 	}, nil)
+ }
+@@ -214,7 +221,7 @@ func (c *Client) FailTask(ctx context.Context, taskID, errMsg, sessionID, workDi
+ 	if failureReason != "" {
+ 		body["failure_reason"] = failureReason
+ 	}
+-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/fail", taskID), body, nil)
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/tasks/%s/fail", c.pathPrefix, taskID), body, nil)
+ }
+ 
+ // PinTaskSession persists the agent's session_id and work_dir on the task
+@@ -230,14 +237,14 @@ func (c *Client) PinTaskSession(ctx context.Context, taskID, sessionID, workDir
+ 	if workDir != "" {
+ 		body["work_dir"] = workDir
+ 	}
+-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/session", taskID), body, nil)
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/tasks/%s/session", c.pathPrefix, taskID), body, nil)
+ }
+ 
+ // RecoverOrphans tells the server to fail any dispatched/running tasks the
+ // previous daemon process for this runtime left behind. The server will
+ // auto-retry eligible tasks.
+ func (c *Client) RecoverOrphans(ctx context.Context, runtimeID string) error {
+-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/recover-orphans", runtimeID), map[string]any{}, nil)
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/recover-orphans", c.pathPrefix, runtimeID), map[string]any{}, nil)
+ }
+ 
+ // GetTaskStatus returns the current status of a task. Used by the daemon to
+@@ -246,7 +253,7 @@ func (c *Client) GetTaskStatus(ctx context.Context, taskID string) (string, erro
+ 	var resp struct {
+ 		Status string `json:"status"`
+ 	}
+-	if err := c.getJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/status", taskID), &resp); err != nil {
++	if err := c.getJSON(ctx, fmt.Sprintf("%s/daemon/tasks/%s/status", c.pathPrefix, taskID), &resp); err != nil {
+ 		return "", err
+ 	}
+ 	return resp.Status, nil
+@@ -265,7 +272,7 @@ type (
+ 
+ func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*HeartbeatResponse, error) {
+ 	var resp HeartbeatResponse
+-	if err := c.postJSON(ctx, "/api/daemon/heartbeat", map[string]any{
++	if err := c.postJSON(ctx, c.pathPrefix+"/daemon/heartbeat", map[string]any{
+ 		"runtime_id":             runtimeID,
+ 		"supports_batch_import":  true,
+ 	}, &resp); err != nil {
+@@ -276,22 +283,22 @@ func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*Heartbea
+ 
+ // ReportUpdateResult sends the CLI update result back to the server.
+ func (c *Client) ReportUpdateResult(ctx context.Context, runtimeID, updateID string, result map[string]any) error {
+-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/update/%s/result", runtimeID, updateID), result, nil)
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/update/%s/result", c.pathPrefix, runtimeID, updateID), result, nil)
+ }
+ 
+ // ReportModelListResult sends the model-discovery result back to the server.
+ func (c *Client) ReportModelListResult(ctx context.Context, runtimeID, requestID string, result map[string]any) error {
+-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/models/%s/result", runtimeID, requestID), result, nil)
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/models/%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
+ }
+ 
+ // ReportLocalSkillListResult sends the runtime-local-skill inventory back to the server.
+ func (c *Client) ReportLocalSkillListResult(ctx context.Context, runtimeID, requestID string, result map[string]any) error {
+-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/local-skills/%s/result", runtimeID, requestID), result, nil)
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/local-skills/%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
+ }
+ 
+ // ReportLocalSkillImportResult sends a runtime-local-skill bundle back to the server.
+ func (c *Client) ReportLocalSkillImportResult(ctx context.Context, runtimeID, requestID string, result map[string]any) error {
+-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/local-skills/import/%s/result", runtimeID, requestID), result, nil)
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/local-skills/import/%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
+ }
+ 
+ // WorkspaceInfo holds minimal workspace metadata returned by the API.
+@@ -303,7 +310,7 @@ type WorkspaceInfo struct {
+ // ListWorkspaces fetches all workspaces the authenticated user belongs to.
+ func (c *Client) ListWorkspaces(ctx context.Context) ([]WorkspaceInfo, error) {
+ 	var workspaces []WorkspaceInfo
+-	if err := c.getJSON(ctx, "/api/workspaces", &workspaces); err != nil {
++	if err := c.getJSON(ctx, c.pathPrefix+"/workspaces", &workspaces); err != nil {
+ 		return nil, err
+ 	}
+ 	return workspaces, nil
+@@ -318,7 +325,7 @@ type IssueGCStatus struct {
+ // GetIssueGCCheck returns the status and updated_at of an issue for GC decisions.
+ func (c *Client) GetIssueGCCheck(ctx context.Context, issueID string) (*IssueGCStatus, error) {
+ 	var resp IssueGCStatus
+-	if err := c.getJSON(ctx, fmt.Sprintf("/api/daemon/issues/%s/gc-check", issueID), &resp); err != nil {
++	if err := c.getJSON(ctx, fmt.Sprintf("%s/daemon/issues/%s/gc-check", c.pathPrefix, issueID), &resp); err != nil {
+ 		return nil, err
+ 	}
+ 	return &resp, nil
+@@ -336,7 +343,7 @@ type ChatSessionGCStatus struct {
+ // signal.
+ func (c *Client) GetChatSessionGCCheck(ctx context.Context, sessionID string) (*ChatSessionGCStatus, error) {
+ 	var resp ChatSessionGCStatus
+-	if err := c.getJSON(ctx, fmt.Sprintf("/api/daemon/chat-sessions/%s/gc-check", sessionID), &resp); err != nil {
++	if err := c.getJSON(ctx, fmt.Sprintf("%s/daemon/chat-sessions/%s/gc-check", c.pathPrefix, sessionID), &resp); err != nil {
+ 		return nil, err
+ 	}
+ 	return &resp, nil
+@@ -354,7 +361,7 @@ type AutopilotRunGCStatus struct {
+ // GetAutopilotRunGCCheck returns the status of an autopilot run for GC decisions.
+ func (c *Client) GetAutopilotRunGCCheck(ctx context.Context, runID string) (*AutopilotRunGCStatus, error) {
+ 	var resp AutopilotRunGCStatus
+-	if err := c.getJSON(ctx, fmt.Sprintf("/api/daemon/autopilot-runs/%s/gc-check", runID), &resp); err != nil {
++	if err := c.getJSON(ctx, fmt.Sprintf("%s/daemon/autopilot-runs/%s/gc-check", c.pathPrefix, runID), &resp); err != nil {
+ 		return nil, err
+ 	}
+ 	return &resp, nil
+@@ -371,14 +378,14 @@ type TaskGCStatus struct {
+ // GetTaskGCCheck returns the status of an agent task for GC decisions.
+ func (c *Client) GetTaskGCCheck(ctx context.Context, taskID string) (*TaskGCStatus, error) {
+ 	var resp TaskGCStatus
+-	if err := c.getJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/gc-check", taskID), &resp); err != nil {
++	if err := c.getJSON(ctx, fmt.Sprintf("%s/daemon/tasks/%s/gc-check", c.pathPrefix, taskID), &resp); err != nil {
+ 		return nil, err
+ 	}
+ 	return &resp, nil
+ }
+ 
+ func (c *Client) Deregister(ctx context.Context, runtimeIDs []string) error {
+-	return c.postJSON(ctx, "/api/daemon/deregister", map[string]any{
++	return c.postJSON(ctx, c.pathPrefix+"/daemon/deregister", map[string]any{
+ 		"runtime_ids": runtimeIDs,
+ 	}, nil)
+ }
+@@ -393,7 +400,7 @@ type RegisterResponse struct {
+ 
+ func (c *Client) Register(ctx context.Context, req map[string]any) (*RegisterResponse, error) {
+ 	var resp RegisterResponse
+-	if err := c.postJSON(ctx, "/api/daemon/register", req, &resp); err != nil {
++	if err := c.postJSON(ctx, c.pathPrefix+"/daemon/register", req, &resp); err != nil {
+ 		return nil, err
+ 	}
+ 	return &resp, nil
+@@ -408,7 +415,7 @@ type WorkspaceReposResponse struct {
+ 
+ func (c *Client) GetWorkspaceRepos(ctx context.Context, workspaceID string) (*WorkspaceReposResponse, error) {
+ 	var resp WorkspaceReposResponse
+-	if err := c.getJSON(ctx, fmt.Sprintf("/api/daemon/workspaces/%s/repos", workspaceID), &resp); err != nil {
++	if err := c.getJSON(ctx, fmt.Sprintf("%s/daemon/workspaces/%s/repos", c.pathPrefix, workspaceID), &resp); err != nil {
+ 		return nil, err
+ 	}
+ 	return &resp, nil
+diff --git a/server/internal/daemon/config.go b/server/internal/daemon/config.go
+index ff129d58..e52013da 100644
+--- a/server/internal/daemon/config.go
++++ b/server/internal/daemon/config.go
+@@ -81,6 +81,7 @@ type Config struct {
+ 	AgentIdleWatchdog              time.Duration // force-stop a run when the backend goes silent this long with an empty queue (0 = disabled)
+ 	ClaudeArgs                     []string
+ 	CodexArgs                      []string
++	BackendMode                    string // "multica" (default) or "odoo"
+ }
+ 
+ // Overrides allows CLI flags to override environment variables and defaults.
+@@ -323,6 +324,9 @@ func LoadConfig(overrides Overrides) (Config, error) {
+ 		return Config{}, err
+ 	}
+ 
++	// Backend mode: env > default
++	backendMode := strings.ToLower(envOrDefault("MULTICA_BACKEND_MODE", "multica"))
++
+ 	// Health port: override > default
+ 	healthPort := DefaultHealthPort
+ 	if overrides.HealthPort > 0 {
+@@ -376,6 +380,11 @@ func LoadConfig(overrides Overrides) (Config, error) {
+ 	if overrides.DisableAutoUpdate {
+ 		autoUpdateEnabled = false
+ 	}
++	// Odoo backend mode: disable GC and auto-update.
++	if backendMode == "odoo" {
++		gcEnabled = false
++		autoUpdateEnabled = false
++	}
+ 	autoUpdateInterval, err := durationFromEnv("MULTICA_DAEMON_AUTO_UPDATE_INTERVAL", DefaultAutoUpdateCheckInterval)
+ 	if err != nil {
+ 		return Config{}, err
+@@ -411,6 +420,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
+ 		AgentIdleWatchdog:              agentIdleWatchdog,
+ 		ClaudeArgs:                     claudeArgs,
+ 		CodexArgs:                      codexArgs,
++		BackendMode:                    backendMode,
+ 	}, nil
+ }
+ 
+diff --git a/server/internal/daemon/daemon.go b/server/internal/daemon/daemon.go
+index 59664063..ee7557b6 100644
+--- a/server/internal/daemon/daemon.go
++++ b/server/internal/daemon/daemon.go
+@@ -153,6 +153,10 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
+ 	// Tag every daemon HTTP request with the daemon's CLI version so the
+ 	// server can split logs/metrics by client version (parallel to the CLI).
+ 	client.SetVersion(cfg.CLIVersion)
++	// When using Odoo backend, switch the path prefix from /api to /multica.
++	if cfg.BackendMode == "odoo" {
++		client.SetPathPrefix("/multica")
++	}
+ 	d := &Daemon{
+ 		cfg:                       cfg,
+ 		client:                    client,
+@@ -606,35 +610,47 @@ func (d *Daemon) Run(ctx context.Context) error {
+ 		"launched_by", d.cfg.LaunchedBy,
+ 	)
+ 
+-	// Load auth token from CLI config.
+-	if err := d.resolveAuth(); err != nil {
+-		return err
+-	}
++		// Load auth token from CLI config (or env var for Odoo backend).
++		if d.cfg.BackendMode == "odoo" {
++			if err := d.resolveOdooAuth(); err != nil {
++				return err
++			}
++		} else {
++			if err := d.resolveAuth(); err != nil {
++				return err
++			}
++		}
+ 
+-	// Fetch all user workspaces from the API and register runtimes for any
+-	// that exist. Zero workspaces is a valid state — a newly-signed-up user
+-	// may start the daemon before creating their first workspace. The
+-	// workspaceSyncLoop below polls every 30s and will register runtimes
+-	// when a workspace appears, so the daemon stays useful as a long-lived
+-	// background process rather than crashing at startup.
+-	if err := d.syncWorkspacesFromAPI(ctx); err != nil {
+-		return err
+-	}
++		// Fetch all user workspaces from the API and register runtimes for any
++		// that exist. Zero workspaces is a valid state — a newly-signed-up user
++		// may start the daemon before creating their first workspace. The
++		// workspaceSyncLoop below polls every 30s and will register runtimes
++		// when a workspace appears, so the daemon stays useful as a long-lived
++		// background process rather than crashing at startup.
++		if err := d.syncWorkspacesFromAPI(ctx); err != nil {
++			return err
++		}
+ 
+-	// Deregister runtimes on shutdown (uses a fresh context since ctx will be cancelled).
+-	defer d.deregisterRuntimes()
++		// Deregister runtimes on shutdown (uses a fresh context since ctx will be cancelled).
++		defer d.deregisterRuntimes()
+ 
+-	// Start workspace sync loop to discover newly created workspaces.
+-	go d.workspaceSyncLoop(ctx)
++		// Start workspace sync loop to discover newly created workspaces.
++		go d.workspaceSyncLoop(ctx)
+ 
+-	taskWakeups := make(chan struct{}, 1)
+-	go d.taskWakeupLoop(ctx, taskWakeups)
+-	go d.heartbeatLoop(ctx)
+-	go d.gcLoop(ctx)
+-	go d.autoUpdateLoop(ctx)
+-	go d.serveHealth(ctx, healthLn, time.Now())
+-	d.logger.Debug("background loops launched (workspace-sync, task-wakeup, heartbeat, gc, auto-update, health)")
+-	err = d.pollLoop(ctx, taskWakeups)
++		taskWakeups := make(chan struct{}, 1)
++		if d.cfg.BackendMode != "odoo" {
++			go d.taskWakeupLoop(ctx, taskWakeups)
++		}
++		go d.heartbeatLoop(ctx)
++		if d.cfg.BackendMode != "odoo" && d.cfg.GCEnabled {
++			go d.gcLoop(ctx)
++		}
++		if d.cfg.BackendMode != "odoo" && d.cfg.AutoUpdateEnabled {
++			go d.autoUpdateLoop(ctx)
++		}
++		go d.serveHealth(ctx, healthLn, time.Now())
++		d.logger.Debug("background loops launched")
++		err = d.pollLoop(ctx, taskWakeups)
+ 	d.logger.Debug("daemon main loop returning", "error", err)
+ 	return err
+ }
+@@ -684,6 +700,18 @@ func (d *Daemon) resolveAuth() error {
+ 	return nil
+ }
+ 
++	// resolveOdooAuth loads the API key from the MULTICA_API_KEY environment
++	// variable for Odoo backend mode. No CLI config or login flow is needed.
++	func (d *Daemon) resolveOdooAuth() error {
++		apiKey := strings.TrimSpace(os.Getenv("MULTICA_API_KEY"))
++		if apiKey == "" {
++			return fmt.Errorf("MULTICA_API_KEY is required for Odoo backend mode")
++		}
++		d.client.SetToken(apiKey)
++		d.logger.Info("authenticated (Odoo mode)")
++		return nil
++	}
++
+ // allRuntimeIDs returns all runtime IDs across all watched workspaces.
+ func (d *Daemon) allRuntimeIDs() []string {
+ 	d.mu.Lock()

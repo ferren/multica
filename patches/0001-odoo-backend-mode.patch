@@ -1,8 +1,8 @@
 diff --git a/server/internal/daemon/client.go b/server/internal/daemon/client.go
-index 45b4833c..fc742d5b 100644
+index 45b4833c..7d5b4bc7 100644
 --- a/server/internal/daemon/client.go
 +++ b/server/internal/daemon/client.go
-@@ -77,9 +77,10 @@ func isRuntimeNotFoundError(err error) bool {
+@@ -77,9 +77,18 @@ func isRuntimeNotFoundError(err error) bool {
  
  // Client handles HTTP communication with the Multica server daemon API.
  type Client struct {
@@ -13,10 +13,18 @@ index 45b4833c..fc742d5b 100644
 +	token      string
 +	client     *http.Client
 +	pathPrefix string // "/api" for native Multica, "/multica" for Odoo backend
++
++	// Odoo OpenAPI dual-token auth. When apiKey is set, requests use
++	// X-GALAXY-ACCESS-TOKEN + X-GALAXY-API-KEY headers instead of
++	// Authorization: Bearer.
++	apiKey       string
++	accessToken  string
++	expiresIn    int // seconds until access_token expires
++	onTokenError func() // called when a 401 signals token expiry
  
  	// Identity headers sent on every request as X-Client-*. Populated by
  	// SetIdentity(); empty values are simply omitted.
-@@ -91,13 +92,19 @@ type Client struct {
+@@ -91,13 +100,19 @@ type Client struct {
  // NewClient creates a new daemon API client.
  func NewClient(baseURL string) *Client {
  	return &Client{
@@ -40,7 +48,86 @@ index 45b4833c..fc742d5b 100644
  // normalizeGOOS maps Go's runtime.GOOS values to the protocol vocabulary
  // used by X-Client-OS / client_os ("macos" / "windows" / "linux").
  func normalizeGOOS(goos string) string {
-@@ -146,18 +153,18 @@ func (c *Client) ClaimTask(ctx context.Context, runtimeID string) (*Task, error)
+@@ -132,6 +147,19 @@ func (c *Client) setIdentityHeaders(req *http.Request) {
+ 	}
+ }
+ 
++
++// setAuthHeaders attaches authentication headers. When apiKey is set (Odoo
++// mode), sends X-GALAXY-ACCESS-TOKEN + X-GALAXY-API-KEY. Otherwise falls back
++// to Bearer token.
++func (c *Client) setAuthHeaders(req *http.Request) {
++	c.setIdentityHeaders(req)
++	if c.apiKey != "" {
++		req.Header.Set("X-GALAXY-ACCESS-TOKEN", c.accessToken)
++		req.Header.Set("X-GALAXY-API-KEY", c.apiKey)
++	} else if c.token != "" {
++		req.Header.Set("Authorization", "Bearer "+c.token)
++	}
++}
+ // SetToken sets the auth token for authenticated requests.
+ func (c *Client) SetToken(token string) {
+ 	c.token = token
+@@ -142,22 +170,77 @@ func (c *Client) Token() string {
+ 	return c.token
+ }
+ 
++// FetchOdooToken calls POST /openapi/token with appid+secret to obtain
++// access_token and api_key. Stores both for subsequent requests.
++func (c *Client) FetchOdooToken(ctx context.Context, appID, appSecret string) error {
++	body := fmt.Sprintf("grant_type=client_credential&appid=%s&secret=%s", appID, appSecret)
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/openapi/token", strings.NewReader(body))
++	if err != nil {
++		return err
++	}
++	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++
++	resp, err := c.client.Do(req)
++	if err != nil {
++		return fmt.Errorf("fetch odoo token: %w", err)
++	}
++	defer resp.Body.Close()
++
++	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
++	if resp.StatusCode != 200 {
++		return fmt.Errorf("fetch odoo token: %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
++	}
++
++	var tokenResp struct {
++		AccessToken string `json:"access_token"`
++		ExpiresIn   int    `json:"expires_in"`
++		APIKey      string `json:"api_key"`
++		Code        int    `json:"code"`
++		Message     string `json:"message"`
++	}
++	if err := json.Unmarshal(data, &tokenResp); err != nil {
++		return fmt.Errorf("fetch odoo token: decode: %w", err)
++	}
++	if tokenResp.Code != 0 {
++		return fmt.Errorf("fetch odoo token: code=%d message=%s", tokenResp.Code, tokenResp.Message)
++	}
++	if tokenResp.AccessToken == "" || tokenResp.APIKey == "" {
++		return fmt.Errorf("fetch odoo token: empty access_token or api_key")
++	}
++
++	c.accessToken = tokenResp.AccessToken
++	c.apiKey = tokenResp.APIKey
++	c.expiresIn = tokenResp.ExpiresIn
++	return nil
++}
++
++// SetOnTokenError registers a callback invoked when a 401 is received,
++// signalling that the access_token has expired and needs refresh.
++func (c *Client) SetOnTokenError(fn func()) {
++	c.onTokenError = fn
++}
++
++// OdooCredentials returns the current Odoo OpenAPI token pair.
++func (c *Client) OdooCredentials() (accessToken, apiKey string) {
++	return c.accessToken, c.apiKey
++}
++
+ func (c *Client) ClaimTask(ctx context.Context, runtimeID string) (*Task, error) {
  	var resp struct {
  		Task *Task `json:"task"`
  	}
@@ -62,7 +149,7 @@ index 45b4833c..fc742d5b 100644
  		"summary": summary,
  		"step":    step,
  		"total":   total,
-@@ -175,7 +182,7 @@ type TaskMessageData struct {
+@@ -175,7 +258,7 @@ type TaskMessageData struct {
  }
  
  func (c *Client) ReportTaskMessages(ctx context.Context, taskID string, messages []TaskMessageData) error {
@@ -71,7 +158,7 @@ index 45b4833c..fc742d5b 100644
  		"messages": messages,
  	}, nil)
  }
-@@ -191,14 +198,14 @@ func (c *Client) CompleteTask(ctx context.Context, taskID, output, branchName, s
+@@ -191,14 +274,14 @@ func (c *Client) CompleteTask(ctx context.Context, taskID, output, branchName, s
  	if workDir != "" {
  		body["work_dir"] = workDir
  	}
@@ -88,7 +175,7 @@ index 45b4833c..fc742d5b 100644
  		"usage": usage,
  	}, nil)
  }
-@@ -214,7 +221,7 @@ func (c *Client) FailTask(ctx context.Context, taskID, errMsg, sessionID, workDi
+@@ -214,7 +297,7 @@ func (c *Client) FailTask(ctx context.Context, taskID, errMsg, sessionID, workDi
  	if failureReason != "" {
  		body["failure_reason"] = failureReason
  	}
@@ -97,7 +184,7 @@ index 45b4833c..fc742d5b 100644
  }
  
  // PinTaskSession persists the agent's session_id and work_dir on the task
-@@ -230,14 +237,14 @@ func (c *Client) PinTaskSession(ctx context.Context, taskID, sessionID, workDir
+@@ -230,14 +313,14 @@ func (c *Client) PinTaskSession(ctx context.Context, taskID, sessionID, workDir
  	if workDir != "" {
  		body["work_dir"] = workDir
  	}
@@ -114,7 +201,7 @@ index 45b4833c..fc742d5b 100644
  }
  
  // GetTaskStatus returns the current status of a task. Used by the daemon to
-@@ -246,7 +253,7 @@ func (c *Client) GetTaskStatus(ctx context.Context, taskID string) (string, erro
+@@ -246,7 +329,7 @@ func (c *Client) GetTaskStatus(ctx context.Context, taskID string) (string, erro
  	var resp struct {
  		Status string `json:"status"`
  	}
@@ -123,7 +210,7 @@ index 45b4833c..fc742d5b 100644
  		return "", err
  	}
  	return resp.Status, nil
-@@ -265,7 +272,7 @@ type (
+@@ -265,7 +348,7 @@ type (
  
  func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*HeartbeatResponse, error) {
  	var resp HeartbeatResponse
@@ -132,7 +219,7 @@ index 45b4833c..fc742d5b 100644
  		"runtime_id":             runtimeID,
  		"supports_batch_import":  true,
  	}, &resp); err != nil {
-@@ -276,22 +283,22 @@ func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*Heartbea
+@@ -276,22 +359,22 @@ func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*Heartbea
  
  // ReportUpdateResult sends the CLI update result back to the server.
  func (c *Client) ReportUpdateResult(ctx context.Context, runtimeID, updateID string, result map[string]any) error {
@@ -159,7 +246,7 @@ index 45b4833c..fc742d5b 100644
  }
  
  // WorkspaceInfo holds minimal workspace metadata returned by the API.
-@@ -303,7 +310,7 @@ type WorkspaceInfo struct {
+@@ -303,7 +386,7 @@ type WorkspaceInfo struct {
  // ListWorkspaces fetches all workspaces the authenticated user belongs to.
  func (c *Client) ListWorkspaces(ctx context.Context) ([]WorkspaceInfo, error) {
  	var workspaces []WorkspaceInfo
@@ -168,7 +255,7 @@ index 45b4833c..fc742d5b 100644
  		return nil, err
  	}
  	return workspaces, nil
-@@ -318,7 +325,7 @@ type IssueGCStatus struct {
+@@ -318,7 +401,7 @@ type IssueGCStatus struct {
  // GetIssueGCCheck returns the status and updated_at of an issue for GC decisions.
  func (c *Client) GetIssueGCCheck(ctx context.Context, issueID string) (*IssueGCStatus, error) {
  	var resp IssueGCStatus
@@ -177,7 +264,7 @@ index 45b4833c..fc742d5b 100644
  		return nil, err
  	}
  	return &resp, nil
-@@ -336,7 +343,7 @@ type ChatSessionGCStatus struct {
+@@ -336,7 +419,7 @@ type ChatSessionGCStatus struct {
  // signal.
  func (c *Client) GetChatSessionGCCheck(ctx context.Context, sessionID string) (*ChatSessionGCStatus, error) {
  	var resp ChatSessionGCStatus
@@ -186,7 +273,7 @@ index 45b4833c..fc742d5b 100644
  		return nil, err
  	}
  	return &resp, nil
-@@ -354,7 +361,7 @@ type AutopilotRunGCStatus struct {
+@@ -354,7 +437,7 @@ type AutopilotRunGCStatus struct {
  // GetAutopilotRunGCCheck returns the status of an autopilot run for GC decisions.
  func (c *Client) GetAutopilotRunGCCheck(ctx context.Context, runID string) (*AutopilotRunGCStatus, error) {
  	var resp AutopilotRunGCStatus
@@ -195,7 +282,7 @@ index 45b4833c..fc742d5b 100644
  		return nil, err
  	}
  	return &resp, nil
-@@ -371,14 +378,14 @@ type TaskGCStatus struct {
+@@ -371,14 +454,14 @@ type TaskGCStatus struct {
  // GetTaskGCCheck returns the status of an agent task for GC decisions.
  func (c *Client) GetTaskGCCheck(ctx context.Context, taskID string) (*TaskGCStatus, error) {
  	var resp TaskGCStatus
@@ -212,7 +299,7 @@ index 45b4833c..fc742d5b 100644
  		"runtime_ids": runtimeIDs,
  	}, nil)
  }
-@@ -393,7 +400,7 @@ type RegisterResponse struct {
+@@ -393,7 +476,7 @@ type RegisterResponse struct {
  
  func (c *Client) Register(ctx context.Context, req map[string]any) (*RegisterResponse, error) {
  	var resp RegisterResponse
@@ -221,7 +308,7 @@ index 45b4833c..fc742d5b 100644
  		return nil, err
  	}
  	return &resp, nil
-@@ -408,7 +415,7 @@ type WorkspaceReposResponse struct {
+@@ -408,7 +491,7 @@ type WorkspaceReposResponse struct {
  
  func (c *Client) GetWorkspaceRepos(ctx context.Context, workspaceID string) (*WorkspaceReposResponse, error) {
  	var resp WorkspaceReposResponse
@@ -230,6 +317,50 @@ index 45b4833c..fc742d5b 100644
  		return nil, err
  	}
  	return &resp, nil
+@@ -429,10 +512,7 @@ func (c *Client) postJSON(ctx context.Context, path string, reqBody any, respBod
+ 		return err
+ 	}
+ 	req.Header.Set("Content-Type", "application/json")
+-	if c.token != "" {
+-		req.Header.Set("Authorization", "Bearer "+c.token)
+-	}
+-	c.setIdentityHeaders(req)
++	c.setAuthHeaders(req)
+ 
+ 	resp, err := c.client.Do(req)
+ 	if err != nil {
+@@ -440,6 +520,9 @@ func (c *Client) postJSON(ctx context.Context, path string, reqBody any, respBod
+ 	}
+ 	defer resp.Body.Close()
+ 
++	if resp.StatusCode == 401 && c.apiKey != "" && c.onTokenError != nil {
++		c.onTokenError()
++	}
+ 	if resp.StatusCode >= 400 {
+ 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+ 		return &requestError{Method: http.MethodPost, Path: path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+@@ -456,10 +539,7 @@ func (c *Client) getJSON(ctx context.Context, path string, respBody any) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	if c.token != "" {
+-		req.Header.Set("Authorization", "Bearer "+c.token)
+-	}
+-	c.setIdentityHeaders(req)
++	c.setAuthHeaders(req)
+ 
+ 	resp, err := c.client.Do(req)
+ 	if err != nil {
+@@ -467,6 +547,9 @@ func (c *Client) getJSON(ctx context.Context, path string, respBody any) error {
+ 	}
+ 	defer resp.Body.Close()
+ 
++	if resp.StatusCode == 401 && c.apiKey != "" && c.onTokenError != nil {
++		c.onTokenError()
++	}
+ 	if resp.StatusCode >= 400 {
+ 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+ 		return &requestError{Method: http.MethodGet, Path: path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
 diff --git a/server/internal/daemon/config.go b/server/internal/daemon/config.go
 index ff129d58..e52013da 100644
 --- a/server/internal/daemon/config.go
@@ -273,21 +404,22 @@ index ff129d58..e52013da 100644
  }
  
 diff --git a/server/internal/daemon/daemon.go b/server/internal/daemon/daemon.go
-index 59664063..ee7557b6 100644
+index 59664063..e316896c 100644
 --- a/server/internal/daemon/daemon.go
 +++ b/server/internal/daemon/daemon.go
-@@ -153,6 +153,10 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
+@@ -153,6 +153,11 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
  	// Tag every daemon HTTP request with the daemon's CLI version so the
  	// server can split logs/metrics by client version (parallel to the CLI).
  	client.SetVersion(cfg.CLIVersion)
 +	// When using Odoo backend, switch the path prefix from /api to /multica.
 +	if cfg.BackendMode == "odoo" {
 +		client.SetPathPrefix("/multica")
++		client.SetOnTokenError(func() { logger.Warn("odoo access_token rejected, refresh recommended") })
 +	}
  	d := &Daemon{
  		cfg:                       cfg,
  		client:                    client,
-@@ -606,35 +610,47 @@ func (d *Daemon) Run(ctx context.Context) error {
+@@ -606,35 +611,50 @@ func (d *Daemon) Run(ctx context.Context) error {
  		"launched_by", d.cfg.LaunchedBy,
  	)
  
@@ -354,26 +486,65 @@ index 59664063..ee7557b6 100644
 +		if d.cfg.BackendMode != "odoo" && d.cfg.AutoUpdateEnabled {
 +			go d.autoUpdateLoop(ctx)
 +		}
++		if d.cfg.BackendMode == "odoo" {
++			go d.odooTokenRefreshLoop(ctx)
++		}
 +		go d.serveHealth(ctx, healthLn, time.Now())
 +		d.logger.Debug("background loops launched")
 +		err = d.pollLoop(ctx, taskWakeups)
  	d.logger.Debug("daemon main loop returning", "error", err)
  	return err
  }
-@@ -684,6 +700,18 @@ func (d *Daemon) resolveAuth() error {
+@@ -684,6 +704,54 @@ func (d *Daemon) resolveAuth() error {
  	return nil
  }
  
-+	// resolveOdooAuth loads the API key from the MULTICA_API_KEY environment
-+	// variable for Odoo backend mode. No CLI config or login flow is needed.
++	// resolveOdooAuth calls /openapi/token with MULTICA_APP_ID + MULTICA_APP_SECRET
++	// to obtain access_token and api_key for Odoo OpenAPI auth.
 +	func (d *Daemon) resolveOdooAuth() error {
-+		apiKey := strings.TrimSpace(os.Getenv("MULTICA_API_KEY"))
-+		if apiKey == "" {
-+			return fmt.Errorf("MULTICA_API_KEY is required for Odoo backend mode")
++		appID := strings.TrimSpace(os.Getenv("MULTICA_APP_ID"))
++		appSecret := strings.TrimSpace(os.Getenv("MULTICA_APP_SECRET"))
++		if appID == "" || appSecret == "" {
++			return fmt.Errorf("MULTICA_APP_ID and MULTICA_APP_SECRET are required for Odoo backend mode")
 +		}
-+		d.client.SetToken(apiKey)
-+		d.logger.Info("authenticated (Odoo mode)")
++		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
++		defer cancel()
++		if err := d.client.FetchOdooToken(ctx, appID, appSecret); err != nil {
++			return fmt.Errorf("fetch odoo token: %w", err)
++		}
++		accessToken, _ := d.client.OdooCredentials()
++		d.logger.Info("authenticated (Odoo mode)", "expires_in", d.client.expiresIn)
++		_ = accessToken
 +		return nil
++	}
++
++	// odooTokenRefreshLoop periodically refreshes the Odoo OpenAPI access_token
++	// before it expires. refreshAt = expires_in - 5 minutes (safe margin).
++	func (d *Daemon) odooTokenRefreshLoop(ctx context.Context) {
++		appID := strings.TrimSpace(os.Getenv("MULTICA_APP_ID"))
++		appSecret := strings.TrimSpace(os.Getenv("MULTICA_APP_SECRET"))
++		for {
++			expiresIn := d.client.expiresIn
++			if expiresIn <= 0 {
++				expiresIn = 7200
++			}
++			refreshAt := time.Duration(expiresIn-300) * time.Second
++			if refreshAt < 60*time.Second {
++				refreshAt = 60 * time.Second
++			}
++			select {
++			case <-ctx.Done():
++				return
++			case <-time.After(refreshAt):
++				refreshCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
++				if err := d.client.FetchOdooToken(refreshCtx, appID, appSecret); err != nil {
++					d.logger.Warn("odoo token refresh failed", "error", err)
++				} else {
++					d.logger.Info("odoo token refreshed", "expires_in", d.client.expiresIn)
++				}
++				cancel()
++			}
++		}
 +	}
 +
  // allRuntimeIDs returns all runtime IDs across all watched workspaces.

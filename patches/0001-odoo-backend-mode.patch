@@ -153,7 +153,7 @@ Index: multica/server/internal/daemon/client.go
  		Task *Task `json:"task"`
  	}
 -	if err := c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/tasks/claim", runtimeID), map[string]any{}, &resp); err != nil {
-+	if err := c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/tasks/claim", runtimeID), map[string]any{}, &resp); err != nil {
++	if err := c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/tasks/claim", c.pathPrefix, runtimeID), map[string]any{}, &resp); err != nil {
  		return nil, err
  	}
  	return resp.Task, nil
@@ -161,7 +161,7 @@ Index: multica/server/internal/daemon/client.go
  
  func (c *Client) StartTask(ctx context.Context, taskID string) error {
 -	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/start", taskID), map[string]any{}, nil)
-+	return c.postJSON(ctx, fmt.Sprintf("%%s/daemon/tasks/%s/start", taskID), map[string]any{}, nil)
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/tasks/%s/start", c.pathPrefix, taskID), map[string]any{}, nil)
  }
  
  // MarkTaskWaitingLocalDirectory parks a freshly-dispatched task in the
@@ -170,14 +170,14 @@ Index: multica/server/internal/daemon/client.go
  // 400 the daemon swallows and proceeds to wait).
  func (c *Client) MarkTaskWaitingLocalDirectory(ctx context.Context, taskID, reason string) error {
 -	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/wait-local-directory", taskID), map[string]any{
-+	return c.postJSON(ctx, fmt.Sprintf("%%s/daemon/tasks/%s/wait-local-directory", taskID), map[string]any{
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/tasks/%s/wait-local-directory", c.pathPrefix, taskID), map[string]any{
  		"reason": reason,
  	}, nil)
  }
  
  func (c *Client) ReportProgress(ctx context.Context, taskID, summary string, step, total int) error {
 -	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/progress", taskID), map[string]any{
-+	return c.postJSON(ctx, fmt.Sprintf("%%s/daemon/tasks/%s/progress", taskID), map[string]any{
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/tasks/%s/progress", c.pathPrefix, taskID), map[string]any{
  		"summary": summary,
  		"step":    step,
  		"total":   total,

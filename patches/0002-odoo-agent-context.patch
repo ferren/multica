@@ -1,7 +1,7 @@
-Index: multica/server/internal/daemon/daemon.go
+Index: b/server/internal/daemon/daemon.go
 ===================================================================
---- multica.orig/server/internal/daemon/daemon.go
-+++ multica/server/internal/daemon/daemon.go
+--- a/server/internal/daemon/daemon.go
++++ b/server/internal/daemon/daemon.go
 @@ -164,7 +164,6 @@ func New(cfg Config, logger *slog.Logger
  	// When using Odoo backend, switch the path prefix from /api to /multica.
  	if cfg.BackendMode == "odoo" {
@@ -28,7 +28,7 @@ Index: multica/server/internal/daemon/daemon.go
  		return nil
  	}
  
-@@ -1326,6 +1336,7 @@ func (d *Daemon) syncWorkspacesFromAPI(c
+@@ -1334,6 +1344,7 @@ func (d *Daemon) syncWorkspacesFromAPI(c
  				d.workspaces[id] = newWorkspaceState(id, runtimeIDs, "", nil, nil)
  				d.mu.Unlock()
  				d.logger.Info("watching workspace (Odoo mode)", "workspace_id", id, "name", name, "runtime_id", ws.RuntimeID, "provider", rt.Provider)
@@ -36,7 +36,7 @@ Index: multica/server/internal/daemon/daemon.go
  				registered++
  				continue
  			}
-@@ -2615,6 +2626,7 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -2623,6 +2634,7 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
@@ -44,7 +44,7 @@ Index: multica/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:                          task.IssueID,
  		TriggerCommentID:                 task.TriggerCommentID,
-@@ -2638,6 +2650,10 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -2646,6 +2658,10 @@ func (d *Daemon) runTask(ctx context.Con
  		RequestingUserName:               task.RequestingUserName,
  		RequestingUserProfileDescription: task.RequestingUserProfileDescription,
  		WorkspaceContext:                 task.WorkspaceContext,
@@ -55,10 +55,10 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  
  	// Mark candidate env roots as active before any env work so the GC loop
-Index: multica/server/internal/daemon/execenv/execenv.go
+Index: b/server/internal/daemon/execenv/execenv.go
 ===================================================================
---- multica.orig/server/internal/daemon/execenv/execenv.go
-+++ multica/server/internal/daemon/execenv/execenv.go
+--- a/server/internal/daemon/execenv/execenv.go
++++ b/server/internal/daemon/execenv/execenv.go
 @@ -84,6 +84,10 @@ type TaskContextForEnv struct {
  	// context and the agent stays anonymous-user mode.
  	RequestingUserName               string
@@ -70,10 +70,10 @@ Index: multica/server/internal/daemon/execenv/execenv.go
  }
  
  // SkillContextForEnv represents a skill to be written into the execution environment.
-Index: multica/server/internal/daemon/execenv/runtime_config.go
+Index: b/server/internal/daemon/execenv/runtime_config.go
 ===================================================================
---- multica.orig/server/internal/daemon/execenv/runtime_config.go
-+++ multica/server/internal/daemon/execenv/runtime_config.go
+--- a/server/internal/daemon/execenv/runtime_config.go
++++ b/server/internal/daemon/execenv/runtime_config.go
 @@ -117,6 +117,10 @@ func InjectRuntimeConfig(workDir, provid
  // buildMetaSkillContent generates the meta skill markdown that teaches the agent
  // about the Multica runtime environment and available CLI tools.

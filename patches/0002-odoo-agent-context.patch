@@ -28,7 +28,7 @@ Index: b/server/internal/daemon/daemon.go
  		return nil
  	}
  
-@@ -1334,6 +1344,7 @@ func (d *Daemon) syncWorkspacesFromAPI(c
+@@ -1340,6 +1350,7 @@ func (d *Daemon) syncWorkspacesFromAPI(c
  				d.workspaces[id] = newWorkspaceState(id, runtimeIDs, "", nil, nil)
  				d.mu.Unlock()
  				d.logger.Info("watching workspace (Odoo mode)", "workspace_id", id, "name", name, "runtime_id", ws.RuntimeID, "provider", rt.Provider)
@@ -36,7 +36,7 @@ Index: b/server/internal/daemon/daemon.go
  				registered++
  				continue
  			}
-@@ -2623,6 +2634,7 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -2629,6 +2640,7 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
@@ -44,7 +44,7 @@ Index: b/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:                          task.IssueID,
  		TriggerCommentID:                 task.TriggerCommentID,
-@@ -2646,6 +2658,10 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -2652,6 +2664,10 @@ func (d *Daemon) runTask(ctx context.Con
  		RequestingUserName:               task.RequestingUserName,
  		RequestingUserProfileDescription: task.RequestingUserProfileDescription,
  		WorkspaceContext:                 task.WorkspaceContext,

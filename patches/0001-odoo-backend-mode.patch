@@ -585,7 +585,7 @@ Index: b/server/internal/daemon/daemon.go
  	d.logger.Debug("daemon main loop returning", "error", err)
  	return err
  }
-@@ -692,6 +713,111 @@ func (d *Daemon) resolveAuth() error {
+@@ -692,7 +713,115 @@ func (d *Daemon) resolveAuth() error {
  	return nil
  }
  
@@ -695,9 +695,23 @@ Index: b/server/internal/daemon/daemon.go
 +	}
 +
  // allRuntimeIDs returns all runtime IDs across all watched workspaces.
++// In Odoo mode this also includes runtimes that aren't bound to any
++// agent yet, so heartbeat and model detection run even before the first
++// agent is created.
  func (d *Daemon) allRuntimeIDs() []string {
  	d.mu.Lock()
-@@ -1136,14 +1262,24 @@ func (d *Daemon) syncWorkspacesFromAPI(c
+ 	defer d.mu.Unlock()
+@@ -700,6 +829,9 @@ func (d *Daemon) allRuntimeIDs() []strin
+ 	for _, ws := range d.workspaces {
+ 		ids = append(ids, ws.runtimeIDs...)
+ 	}
++	for rid := range d.oursRuntimeIDs {
++		ids = append(ids, rid)
++	}
+ 	return ids
+ }
+ 
+@@ -1136,14 +1268,24 @@ func (d *Daemon) syncWorkspacesFromAPI(c
  	apiCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
  	defer cancel()
  
@@ -723,7 +737,7 @@ Index: b/server/internal/daemon/daemon.go
  		apiIDs[ws.ID] = ws.Name
  	}
  
-@@ -1182,6 +1318,25 @@ func (d *Daemon) syncWorkspacesFromAPI(c
+@@ -1182,6 +1324,25 @@ func (d *Daemon) syncWorkspacesFromAPI(c
  			registered++
  			continue
  		}

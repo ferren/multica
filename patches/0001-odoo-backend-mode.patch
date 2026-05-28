@@ -763,3 +763,12 @@ Index: b/server/internal/daemon/daemon.go
  		resp, err := d.registerRuntimesForWorkspace(ctx, id)
  		if err != nil {
  			d.logger.Error("failed to register runtimes", "workspace_id", id, "name", name, "error", err)
+@@ -2697,7 +2858,7 @@ func (d *Daemon) runTask(ctx context.Con
+ 	if task.Agent != nil && task.Agent.Model != "" {
+ 		model = task.Agent.Model
+ 	}
+-	if model == "" {
++	if model == "" && d.cfg.BackendMode != "odoo" {
+ 		model = entry.Model
+ 	}
+ 	thinkingLevel := ""

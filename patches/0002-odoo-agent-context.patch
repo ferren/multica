@@ -2,7 +2,33 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -1251,6 +1251,7 @@ func (d *Daemon) syncWorkspacesFromAPI(c
+@@ -164,7 +164,6 @@ func New(cfg Config, logger *slog.Logger
+ 	// When using Odoo backend, switch the path prefix from /api to /multica.
+ 	if cfg.BackendMode == "odoo" {
+ 		client.SetPathPrefix("/multica")
+-		client.SetOnTokenError(func() { logger.Warn("odoo access_token rejected, refresh recommended") })
+ 	}
+ 	d := &Daemon{
+ 		cfg:                       cfg,
+@@ -737,6 +736,17 @@ func (d *Daemon) resolveAuth() error {
+ 		accessToken, _ := d.client.OdooCredentials()
+ 		d.logger.Info("authenticated (Odoo mode)", "expires_in", d.client.expiresIn, "db", d.cfg.DBName)
+ 		_ = accessToken
++
++		// Set up on-error callback to refresh token on 401
++		d.client.SetOnTokenError(func() {
++			refreshCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
++			defer cancel()
++			if err := d.client.FetchOdooToken(refreshCtx, appID, appSecret, d.cfg.DBName); err != nil {
++				d.logger.Warn("odoo token refresh on 401 failed", "error", err)
++			} else {
++				d.logger.Info("odoo token refreshed on 401")
++			}
++		})
+ 		return nil
+ 	}
+ 
+@@ -1251,6 +1261,7 @@ func (d *Daemon) syncWorkspacesFromAPI(c
  				d.workspaces[id] = newWorkspaceState(id, runtimeIDs, "", nil, nil)
  				d.mu.Unlock()
  				d.logger.Info("watching workspace (Odoo mode)", "workspace_id", id, "name", name, "runtime_id", ws.RuntimeID, "provider", rt.Provider)
@@ -10,7 +36,7 @@ Index: multica/server/internal/daemon/daemon.go
  				registered++
  				continue
  			}
-@@ -2540,6 +2541,7 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -2540,6 +2551,7 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
@@ -18,7 +44,7 @@ Index: multica/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:                          task.IssueID,
  		TriggerCommentID:                 task.TriggerCommentID,
-@@ -2563,6 +2565,10 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -2563,6 +2575,10 @@ func (d *Daemon) runTask(ctx context.Con
  		RequestingUserName:               task.RequestingUserName,
  		RequestingUserProfileDescription: task.RequestingUserProfileDescription,
  		WorkspaceContext:                 task.WorkspaceContext,

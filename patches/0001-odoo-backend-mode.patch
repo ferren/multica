@@ -256,25 +256,25 @@ Index: b/server/internal/daemon/client.go
  // ReportUpdateResult sends the CLI update result back to the server.
  func (c *Client) ReportUpdateResult(ctx context.Context, runtimeID, updateID string, result map[string]any) error {
 -	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/update/%s/result", runtimeID, updateID), result, nil)
-+	return c.postJSON(ctx, fmt.Sprintf("%%s/daemon/runtimes/%%s/update/%%s/result", c.pathPrefix, runtimeID, updateID), result, nil)
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/update/%s/result", c.pathPrefix, runtimeID, updateID), result, nil)
  }
  
  // ReportModelListResult sends the model-discovery result back to the server.
  func (c *Client) ReportModelListResult(ctx context.Context, runtimeID, requestID string, result map[string]any) error {
 -	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/models/%s/result", runtimeID, requestID), result, nil)
-+	return c.postJSON(ctx, fmt.Sprintf("%%s/daemon/runtimes/%%s/models/%%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/models/%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
  }
  
  // ReportLocalSkillListResult sends the runtime-local-skill inventory back to the server.
  func (c *Client) ReportLocalSkillListResult(ctx context.Context, runtimeID, requestID string, result map[string]any) error {
 -	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/local-skills/%s/result", runtimeID, requestID), result, nil)
-+	return c.postJSON(ctx, fmt.Sprintf("%%s/daemon/runtimes/%%s/local-skills/%%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/local-skills/%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
  }
  
  // ReportLocalSkillImportResult sends a runtime-local-skill bundle back to the server.
  func (c *Client) ReportLocalSkillImportResult(ctx context.Context, runtimeID, requestID string, result map[string]any) error {
 -	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/local-skills/import/%s/result", runtimeID, requestID), result, nil)
-+	return c.postJSON(ctx, fmt.Sprintf("%%s/daemon/runtimes/%%s/local-skills/import/%%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/local-skills/import/%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
  }
  
  // WorkspaceInfo holds minimal workspace metadata returned by the API.

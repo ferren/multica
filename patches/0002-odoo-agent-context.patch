@@ -10,7 +10,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  	d := &Daemon{
  		cfg:                       cfg,
-@@ -737,6 +736,17 @@ func (d *Daemon) resolveAuth() error {
+@@ -729,6 +728,17 @@ func (d *Daemon) resolveAuth() error {
  		accessToken, _ := d.client.OdooCredentials()
  		d.logger.Info("authenticated (Odoo mode)", "expires_in", d.client.expiresIn, "db", d.cfg.DBName)
  		_ = accessToken
@@ -28,7 +28,7 @@ Index: multica/server/internal/daemon/daemon.go
  		return nil
  	}
  
-@@ -1251,6 +1261,7 @@ func (d *Daemon) syncWorkspacesFromAPI(c
+@@ -1326,6 +1336,7 @@ func (d *Daemon) syncWorkspacesFromAPI(c
  				d.workspaces[id] = newWorkspaceState(id, runtimeIDs, "", nil, nil)
  				d.mu.Unlock()
  				d.logger.Info("watching workspace (Odoo mode)", "workspace_id", id, "name", name, "runtime_id", ws.RuntimeID, "provider", rt.Provider)
@@ -36,7 +36,7 @@ Index: multica/server/internal/daemon/daemon.go
  				registered++
  				continue
  			}
-@@ -2540,6 +2551,7 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -2615,6 +2626,7 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
@@ -44,7 +44,7 @@ Index: multica/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:                          task.IssueID,
  		TriggerCommentID:                 task.TriggerCommentID,
-@@ -2563,6 +2575,10 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -2638,6 +2650,10 @@ func (d *Daemon) runTask(ctx context.Con
  		RequestingUserName:               task.RequestingUserName,
  		RequestingUserProfileDescription: task.RequestingUserProfileDescription,
  		WorkspaceContext:                 task.WorkspaceContext,

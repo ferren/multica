@@ -1,64 +1,30 @@
-Index: b/server/internal/daemon/daemon.go
+Index: multica/server/internal/daemon/daemon.go
 ===================================================================
---- a/server/internal/daemon/daemon.go
-+++ b/server/internal/daemon/daemon.go
-@@ -164,7 +164,6 @@ func New(cfg Config, logger *slog.Logger
- 	// When using Odoo backend, switch the path prefix from /api to /multica.
- 	if cfg.BackendMode == "odoo" {
- 		client.SetPathPrefix("/multica")
--		client.SetOnTokenError(func() { logger.Warn("odoo access_token rejected, refresh recommended") })
- 	}
- 	d := &Daemon{
- 		cfg:                       cfg,
-@@ -729,6 +728,17 @@ func (d *Daemon) resolveAuth() error {
- 		accessToken, _ := d.client.OdooCredentials()
- 		d.logger.Info("authenticated (Odoo mode)", "expires_in", d.client.expiresIn, "db", d.cfg.DBName)
- 		_ = accessToken
-+
-+		// Set up on-error callback to refresh token on 401
-+		d.client.SetOnTokenError(func() {
-+			refreshCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-+			defer cancel()
-+			if err := d.client.FetchOdooToken(refreshCtx, appID, appSecret, d.cfg.DBName); err != nil {
-+				d.logger.Warn("odoo token refresh on 401 failed", "error", err)
-+			} else {
-+				d.logger.Info("odoo token refreshed on 401")
-+			}
-+		})
- 		return nil
- 	}
- 
-@@ -1340,6 +1350,7 @@ func (d *Daemon) syncWorkspacesFromAPI(c
- 				d.workspaces[id] = newWorkspaceState(id, runtimeIDs, "", nil, nil)
- 				d.mu.Unlock()
- 				d.logger.Info("watching workspace (Odoo mode)", "workspace_id", id, "name", name, "runtime_id", ws.RuntimeID, "provider", rt.Provider)
-+					d.notifyRuntimeSetChanged()
- 				registered++
- 				continue
- 			}
-@@ -2629,6 +2640,7 @@ func (d *Daemon) runTask(ctx context.Con
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -2645,6 +2645,7 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
-+		accessToken, apiKey := d.client.OdooCredentials()
++	accessToken, apiKey := d.client.OdooCredentials()
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:                          task.IssueID,
  		TriggerCommentID:                 task.TriggerCommentID,
-@@ -2652,6 +2664,10 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -2668,6 +2669,10 @@ func (d *Daemon) runTask(ctx context.Con
  		RequestingUserName:               task.RequestingUserName,
  		RequestingUserProfileDescription: task.RequestingUserProfileDescription,
  		WorkspaceContext:                 task.WorkspaceContext,
-+			BackendMode:                      d.cfg.BackendMode,
-+			OdooURL:                          d.cfg.ServerBaseURL,
-+			OdooAccessToken:                  accessToken,
-+			OdooAPIKey:                       apiKey,
++		BackendMode:                      d.cfg.BackendMode,
++		OdooURL:                          d.cfg.ServerBaseURL,
++		OdooAccessToken:                  accessToken,
++		OdooAPIKey:                       apiKey,
  	}
- 
+
  	// Mark candidate env roots as active before any env work so the GC loop
-Index: b/server/internal/daemon/execenv/execenv.go
+Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
---- a/server/internal/daemon/execenv/execenv.go
-+++ b/server/internal/daemon/execenv/execenv.go
+--- multica.orig/server/internal/daemon/execenv/execenv.go
++++ multica/server/internal/daemon/execenv/execenv.go
 @@ -84,6 +84,10 @@ type TaskContextForEnv struct {
  	// context and the agent stays anonymous-user mode.
  	RequestingUserName               string
@@ -68,53 +34,18 @@ Index: b/server/internal/daemon/execenv/execenv.go
 +	OdooAccessToken  string // daemon OpenAPI access token
 +	OdooAPIKey       string // daemon OpenAPI API key
  }
- 
+
  // SkillContextForEnv represents a skill to be written into the execution environment.
-Index: b/server/internal/daemon/execenv/runtime_config.go
+Index: multica/server/internal/daemon/execenv/runtime_config.go
 ===================================================================
---- a/server/internal/daemon/execenv/runtime_config.go
-+++ b/server/internal/daemon/execenv/runtime_config.go
-@@ -35,7 +35,7 @@ func sanitizeNameForBriefMarkdown(name s
- 			if !prevSpace && b.Len() > 0 {
- 				b.WriteByte(' ')
- 				prevSpace = true
--			}
-+		}
- 		case r < 0x20 || r == 0x7f:
- 			continue
- 		case r == '*' || r == '_' || r == '`' || r == '\\' || r == '[' || r == ']' || r == '<':
-@@ -130,7 +130,7 @@ func buildMetaSkillContent(provider stri
- 			fmt.Fprintf(&b, "**You are: %s**", ctx.AgentName)
- 			if ctx.AgentID != "" {
- 				fmt.Fprintf(&b, " (ID: `%s`)", ctx.AgentID)
--			}
-+		}
- 			b.WriteString("\n\n")
- 		}
- 		if ctx.AgentInstructions != "" {
-@@ -252,7 +252,7 @@ func buildMetaSkillContent(provider stri
- 				fmt.Fprintf(&b, "- %s — %s\n", repo.URL, repo.Description)
- 			} else {
- 				fmt.Fprintf(&b, "- %s\n", repo.URL)
--			}
-+		}
- 		}
- 		b.WriteString("\nThe checkout command creates a git worktree with a dedicated branch. You can check out one or more repos as needed, and can pass `--ref` for review/QA on a non-default branch or commit.\n\n")
- 	}
-@@ -269,7 +269,7 @@ func buildMetaSkillContent(provider stri
- 			b.WriteString("Project resources (also written to `.multica/project/resources.json`):\n\n")
- 			for _, r := range ctx.ProjectResources {
- 				fmt.Fprintf(&b, "- %s\n", formatProjectResource(r))
--			}
-+		}
- 			b.WriteString("\nResources are pointers — open them only when relevant to the task. ")
- 			b.WriteString("For `github_repo` resources, use `multica repo checkout <url>` to fetch the code. Add `--ref <branch-or-sha>` when a task or handoff names an exact revision.\n\n")
- 		} else {
-@@ -469,7 +469,71 @@ func buildMetaSkillContent(provider stri
+--- multica.orig/server/internal/daemon/execenv/runtime_config.go
++++ multica/server/internal/daemon/execenv/runtime_config.go
+@@ -469,7 +469,34 @@ func buildMetaSkillContent(provider stri
  		b.WriteString("Good: \"Fixed the login redirect. PR: https://...\"\n")
  		b.WriteString("Bad: \"1. Read the issue 2. Found the bug in auth.go 3. Created branch 4. ...\"\n")
  		b.WriteString("When referencing an issue in a comment, use the issue mention format `[MUL-123](mention://issue/<issue-id>)` so it renders as a clickable link. (Issue mentions have no side effect; only member/agent mentions do — see the Mentions section above.)\n")
-+		}
+-	}
++	}
 +	// Odoo backend: append Odoo-specific REST API context
 +	if ctx.BackendMode == "odoo" {
 +		b.WriteString("\n## Odoo Backend\n\n")
@@ -141,44 +72,7 @@ Index: b/server/internal/daemon/execenv/runtime_config.go
 +		b.WriteString("2. Work in current directory for file operations\n")
 +		b.WriteString("3. Output a clear summary at the end\n")
 +		b.WriteString("4. Odoo task status values: Backlog, Todo, In Progress, In Review, Done\n")
- 	}
++	}
  
  	return b.String()
  }
-+
-+func buildOdooMetaSkillContent(provider string, ctx TaskContextForEnv) string {
-+	var b strings.Builder
-+	b.WriteString("# Odoo Agent Runtime\n\n")
-+	b.WriteString("You are an AI coding agent in **Odoo via inair_multica**. Use the REST APIs below.\n\n")
-+	if ctx.AgentName != "" {
-+		fmt.Fprintf(&b, "**You are: %s**\n\n", ctx.AgentName)
-+	}
-+	if ctx.AgentInstructions != "" {
-+		b.WriteString(ctx.AgentInstructions)
-+		b.WriteString("\n\n")
-+	}
-+	b.WriteString("## API Credentials\n")
-+	if ctx.OdooAccessToken != "" {
-+		fmt.Fprintf(&b, "X-GALAXY-ACCESS-TOKEN: Bearer %s\n", ctx.OdooAccessToken)
-+	}
-+	if ctx.OdooAPIKey != "" {
-+		fmt.Fprintf(&b, "X-GALAXY-API-KEY: %s\n", ctx.OdooAPIKey)
-+	}
-+	if ctx.OdooURL != "" {
-+		fmt.Fprintf(&b, "Base URL: %s\n\n", ctx.OdooURL)
-+	}
-+	b.WriteString("## APIs\n\n")
-+	if ctx.OdooURL != "" && ctx.OdooAccessToken != "" {
-+		fmt.Fprintf(&b, "List:   curl -s -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' %s/multica/agent/issues\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
-+		fmt.Fprintf(&b, "Create: curl -s -X POST -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -d '{\"title\":\"...\"}' %s/multica/agent/issues\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
-+		fmt.Fprintf(&b, "Get:    curl -s -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' %s/multica/agent/issues/<id>\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
-+		fmt.Fprintf(&b, "Update: curl -s -X PATCH -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -d '{\"status\":\"Done\"}' %s/multica/agent/issues/<id>\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
-+		fmt.Fprintf(&b, "Comment:curl -s -X POST -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -d '{\"body\":\"...\"}' %s/multica/agent/issues/<id>/comments\n\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
-+	}
-+	b.WriteString("## Rules\n")
-+	b.WriteString("1. Use the REST APIs above — no multica CLI\n")
-+	b.WriteString("2. Work in current directory for file ops\n")
-+	b.WriteString("3. Output a clear summary — posted to Odoo\n")
-+	b.WriteString("4. Status values: Backlog, Todo, In Progress, In Review, Done\n")
-+	return b.String()
-+}

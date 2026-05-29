@@ -19,7 +19,7 @@ Index: multica/server/internal/daemon/daemon.go
 +		OdooAccessToken:                  accessToken,
 +		OdooAPIKey:                       apiKey,
  	}
-
+ 
  	// Mark candidate env roots as active before any env work so the GC loop
 Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
@@ -34,18 +34,16 @@ Index: multica/server/internal/daemon/execenv/execenv.go
 +	OdooAccessToken  string // daemon OpenAPI access token
 +	OdooAPIKey       string // daemon OpenAPI API key
  }
-
+ 
  // SkillContextForEnv represents a skill to be written into the execution environment.
 Index: multica/server/internal/daemon/execenv/runtime_config.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config.go
 +++ multica/server/internal/daemon/execenv/runtime_config.go
-@@ -469,7 +469,34 @@ func buildMetaSkillContent(provider stri
- 		b.WriteString("Good: \"Fixed the login redirect. PR: https://...\"\n")
+@@ -470,6 +470,33 @@ func buildMetaSkillContent(provider stri
  		b.WriteString("Bad: \"1. Read the issue 2. Found the bug in auth.go 3. Created branch 4. ...\"\n")
  		b.WriteString("When referencing an issue in a comment, use the issue mention format `[MUL-123](mention://issue/<issue-id>)` so it renders as a clickable link. (Issue mentions have no side effect; only member/agent mentions do — see the Mentions section above.)\n")
--	}
-+	}
+ 	}
 +	// Odoo backend: append Odoo-specific REST API context
 +	if ctx.BackendMode == "odoo" {
 +		b.WriteString("\n## Odoo Backend\n\n")

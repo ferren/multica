@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -2645,6 +2645,7 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -2662,6 +2662,7 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
@@ -10,7 +10,7 @@ Index: multica/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:                          task.IssueID,
  		TriggerCommentID:                 task.TriggerCommentID,
-@@ -2668,6 +2669,10 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -2687,6 +2688,10 @@ func (d *Daemon) runTask(ctx context.Con
  		RequestingUserName:               task.RequestingUserName,
  		RequestingUserProfileDescription: task.RequestingUserProfileDescription,
  		WorkspaceContext:                 task.WorkspaceContext,
@@ -25,7 +25,7 @@ Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
 +++ multica/server/internal/daemon/execenv/execenv.go
-@@ -84,6 +84,10 @@ type TaskContextForEnv struct {
+@@ -91,6 +91,10 @@ type TaskContextForEnv struct {
  	// context and the agent stays anonymous-user mode.
  	RequestingUserName               string
  	RequestingUserProfileDescription string
@@ -40,7 +40,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config.go
 +++ multica/server/internal/daemon/execenv/runtime_config.go
-@@ -470,6 +470,33 @@ func buildMetaSkillContent(provider stri
+@@ -699,6 +699,33 @@ func buildMetaSkillContent(provider stri
  		b.WriteString("Bad: \"1. Read the issue 2. Found the bug in auth.go 3. Created branch 4. ...\"\n")
  		b.WriteString("When referencing an issue in a comment, use the issue mention format `[MUL-123](mention://issue/<issue-id>)` so it renders as a clickable link. (Issue mentions have no side effect; only member/agent mentions do — see the Mentions section above.)\n")
  	}

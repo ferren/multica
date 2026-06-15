@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -2662,6 +2662,7 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -2833,6 +2833,7 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
@@ -10,9 +10,9 @@ Index: multica/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:                          task.IssueID,
  		TriggerCommentID:                 task.TriggerCommentID,
-@@ -2687,6 +2688,10 @@ func (d *Daemon) runTask(ctx context.Con
- 		RequestingUserName:               task.RequestingUserName,
- 		RequestingUserProfileDescription: task.RequestingUserProfileDescription,
+@@ -2864,6 +2865,10 @@ func (d *Daemon) runTask(ctx context.Con
+ 		InitiatorName:                    task.InitiatorName,
+ 		InitiatorEmail:                   task.InitiatorEmail,
  		WorkspaceContext:                 task.WorkspaceContext,
 +		BackendMode:                      d.cfg.BackendMode,
 +		OdooURL:                          d.cfg.ServerBaseURL,
@@ -25,22 +25,23 @@ Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
 +++ multica/server/internal/daemon/execenv/execenv.go
-@@ -91,6 +91,10 @@ type TaskContextForEnv struct {
+@@ -98,6 +98,11 @@ type TaskContextForEnv struct {
  	// context and the agent stays anonymous-user mode.
  	RequestingUserName               string
  	RequestingUserProfileDescription string
-+	BackendMode      string // "multica" (default) or "odoo"
-+	OdooURL          string // Odoo server base URL
-+	OdooAccessToken  string // daemon OpenAPI access token
-+	OdooAPIKey       string // daemon OpenAPI API key
- }
- 
- // SkillContextForEnv represents a skill to be written into the execution environment.
++	// Odoo backend mode fields (only populated when BackendMode == "odoo").
++	BackendMode     string // "multica" (default) or "odoo"
++	OdooURL         string // Odoo server base URL
++	OdooAccessToken string // daemon OpenAPI access token
++	OdooAPIKey      string // daemon OpenAPI API key
+ 	// Initiator* identify the actor who triggered THIS task (the real
+ 	// requester) as distinct from the runtime owner. Rendered into the brief
+ 	// as `## Task Initiator` when a name is present; InitiatorEmail is shown
 Index: multica/server/internal/daemon/execenv/runtime_config.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config.go
 +++ multica/server/internal/daemon/execenv/runtime_config.go
-@@ -699,6 +699,33 @@ func buildMetaSkillContent(provider stri
+@@ -772,6 +772,33 @@ func buildMetaSkillContent(provider stri
  		b.WriteString("Bad: \"1. Read the issue 2. Found the bug in auth.go 3. Created branch 4. ...\"\n")
  		b.WriteString("When referencing an issue in a comment, use the issue mention format `[MUL-123](mention://issue/<issue-id>)` so it renders as a clickable link. (Issue mentions have no side effect; only member/agent mentions do — see the Mentions section above.)\n")
  	}

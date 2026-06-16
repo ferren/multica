@@ -41,7 +41,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config.go
 +++ multica/server/internal/daemon/execenv/runtime_config.go
-@@ -772,6 +772,33 @@ func buildMetaSkillContent(provider stri
+@@ -772,6 +772,34 @@ func buildMetaSkillContent(provider stri
  		b.WriteString("Bad: \"1. Read the issue 2. Found the bug in auth.go 3. Created branch 4. ...\"\n")
  		b.WriteString("When referencing an issue in a comment, use the issue mention format `[MUL-123](mention://issue/<issue-id>)` so it renders as a clickable link. (Issue mentions have no side effect; only member/agent mentions do — see the Mentions section above.)\n")
  	}
@@ -71,6 +71,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config.go
 +		b.WriteString("2. Work in current directory for file operations\n")
 +		b.WriteString("3. Output a clear summary at the end\n")
 +		b.WriteString("4. Odoo task status values: Backlog, Todo, In Progress, In Review, Done\n")
++		b.WriteString("5. Issue lifecycle — PATCH the issue status via the Update API above: BEFORE you begin work, set status to \"In Progress\"; WHEN finished, set \"In Review\" (work done, awaiting acceptance), or \"Done\" if fully complete, or \"Blocked\" if you cannot proceed. Skip this step only if your Agent Identity forbids issue status changes.\n")
 +	}
  
  	return b.String()

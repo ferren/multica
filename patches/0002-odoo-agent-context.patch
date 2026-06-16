@@ -60,11 +60,11 @@ Index: multica/server/internal/daemon/execenv/runtime_config.go
 +		}
 +		b.WriteString("\n### REST APIs\n\n")
 +		if ctx.OdooURL != "" && ctx.OdooAccessToken != "" {
-+			fmt.Fprintf(&b, "- List:   `curl -s -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' %s/multica/agent/issues`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
-+			fmt.Fprintf(&b, "- Create: `curl -s -X POST -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -d '{\"title\":\"...\"}' %s/multica/agent/issues`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
-+			fmt.Fprintf(&b, "- Get:    `curl -s -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' %s/multica/agent/issues/<id>`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
-+			fmt.Fprintf(&b, "- Update: `curl -s -X PATCH -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -d '{\"status\":\"Done\"}' %s/multica/agent/issues/<id>`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
-+			fmt.Fprintf(&b, "- Comment:`curl -s -X POST -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -d '{\"body\":\"...\"}' %s/multica/agent/issues/<id>/comments`\n\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
++			fmt.Fprintf(&b, "- List:   `curl -s -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -H 'X-MULTICA-AGENT-ID: %s' %s/multica/agent/issues`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.AgentID, ctx.OdooURL)
++			fmt.Fprintf(&b, "- Create: `curl -s -X POST -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -H 'X-MULTICA-AGENT-ID: %s' -d '{\"title\":\"...\"}' %s/multica/agent/issues`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.AgentID, ctx.OdooURL)
++			fmt.Fprintf(&b, "- Get:    `curl -s -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -H 'X-MULTICA-AGENT-ID: %s' %s/multica/agent/issues/<id>`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.AgentID, ctx.OdooURL)
++			fmt.Fprintf(&b, "- Update: `curl -s -X PATCH -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -H 'X-MULTICA-AGENT-ID: %s' -d '{\"status\":\"Done\"}' %s/multica/agent/issues/<id>`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.AgentID, ctx.OdooURL)
++			fmt.Fprintf(&b, "- Comment:`curl -s -X POST -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -H 'X-MULTICA-AGENT-ID: %s' -d '{\"body\":\"...\"}' %s/multica/agent/issues/<id>/comments`\n\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.AgentID, ctx.OdooURL)
 +		}
 +		b.WriteString("### Rules\n")
 +		b.WriteString("1. Use the REST APIs above for issue/comment operations — no multica CLI for these\n")

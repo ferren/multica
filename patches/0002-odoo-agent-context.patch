@@ -21,6 +21,48 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  
  	// Mark candidate env roots as active before any env work so the GC loop
+@@ -3517,10 +3522,25 @@ func (d *Daemon) runTask(ctx context.Con
+ 	// MULTICA_TOKEN is bound to (agent, task) by the server. Never fall back
+ 	// to the daemon's own credential here: doing so lets agent CLI writes land
+ 	// as the runtime owner's member actor and can retrigger the same agent.
+-	agentToken, err := taskScopedAuthToken(task)
+-	if err != nil {
+-		taskLog.Error("task auth token invalid; refusing to start agent", "error", err)
+-		return TaskResult{}, err
++	var agentToken string
++	if d.cfg.BackendMode == "odoo" {
++		// Odoo backend mode: the agent authenticates to Odoo via the Galaxy
++		// headers injected into its runtime brief (see execenv runtime_config),
++		// not via a task-scoped mat_ token — Odoo does not mint mat_ tokens.
++		// Restore the pre-MUL-3292 fallback to the daemon's own credential so
++		// MULTICA_TOKEN is still populated for daemon-local CLI calls. Cross-agent
++		// attribution here relies on per-task X-MULTICA-AGENT-ID, not token scope.
++		agentToken = strings.TrimSpace(task.AuthToken)
++		if agentToken == "" {
++			agentToken = d.client.Token()
++		}
++	} else {
++		tok, err := taskScopedAuthToken(task)
++		if err != nil {
++			taskLog.Error("task auth token invalid; refusing to start agent", "error", err)
++			return TaskResult{}, err
++		}
++		agentToken = tok
+ 	}
+ 	agentEnv := map[string]string{
+ 		"MULTICA_TOKEN":        agentToken,
+@@ -3532,6 +3552,11 @@ func (d *Daemon) runTask(ctx context.Con
+ 		"MULTICA_TASK_ID":      task.ID,
+ 		"MULTICA_TASK_SLOT":    strconv.Itoa(slot),
+ 	}
++	if d.cfg.BackendMode == "odoo" {
++		// Signals the agent CLI to skip the task-scoped mat_ token requirement
++		// (Odoo auths via Galaxy headers, see newAPIClient / runtime brief).
++		agentEnv["MULTICA_BACKEND_MODE"] = "odoo"
++	}
+ 	if task.AutopilotRunID != "" {
+ 		agentEnv["MULTICA_AUTOPILOT_RUN_ID"] = task.AutopilotRunID
+ 	}
 Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
@@ -76,3 +118,19 @@ Index: multica/server/internal/daemon/execenv/runtime_config.go
  
  	return b.String()
  }
+Index: multica/server/cmd/multica/cmd_agent.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_agent.go
++++ multica/server/cmd/multica/cmd_agent.go
+@@ -249,7 +249,10 @@ func newAPIClient(cmd *cobra.Command) (*
+ 	if serverURL == "" {
+ 		return nil, fmt.Errorf("server URL not set: use --server-url flag, MULTICA_SERVER_URL env, or 'multica config set server_url <url>'")
+ 	}
+-	if inAgentExecutionContext() && !strings.HasPrefix(token, "mat_") {
++	// Odoo backend mode does not mint mat_ tokens; the agent authenticates to
++	// Odoo via Galaxy headers, so the task-scoped token requirement is bypassed.
++	if inAgentExecutionContext() && os.Getenv("MULTICA_BACKEND_MODE") != "odoo" &&
++		!strings.HasPrefix(token, "mat_") {
+ 		return nil, fmt.Errorf("agent execution context requires MULTICA_TOKEN to be a task-scoped mat_ token")
+ 	}
+ 

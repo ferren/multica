@@ -83,7 +83,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config.go
 +++ multica/server/internal/daemon/execenv/runtime_config.go
-@@ -792,6 +792,46 @@ func buildMetaSkillContent(provider stri
+@@ -794,6 +794,46 @@ func buildMetaSkillContent(provider stri
  		b.WriteString("Bad: \"1. Read the issue 2. Found the bug in auth.go 3. Created branch 4. ...\"\n")
  		b.WriteString("When referencing an issue in a comment, use the issue mention format `[MUL-123](mention://issue/<issue-id>)` so it renders as a clickable link. (Issue mentions have no side effect; only member/agent mentions do — see the Mentions section above.)\n")
  	}

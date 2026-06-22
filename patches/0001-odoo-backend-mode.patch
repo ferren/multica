@@ -784,19 +784,37 @@ Index: multica/server/internal/daemon/daemon.go
  		resp, profileSig, err := d.registerRuntimesForWorkspace(ctx, id)
  		if err != nil {
  			d.logger.Error("failed to register runtimes", "workspace_id", id, "name", name, "error", err)
-@@ -1907,6 +2087,11 @@ func (d *Daemon) handleHeartbeatActions(
- 	if resp.PendingLocalSkills != nil {
- 		if rt := d.findRuntime(runtimeID); rt != nil {
- 			go d.handleLocalSkillList(ctx, *rt, resp.PendingLocalSkills.ID)
-+			if resp.PendingRestart {
-+				d.logger.Info("restart requested by server")
-+				d.triggerRestart()
-+				return
-+			}
+@@ -1887,13 +2067,14 @@ func (d *Daemon) handleHeartbeatActions(
+ 	if resp == nil {
+ 		return
+ 	}
+-	if resp.PendingUpdate != nil || resp.PendingModelList != nil || resp.PendingLocalSkills != nil || resp.PendingLocalSkillImport != nil {
++	if resp.PendingUpdate != nil || resp.PendingModelList != nil || resp.PendingLocalSkills != nil || resp.PendingLocalSkillImport != nil || resp.PendingRestart {
+ 		d.logger.Debug("heartbeat: pending actions",
+ 			"runtime_id", runtimeID,
+ 			"update", resp.PendingUpdate != nil,
+ 			"model_list", resp.PendingModelList != nil,
+ 			"local_skills", resp.PendingLocalSkills != nil,
+ 			"local_skill_import", resp.PendingLocalSkillImport != nil,
++			"restart", resp.PendingRestart,
+ 		)
+ 	}
+ 	if resp.PendingUpdate != nil {
+@@ -1921,6 +2102,13 @@ func (d *Daemon) handleHeartbeatActions(
+ 			go d.handleLocalSkillImport(ctx, *rt, *resp.PendingLocalSkillImport)
  		}
  	}
- 	// Prefer the batch field (new backend); fall back to singular (old backend).
-@@ -3458,7 +3643,7 @@ func (d *Daemon) runTask(ctx context.Con
++	// Server-requested restart is independent of any other pending action:
++	// dispatch the work above (goroutines) first, then take the process down.
++	if resp.PendingRestart {
++		d.logger.Info("restart requested by server")
++		d.triggerRestart()
++		return
++	}
+ }
+ 
+ // handleModelList resolves the provider's supported models (via static
+@@ -3458,7 +3646,7 @@ func (d *Daemon) runTask(ctx context.Con
  	if task.Agent != nil && task.Agent.Model != "" {
  		model = task.Agent.Model
  	}

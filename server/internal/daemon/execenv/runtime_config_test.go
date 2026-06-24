@@ -50,6 +50,12 @@ func TestSubIssueCreationSectionPresentForIssueRuns(t *testing.T) {
 				"`multica issue status <child-id> todo`",
 				"all `--status todo`",
 				"`--status backlog` from the start",
+				// Stage guidance must reach the always-on brief so agents
+				// reach for stages instead of only the manual backlog chain
+				// (MUL-3508 follow-up).
+				"**Ordering with stages.**",
+				"`--stage <N>`",
+				"`multica issue children <id>`",
 			} {
 				if !strings.Contains(out, want) {
 					t.Errorf("[%s] section missing %q", tc.name, want)
@@ -530,7 +536,7 @@ func TestSubIssueCreationSectionSkippedForNonIssueModes(t *testing.T) {
 }
 
 // writeRuntimeConfigFile is the safe replacement for the previous
-// unconditional os.WriteFile of CLAUDE.md / AGENTS.md / GEMINI.md. The three
+// unconditional os.WriteFile of CLAUDE.md / AGENTS.md. The two
 // states it must handle correctly are: file missing, file present without
 // markers (user-authored content already there — the regression case from
 // MUL-2753), and file present with markers (idempotent second-run replace).
@@ -693,7 +699,6 @@ func TestInjectRuntimeConfigPreservesUserContent(t *testing.T) {
 		{"kimi", "AGENTS.md"},
 		{"kiro", "AGENTS.md"},
 		{"antigravity", "AGENTS.md"},
-		{"gemini", "GEMINI.md"},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -736,7 +741,7 @@ func TestInjectRuntimeConfigUnknownProviderSkipsWrite(t *testing.T) {
 	dir := t.TempDir()
 	// Seed all three candidate filenames so we can verify none of them get
 	// written when the provider is unknown.
-	for _, name := range []string{"CLAUDE.md", "AGENTS.md", "GEMINI.md"} {
+	for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("untouched\n"), 0o644); err != nil {
 			t.Fatalf("seed %s: %v", name, err)
 		}
@@ -747,7 +752,7 @@ func TestInjectRuntimeConfigUnknownProviderSkipsWrite(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("InjectRuntimeConfig: %v", err)
 	}
-	for _, name := range []string{"CLAUDE.md", "AGENTS.md", "GEMINI.md"} {
+	for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
 		got, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -904,7 +909,7 @@ func TestCleanupRuntimeConfigPreservesUserContent(t *testing.T) {
 
 // Cleanup removes the file entirely when the marker block was the only
 // content — i.e. we created the file from scratch in a directory that had
-// no pre-existing CLAUDE.md / AGENTS.md / GEMINI.md.
+// no pre-existing CLAUDE.md / AGENTS.md.
 func TestCleanupRuntimeConfigRemovesFileWhenOnlyBlockRemained(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -969,7 +974,7 @@ func TestCleanupRuntimeConfigNoOpCases(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		// Seed every candidate filename to verify none of them get touched.
-		for _, name := range []string{"CLAUDE.md", "AGENTS.md", "GEMINI.md"} {
+		for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
 			if err := os.WriteFile(filepath.Join(dir, name), []byte("untouched\n"), 0o644); err != nil {
 				t.Fatalf("seed %s: %v", name, err)
 			}
@@ -977,7 +982,7 @@ func TestCleanupRuntimeConfigNoOpCases(t *testing.T) {
 		if err := CleanupRuntimeConfig(dir, "totally-unknown-provider"); err != nil {
 			t.Errorf("unknown provider must be no-op, got: %v", err)
 		}
-		for _, name := range []string{"CLAUDE.md", "AGENTS.md", "GEMINI.md"} {
+		for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
 			got, err := os.ReadFile(filepath.Join(dir, name))
 			if err != nil {
 				t.Fatalf("read %s: %v", name, err)
@@ -1042,7 +1047,6 @@ func TestCleanupRuntimeConfigByProvider(t *testing.T) {
 		{"kimi", "AGENTS.md"},
 		{"kiro", "AGENTS.md"},
 		{"antigravity", "AGENTS.md"},
-		{"gemini", "GEMINI.md"},
 	}
 	for _, tc := range cases {
 		tc := tc

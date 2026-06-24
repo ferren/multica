@@ -149,9 +149,10 @@ func TestPrepareWithProjectResources(t *testing.T) {
 	workspacesRoot := t.TempDir()
 
 	taskCtx := TaskContextForEnv{
-		IssueID:      "11111111-2222-3333-4444-555555555555",
-		ProjectID:    "22222222-3333-4444-5555-666666666666",
-		ProjectTitle: "Agent UX 2026",
+		IssueID:            "11111111-2222-3333-4444-555555555555",
+		ProjectID:          "22222222-3333-4444-5555-666666666666",
+		ProjectTitle:       "Agent UX 2026",
+		ProjectDescription: "Always write copy in British English. Ship behind a feature flag.",
 		ProjectResources: []ProjectResourceForEnv{
 			{
 				ID:           "33333333-4444-5555-6666-777777777777",
@@ -180,9 +181,10 @@ func TestPrepareWithProjectResources(t *testing.T) {
 		t.Fatalf("failed to read resources.json: %v", err)
 	}
 	var got struct {
-		ProjectID    string `json:"project_id"`
-		ProjectTitle string `json:"project_title"`
-		Resources    []struct {
+		ProjectID          string `json:"project_id"`
+		ProjectTitle       string `json:"project_title"`
+		ProjectDescription string `json:"project_description"`
+		Resources          []struct {
 			ID           string          `json:"id"`
 			ResourceType string          `json:"resource_type"`
 			ResourceRef  json.RawMessage `json:"resource_ref"`
@@ -196,6 +198,9 @@ func TestPrepareWithProjectResources(t *testing.T) {
 	}
 	if got.ProjectTitle != taskCtx.ProjectTitle {
 		t.Errorf("resources.json project_title = %q, want %q", got.ProjectTitle, taskCtx.ProjectTitle)
+	}
+	if got.ProjectDescription != taskCtx.ProjectDescription {
+		t.Errorf("resources.json project_description = %q, want %q", got.ProjectDescription, taskCtx.ProjectDescription)
 	}
 	if len(got.Resources) != 1 || got.Resources[0].ResourceType != "github_repo" {
 		t.Fatalf("resources.json resources mismatch: %+v", got.Resources)
@@ -213,6 +218,7 @@ func TestPrepareWithProjectResources(t *testing.T) {
 	for _, want := range []string{
 		"## Project Context",
 		"Agent UX 2026",
+		"Always write copy in British English. Ship behind a feature flag.",
 		"GitHub repo",
 		"https://github.com/multica-ai/multica",
 		"default branch: `main`",
@@ -811,7 +817,6 @@ func TestInjectRuntimeConfigBackgroundTaskSafetyProviderAgnostic(t *testing.T) {
 		{"claude", "CLAUDE.md"},
 		{"codex", "AGENTS.md"},
 		{"opencode", "AGENTS.md"},
-		{"gemini", "GEMINI.md"},
 		{"hermes", "AGENTS.md"},
 	}
 
@@ -906,44 +911,6 @@ func TestInjectRuntimeConfigAvailableCommandsCoreOnly(t *testing.T) {
 		if strings.Contains(s, banned) {
 			t.Errorf("AGENTS.md should not inject non-core command %q\n---\n%s", banned, s)
 		}
-	}
-}
-
-func TestInjectRuntimeConfigGemini(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	ctx := TaskContextForEnv{
-		IssueID:     "test-issue-id",
-		AgentSkills: []SkillContextForEnv{{Name: "Writing", Content: "Write clearly."}},
-	}
-
-	if _, err := InjectRuntimeConfig(dir, "gemini", ctx); err != nil {
-		t.Fatalf("InjectRuntimeConfig failed: %v", err)
-	}
-
-	content, err := os.ReadFile(filepath.Join(dir, "GEMINI.md"))
-	if err != nil {
-		t.Fatalf("failed to read GEMINI.md: %v", err)
-	}
-
-	s := string(content)
-	for _, want := range []string{
-		"Multica Agent Runtime",
-		"multica issue get",
-		"Writing",
-	} {
-		if !strings.Contains(s, want) {
-			t.Errorf("GEMINI.md missing %q", want)
-		}
-	}
-
-	// Should not write CLAUDE.md or AGENTS.md for gemini provider.
-	if _, err := os.Stat(filepath.Join(dir, "CLAUDE.md")); !os.IsNotExist(err) {
-		t.Error("gemini provider should not create CLAUDE.md")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "AGENTS.md")); !os.IsNotExist(err) {
-		t.Error("gemini provider should not create AGENTS.md")
 	}
 }
 
@@ -1267,6 +1234,33 @@ func TestWriteContextFilesKiroNativeSkills(t *testing.T) {
 	}
 }
 
+func TestWriteContextFilesQoderNativeSkills(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ctx := TaskContextForEnv{
+		IssueID: "qoder-skill-test",
+		AgentSkills: []SkillContextForEnv{
+			{Name: "Go Conventions", Content: "Follow Go conventions."},
+		},
+	}
+
+	if err := writeContextFiles(dir, "qoder", ctx, nil); err != nil {
+		t.Fatalf("writeContextFiles failed: %v", err)
+	}
+
+	skillMd, err := os.ReadFile(filepath.Join(dir, ".qoder", "skills", "go-conventions", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("failed to read .qoder/skills/go-conventions/SKILL.md: %v", err)
+	}
+	if !strings.Contains(string(skillMd), "Follow Go conventions.") {
+		t.Error("SKILL.md missing content")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agent_context", "skills")); !os.IsNotExist(err) {
+		t.Error("expected .agent_context/skills/ to NOT exist for Qoder provider")
+	}
+}
+
 func TestInjectRuntimeConfigOpencode(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -1313,6 +1307,36 @@ func TestInjectRuntimeConfigKiro(t *testing.T) {
 	}
 
 	if _, err := InjectRuntimeConfig(dir, "kiro", ctx); err != nil {
+		t.Fatalf("InjectRuntimeConfig failed: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("failed to read AGENTS.md: %v", err)
+	}
+
+	s := string(content)
+	if !strings.Contains(s, "Multica Agent Runtime") {
+		t.Error("AGENTS.md missing meta skill header")
+	}
+	if !strings.Contains(s, "Coding") {
+		t.Error("AGENTS.md missing skill name")
+	}
+	if !strings.Contains(s, "discovered automatically") {
+		t.Error("AGENTS.md missing native skill discovery hint")
+	}
+}
+
+func TestInjectRuntimeConfigQoder(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ctx := TaskContextForEnv{
+		IssueID:     "test-issue-id",
+		AgentSkills: []SkillContextForEnv{{Name: "Coding", Content: "Write good code."}},
+	}
+
+	if _, err := InjectRuntimeConfig(dir, "qoder", ctx); err != nil {
 		t.Fatalf("InjectRuntimeConfig failed: %v", err)
 	}
 
@@ -1530,7 +1554,7 @@ func TestInjectRuntimeConfigCommentGuardrailIsProviderAgnostic(t *testing.T) {
 	t.Cleanup(func() { runtimeGOOS = saved })
 
 	for _, host := range []string{"linux", "darwin", "windows"} {
-		for _, provider := range []string{"claude", "opencode", "openclaw", "hermes", "kimi", "kiro", "cursor", "gemini"} {
+		for _, provider := range []string{"claude", "opencode", "openclaw", "hermes", "kimi", "kiro", "cursor"} {
 			t.Run(provider+"/"+host, func(t *testing.T) {
 				runtimeGOOS = host
 				dir := t.TempDir()
@@ -1541,9 +1565,6 @@ func TestInjectRuntimeConfigCommentGuardrailIsProviderAgnostic(t *testing.T) {
 				configFile := "CLAUDE.md"
 				if provider != "claude" {
 					configFile = "AGENTS.md"
-				}
-				if provider == "gemini" {
-					configFile = "GEMINI.md"
 				}
 				data, err := os.ReadFile(filepath.Join(dir, configFile))
 				if err != nil {

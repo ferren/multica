@@ -1,0 +1,125 @@
+Index: multica/server/internal/cli/client.go
+===================================================================
+--- multica.orig/server/internal/cli/client.go
++++ multica/server/internal/cli/client.go
+@@ -48,6 +48,7 @@ func normalizeGOOS(goos string) string {
+ // automatically include auth and execution context headers when configured.
+ type APIClient struct {
+ 	BaseURL     string
++	PathPrefix  string // replaces the native "/api" prefix; "/multica/agent" for Odoo backend
+ 	WorkspaceID string
+ 	Token       string
+ 	AgentID     string // When set, requests are attributed to this agent instead of the user.
+@@ -153,12 +154,30 @@ func APIContext(parent context.Context)
+ 
+ // NewAPIClient creates a new API client for ctrl commands.
+ func NewAPIClient(baseURL, workspaceID, token string) *APIClient {
+-	return &APIClient{
++	c := &APIClient{
+ 		BaseURL:     strings.TrimRight(baseURL, "/"),
+ 		WorkspaceID: workspaceID,
+ 		Token:       token,
+ 		HTTPClient:  &http.Client{Timeout: httpTimeout()},
+ 	}
++	// Odoo backend mode serves the agent API under /multica/agent instead of
++	// the native /api; rewrite the hardcoded /api prefix so CLI subcommands
++	// (squad, issue, project, agent, skill, autopilot, ...) reach the Odoo
++	// controllers. Native mode leaves PathPrefix empty (no rewrite).
++	if os.Getenv("MULTICA_BACKEND_MODE") == "odoo" {
++		c.PathPrefix = "/multica/agent"
++	}
++	return c
++}
++
++// url builds the absolute request URL. In Odoo backend mode it rewrites the
++// hardcoded native "/api" prefix to the configured PathPrefix
++// ("/multica/agent"); other paths (e.g. "/health") are left untouched.
++func (c *APIClient) url(path string) string {
++	if c.PathPrefix != "" && strings.HasPrefix(path, "/api") {
++		path = c.PathPrefix + strings.TrimPrefix(path, "/api")
++	}
++	return c.BaseURL + path
+ }
+ 
+ func (c *APIClient) setHeaders(req *http.Request) {
+@@ -206,7 +225,7 @@ func (c *APIClient) setHeaders(req *http
+ // given endpoint and degrade gracefully). The error string format
+ // ("GET <path> returned <code>: <body>") is preserved by HTTPError.Error().
+ func (c *APIClient) GetJSON(ctx context.Context, path string, out any) error {
+-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url(path), nil)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -232,7 +251,7 @@ func (c *APIClient) GetJSON(ctx context.
+ // returns the response headers. Useful when callers need header values like
+ // X-Total-Count for pagination.
+ func (c *APIClient) GetJSONWithHeaders(ctx context.Context, path string, out any) (http.Header, error) {
+-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url(path), nil)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -263,7 +282,7 @@ func (c *APIClient) DeleteJSON(ctx conte
+ 
+ // DeleteJSONResponse performs a DELETE request and optionally decodes the JSON response.
+ func (c *APIClient) DeleteJSONResponse(ctx context.Context, path string, out any) error {
+-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+path, nil)
++	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.url(path), nil)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -291,7 +310,7 @@ func (c *APIClient) DeleteJSONWithBody(c
+ 	if err != nil {
+ 		return err
+ 	}
+-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+path, bytes.NewReader(data))
++	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.url(path), bytes.NewReader(data))
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -318,7 +337,7 @@ func (c *APIClient) PostJSON(ctx context
+ 		return err
+ 	}
+ 
+-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(data))
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(path), bytes.NewReader(data))
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -348,7 +367,7 @@ func (c *APIClient) PutJSON(ctx context.
+ 		return err
+ 	}
+ 
+-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.BaseURL+path, bytes.NewReader(data))
++	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.url(path), bytes.NewReader(data))
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -378,7 +397,7 @@ func (c *APIClient) PatchJSON(ctx contex
+ 		return err
+ 	}
+ 
+-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.BaseURL+path, bytes.NewReader(data))
++	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.url(path), bytes.NewReader(data))
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -436,7 +455,7 @@ func (c *APIClient) UploadFile(ctx conte
+ 		return "", fmt.Errorf("close multipart writer: %w", err)
+ 	}
+ 
+-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/upload-file", &body)
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url("/api/upload-file"), &body)
+ 	if err != nil {
+ 		return "", err
+ 	}
+@@ -485,7 +504,7 @@ func (c *APIClient) UploadFileWithURL(ct
+ 		return "", "", fmt.Errorf("close multipart writer: %w", err)
+ 	}
+ 
+-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/upload-file", &body)
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url("/api/upload-file"), &body)
+ 	if err != nil {
+ 		return "", "", err
+ 	}

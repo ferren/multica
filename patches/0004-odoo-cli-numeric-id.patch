@@ -1,0 +1,98 @@
+Index: multica/server/cmd/multica/cmd_autopilot.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_autopilot.go
++++ multica/server/cmd/multica/cmd_autopilot.go
+@@ -771,11 +771,25 @@ func resolveAutopilotSubscriberInputs(ct
+ // uuidRegexp matches a canonical UUID (8-4-4-4-12 hex).
+ var uuidRegexp = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+ 
++// numericIDRegexp matches a pure positive integer. The Odoo backend keys records
++// by integer ID rather than UUID, so in that mode a bare number is a direct ID.
++var numericIDRegexp = regexp.MustCompile(`^[0-9]+$`)
++
++// looksLikeDirectID reports whether s should be forwarded as a record ID as-is
++// rather than resolved as a name/prefix. A canonical UUID always qualifies; in
++// Odoo backend mode (MULTICA_BACKEND_MODE=odoo) a pure integer also qualifies.
++func looksLikeDirectID(s string) bool {
++	if uuidRegexp.MatchString(s) {
++		return true
++	}
++	return os.Getenv("MULTICA_BACKEND_MODE") == "odoo" && numericIDRegexp.MatchString(strings.TrimSpace(s))
++}
++
+ // resolveAgent accepts either a UUID or an agent name (case-insensitive substring)
+ // and returns the agent's UUID. Errors on no match or ambiguous match.
+ func resolveAgent(ctx context.Context, client *cli.APIClient, nameOrID string) (string, error) {
+-	if uuidRegexp.MatchString(nameOrID) {
+-		return nameOrID, nil
++	if looksLikeDirectID(nameOrID) {
++		return strings.TrimSpace(nameOrID), nil
+ 	}
+ 	if client.WorkspaceID == "" {
+ 		return "", fmt.Errorf("workspace ID is required to resolve agents; use --workspace-id or set MULTICA_WORKSPACE_ID")
+Index: multica/server/cmd/multica/cmd_id_resolver.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_id_resolver.go
++++ multica/server/cmd/multica/cmd_id_resolver.go
+@@ -78,7 +78,7 @@ func resolveIDByPrefix(ctx context.Conte
+ 	if trimmed == "" {
+ 		return resolvedID{}, fmt.Errorf("%s id is required", kind)
+ 	}
+-	if uuidRegexp.MatchString(trimmed) {
++	if looksLikeDirectID(trimmed) {
+ 		return resolvedID{ID: trimmed, Display: trimmed}, nil
+ 	}
+ 
+@@ -139,7 +139,7 @@ func resolveIssueRef(ctx context.Context
+ 	if looksLikeIssueIdentifier(trimmed) {
+ 		return fetchIssueRef(ctx, client, trimmed)
+ 	}
+-	if uuidRegexp.MatchString(trimmed) {
++	if looksLikeDirectID(trimmed) {
+ 		return fetchIssueRef(ctx, client, trimmed)
+ 	}
+ 	return resolveIDByPrefix(ctx, client, "issue", trimmed, fetchIssueCandidates)
+@@ -284,7 +284,7 @@ func fetchAutopilotCandidates(ctx contex
+ 
+ func resolveTaskRunID(ctx context.Context, client *cli.APIClient, issueID, input string) (resolvedID, error) {
+ 	trimmed := strings.TrimSpace(input)
+-	if uuidRegexp.MatchString(trimmed) {
++	if looksLikeDirectID(trimmed) {
+ 		return resolvedID{ID: trimmed, Display: trimmed}, nil
+ 	}
+ 	if strings.TrimSpace(issueID) == "" {
+@@ -317,7 +317,7 @@ func fetchTaskRunCandidatesForIssue(ctx
+ 
+ func resolveAutopilotTriggerID(ctx context.Context, client *cli.APIClient, autopilotID, input string) (resolvedID, error) {
+ 	trimmed := strings.TrimSpace(input)
+-	if uuidRegexp.MatchString(trimmed) {
++	if looksLikeDirectID(trimmed) {
+ 		return resolvedID{ID: trimmed, Display: trimmed}, nil
+ 	}
+ 	fetch := func(ctx context.Context, client *cli.APIClient) ([]idCandidate, error) {
+Index: multica/server/cmd/multica/cmd_issue.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_issue.go
++++ multica/server/cmd/multica/cmd_issue.go
+@@ -2136,7 +2136,7 @@ func resolveAssigneeByID(ctx context.Con
+ 		return "", "", fmt.Errorf("workspace ID is required to resolve assignees; use --workspace-id or set MULTICA_WORKSPACE_ID")
+ 	}
+ 	input := strings.TrimSpace(id)
+-	if !uuidRegexp.MatchString(input) {
++	if !looksLikeDirectID(input) {
+ 		return "", "", fmt.Errorf("expected a canonical UUID, got %q", id)
+ 	}
+ 
+Index: multica/server/cmd/multica/cmd_workspace.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_workspace.go
++++ multica/server/cmd/multica/cmd_workspace.go
+@@ -273,7 +273,7 @@ func runWorkspaceSwitch(cmd *cobra.Comma
+ func resolveWorkspaceArg(cmd *cobra.Command, args []string) (string, error) {
+ 	if len(args) > 0 {
+ 		trimmed := strings.TrimSpace(args[0])
+-		if uuidRegexp.MatchString(trimmed) {
++		if looksLikeDirectID(trimmed) {
+ 			return trimmed, nil
+ 		}
+ 		ctx, cancel := cli.APIContext(context.Background())

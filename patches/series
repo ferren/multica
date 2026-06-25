@@ -1,3 +1,4 @@
 0001-odoo-backend-mode.patch
 0002-odoo-agent-context.patch
 0003-odoo-cli-path-prefix.patch
+0004-odoo-cli-numeric-id.patch

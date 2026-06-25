@@ -3,3 +3,4 @@
 0003-odoo-cli-path-prefix.patch
 0004-odoo-cli-numeric-id.patch
 0005-odoo-config-from-file.patch
+0006-odoo-repo-directory.patch

@@ -1,0 +1,214 @@
+Index: multica/server/internal/daemon/daemon.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -129,6 +129,7 @@ type workspaceState struct {
+ 	allowedRepoURLs map[string]struct{}
+ 	taskRepoURLs    map[string]struct{}
+ 	taskRepoRefs    map[string]map[string]string // taskID -> repo URL -> checkout ref
++	taskRepoDirs    map[string]map[string]string // taskID -> repo URL -> checkout subdirectory
+ 	settings        json.RawMessage              // workspace settings (JSONB)
+ 	lastRepoSyncErr string
+ 	repoRefreshMu   sync.Mutex
+@@ -1412,6 +1413,9 @@ func (d *Daemon) registerTaskRepos(works
+ 	if taskID != "" && ws.taskRepoRefs == nil {
+ 		ws.taskRepoRefs = make(map[string]map[string]string)
+ 	}
++	if taskID != "" && ws.taskRepoDirs == nil {
++		ws.taskRepoDirs = make(map[string]map[string]string)
++	}
+ 	candidates := make([]repoCandidate, 0, len(repos))
+ 	for _, repo := range repos {
+ 		url := strings.TrimSpace(repo.URL)
+@@ -1430,6 +1434,12 @@ func (d *Daemon) registerTaskRepos(works
+ 			if _, exists := ws.taskRepoRefs[taskID][url]; !exists {
+ 				ws.taskRepoRefs[taskID][url] = strings.TrimSpace(repo.Ref)
+ 			}
++			if ws.taskRepoDirs[taskID] == nil {
++				ws.taskRepoDirs[taskID] = make(map[string]string, len(repos))
++			}
++			if _, exists := ws.taskRepoDirs[taskID][url]; !exists {
++				ws.taskRepoDirs[taskID][url] = strings.TrimSpace(repo.Directory)
++			}
+ 		}
+ 		candidates = append(candidates, repoCandidate{
+ 			url:     url,
+@@ -1474,6 +1484,25 @@ func (d *Daemon) taskRepoDefaultRef(work
+ 	return strings.TrimSpace(ws.taskRepoRefs[taskID][repoURL])
+ }
+ 
++// taskRepoDirectory returns the configured checkout subdirectory (relative to
++// the task workdir) for a repo, or "" when none is set. Mirrors
++// taskRepoDefaultRef so the /repo/checkout handler can honor the backend's
++// per-repo "检出目录" setting server-side rather than trusting the agent.
++func (d *Daemon) taskRepoDirectory(workspaceID, taskID, repoURL string) string {
++	taskID = strings.TrimSpace(taskID)
++	repoURL = strings.TrimSpace(repoURL)
++	if taskID == "" || repoURL == "" {
++		return ""
++	}
++	d.mu.Lock()
++	defer d.mu.Unlock()
++	ws, ok := d.workspaces[workspaceID]
++	if !ok || ws.taskRepoDirs == nil {
++		return ""
++	}
++	return strings.TrimSpace(ws.taskRepoDirs[taskID][repoURL])
++}
++
+ func (d *Daemon) clearTaskRepoRefs(workspaceID, taskID string) {
+ 	taskID = strings.TrimSpace(taskID)
+ 	if taskID == "" {
+@@ -4641,7 +4670,7 @@ func convertReposForEnv(repos []RepoData
+ 	}
+ 	result := make([]execenv.RepoContextForEnv, len(repos))
+ 	for i, r := range repos {
+-		result[i] = execenv.RepoContextForEnv{URL: r.URL, Description: r.Description, Ref: r.Ref}
++		result[i] = execenv.RepoContextForEnv{URL: r.URL, Description: r.Description, Ref: r.Ref, Directory: r.Directory}
+ 	}
+ 	return result
+ }
+Index: multica/server/internal/daemon/execenv/execenv.go
+===================================================================
+--- multica.orig/server/internal/daemon/execenv/execenv.go
++++ multica/server/internal/daemon/execenv/execenv.go
+@@ -17,6 +17,7 @@ type RepoContextForEnv struct {
+ 	URL         string // remote URL
+ 	Description string // optional repo description
+ 	Ref         string // optional default checkout ref for this task
++	Directory   string // optional checkout subdirectory (relative to task workdir)
+ }
+ 
+ // ProjectResourceForEnv describes a single resource attached to the issue's
+Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
+===================================================================
+--- multica.orig/server/internal/daemon/execenv/runtime_config_sections.go
++++ multica/server/internal/daemon/execenv/runtime_config_sections.go
+@@ -200,11 +200,23 @@ func writeRepositories(b *strings.Builde
+ 	b.WriteString("## Repositories\n\n")
+ 	b.WriteString("Available in this workspace — `multica repo checkout <url> [--ref <branch-or-sha>]` to fetch (creates a git worktree on a dedicated branch).\n\n")
+ 	for _, repo := range ctx.Repos {
++		line := "- " + repo.URL
+ 		if repo.Description != "" {
+-			fmt.Fprintf(b, "- %s — %s\n", repo.URL, repo.Description)
+-		} else {
+-			fmt.Fprintf(b, "- %s\n", repo.URL)
++			line += " — " + repo.Description
+ 		}
++		// Tell the agent exactly where this repo lands and on which ref, so it
++		// works against the configured location instead of guessing.
++		var hints []string
++		if dir := strings.TrimSpace(repo.Directory); dir != "" {
++			hints = append(hints, fmt.Sprintf("checks out into `%s/` (relative to your working directory)", dir))
++		}
++		if ref := strings.TrimSpace(repo.Ref); ref != "" {
++			hints = append(hints, fmt.Sprintf("default ref `%s`", ref))
++		}
++		if len(hints) > 0 {
++			line += " (" + strings.Join(hints, "; ") + ")"
++		}
++		b.WriteString(line + "\n")
+ 	}
+ 	b.WriteString("\n")
+ }
+Index: multica/server/internal/daemon/health.go
+===================================================================
+--- multica.orig/server/internal/daemon/health.go
++++ multica/server/internal/daemon/health.go
+@@ -200,11 +200,16 @@ func (d *Daemon) repoCheckoutHandler() h
+ 			checkoutRef = d.taskRepoDefaultRef(req.WorkspaceID, req.TaskID, req.URL)
+ 		}
+ 
++		// Server-authoritative checkout subdirectory (backend "检出目录" setting),
++		// looked up by URL so the agent can't override where a repo lands.
++		checkoutDir := d.taskRepoDirectory(req.WorkspaceID, req.TaskID, req.URL)
++
+ 		result, err := d.repoCache.CreateWorktree(repocache.WorktreeParams{
+ 			WorkspaceID:         req.WorkspaceID,
+ 			RepoURL:             req.URL,
+ 			WorkDir:             req.WorkDir,
+ 			Ref:                 checkoutRef,
++			Directory:           checkoutDir,
+ 			AgentName:           req.AgentName,
+ 			TaskID:              req.TaskID,
+ 			CoAuthoredByEnabled: d.workspaceCoAuthoredByEnabled(req.WorkspaceID),
+Index: multica/server/internal/daemon/repocache/cache.go
+===================================================================
+--- multica.orig/server/internal/daemon/repocache/cache.go
++++ multica/server/internal/daemon/repocache/cache.go
+@@ -379,6 +379,7 @@ type WorktreeParams struct {
+ 	RepoURL             string // remote URL to look up in the cache
+ 	WorkDir             string // parent directory for the worktree (e.g. task workdir)
+ 	Ref                 string // optional branch, tag, or commit to base the worktree on
++	Directory           string // optional checkout subdirectory relative to WorkDir; empty -> repo name from URL
+ 	AgentName           string // for branch naming
+ 	TaskID              string // for branch naming uniqueness
+ 	CoAuthoredByEnabled bool   // install prepare-commit-msg hook for Co-authored-by trailer
+@@ -446,9 +447,21 @@ func (c *Cache) CreateWorktree(params Wo
+ 	// Build branch name: agent/{sanitized-name}/{short-task-id}
+ 	branchName := fmt.Sprintf("agent/%s/%s", sanitizeName(params.AgentName), shortID(params.TaskID))
+ 
+-	// Derive directory name from repo URL.
+-	dirName := repoNameFromURL(params.RepoURL)
++	// Checkout location: prefer the backend-configured subdirectory (may be
++	// nested, e.g. "frontend/app"); fall back to the repo name derived from the
++	// URL. safeRelDir strips anything that would escape WorkDir.
++	dirName := safeRelDir(params.Directory)
++	if dirName == "" {
++		dirName = repoNameFromURL(params.RepoURL)
++	}
+ 	worktreePath := filepath.Join(params.WorkDir, dirName)
++	// Nested directories ("frontend/app") need their parent to exist before
++	// `git worktree add` creates the leaf.
++	if parent := filepath.Dir(worktreePath); parent != params.WorkDir {
++		if err := os.MkdirAll(parent, 0o755); err != nil {
++			return nil, fmt.Errorf("create checkout parent dir %s: %w", parent, err)
++		}
++	}
+ 
+ 	// If worktree already exists (reused environment from a prior task),
+ 	// update it to the latest remote code instead of creating a new one.
+@@ -937,6 +950,27 @@ func excludeFromGit(worktreePath, patter
+ 	return nil
+ }
+ 
++// safeRelDir normalizes a backend-supplied checkout subdirectory into a safe
++// relative path (may be nested, e.g. "frontend/app"). It rejects absolute paths
++// and anything that would escape the worktree parent via ".." segments,
++// returning "" for empty/unsafe input so the caller falls back to the
++// URL-derived repo name.
++func safeRelDir(dir string) string {
++	dir = strings.TrimSpace(dir)
++	if dir == "" {
++		return ""
++	}
++	dir = filepath.ToSlash(dir)
++	if strings.HasPrefix(dir, "/") {
++		return ""
++	}
++	cleaned := filepath.ToSlash(filepath.Clean(dir))
++	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
++		return ""
++	}
++	return filepath.FromSlash(cleaned)
++}
++
+ // repoNameFromURL extracts a short directory name from a git remote URL.
+ // e.g. "https://github.com/org/my-repo.git" → "my-repo"
+ func repoNameFromURL(url string) string {
+Index: multica/server/internal/daemon/types.go
+===================================================================
+--- multica.orig/server/internal/daemon/types.go
++++ multica/server/internal/daemon/types.go
+@@ -27,6 +27,11 @@ type RepoData struct {
+ 	URL         string `json:"url"`
+ 	Description string `json:"description,omitempty"`
+ 	Ref         string `json:"ref,omitempty"`
++	// Directory is an optional checkout subdirectory (relative to the task
++	// workdir) configured for this repo on the backend. Empty falls back to the
++	// repo name derived from the URL. Used by the Odoo backend's per-repo
++	// "检出目录" setting so agents check out a repo into a fixed location.
++	Directory string `json:"directory,omitempty"`
+ }
+ 
+ // ProjectResourceData mirrors handler.ProjectResourceData — a single project

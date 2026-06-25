@@ -1,0 +1,131 @@
+Index: multica/server/internal/cli/config.go
+===================================================================
+--- multica.orig/server/internal/cli/config.go
++++ multica/server/internal/cli/config.go
+@@ -17,6 +17,16 @@ type CLIConfig struct {
+ 	WorkspaceID string `json:"workspace_id,omitempty"`
+ 	Token       string `json:"token,omitempty"`
+ 
++	// Odoo backend mode settings. Mirrors the MULTICA_BACKEND_MODE / MULTICA_DB_NAME
++	// / MULTICA_APP_ID / MULTICA_APP_SECRET environment variables so the daemon can
++	// be configured purely from config.json, consistent with native mode. Env still
++	// wins (env > config.json > default), per the precedence convention above.
++	// AppSecret is a credential, stored here alongside the existing Token secret.
++	BackendMode string `json:"backend_mode,omitempty"`
++	DBName      string `json:"db_name,omitempty"`
++	AppID       string `json:"app_id,omitempty"`
++	AppSecret   string `json:"app_secret,omitempty"`
++
+ 	// Backends contains per-backend overrides for users who want to point
+ 	// the daemon at non-default tool installations (e.g. an OpenClaw bundled
+ 	// inside another desktop app, or multiple isolated profiles on the same
+Index: multica/server/internal/daemon/config.go
+===================================================================
+--- multica.orig/server/internal/daemon/config.go
++++ multica/server/internal/daemon/config.go
+@@ -104,6 +104,8 @@ type Config struct {
+ 	CodebuddyArgs                  []string
+ 	BackendMode                    string // "multica" (default) or "odoo"
+ 	DBName                         string // Odoo database name (only used in odoo backend mode)
++	AppID                          string // Odoo OpenAPI app id (odoo backend mode)
++	AppSecret                      string // Odoo OpenAPI app secret (odoo backend mode)
+ 
+ 	// ProfileCommandOverrides maps a custom runtime profile_id -> the absolute
+ 	// executable path to use for that profile on THIS machine (MUL-3284).
+@@ -176,10 +178,12 @@ func LoadConfig(overrides Overrides) (Co
+ 	// purely from env-var configuration. We log a warning and proceed with
+ 	// no overrides.
+ 	var profileCommandOverrides map[string]string
+-	if cliCfg, err := cli.LoadCLIConfigForProfile(overrides.Profile); err != nil {
++	var cliCfg cli.CLIConfig
++	if loaded, err := cli.LoadCLIConfigForProfile(overrides.Profile); err != nil {
+ 		slog.Warn("could not load CLI config for backend overrides; proceeding without",
+ 			"profile", overrides.Profile, "err", err)
+ 	} else {
++		cliCfg = loaded
+ 		if oc := openclawOverrideFrom(cliCfg); oc != nil {
+ 			applyOpenclawOverride(oc)
+ 		}
+@@ -439,11 +443,17 @@ func LoadConfig(overrides Overrides) (Co
+ 		return Config{}, err
+ 	}
+ 
+-	// Backend mode: env > default
+-	backendMode := strings.ToLower(envOrDefault("MULTICA_BACKEND_MODE", "multica"))
+-
+-	// Odoo database name (required for odoo backend mode)
+-	dbName := strings.TrimSpace(os.Getenv("MULTICA_DB_NAME"))
++	// Backend mode / Odoo credentials: env > config.json > default. The config.json
++	// fallbacks let the daemon be configured entirely from the profile config file,
++	// consistent with native mode (which already reads server_url/token from it).
++	backendMode := strings.ToLower(firstNonEmpty(os.Getenv("MULTICA_BACKEND_MODE"), cliCfg.BackendMode, "multica"))
++
++	// Odoo database name (only used in odoo backend mode)
++	dbName := firstNonEmpty(strings.TrimSpace(os.Getenv("MULTICA_DB_NAME")), cliCfg.DBName)
++
++	// Odoo OpenAPI app credentials (only used in odoo backend mode)
++	appID := firstNonEmpty(strings.TrimSpace(os.Getenv("MULTICA_APP_ID")), cliCfg.AppID)
++	appSecret := firstNonEmpty(strings.TrimSpace(os.Getenv("MULTICA_APP_SECRET")), cliCfg.AppSecret)
+ 
+ 	// Health port: override > default
+ 	healthPort := DefaultHealthPort
+@@ -542,6 +552,8 @@ func LoadConfig(overrides Overrides) (Co
+ 		CodebuddyArgs:                  codebuddyArgs,
+ 		BackendMode:                    backendMode,
+ 		DBName:                         dbName,
++		AppID:                          appID,
++		AppSecret:                      appSecret,
+ 		ProfileCommandOverrides:        profileCommandOverrides,
+ 	}, nil
+ }
+Index: multica/server/internal/daemon/daemon.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -876,10 +876,10 @@ func (d *Daemon) resolveAuth() error {
+ // resolveOdooAuth calls /openapi/token with MULTICA_APP_ID + MULTICA_APP_SECRET
+ // to obtain access_token and api_key for Odoo OpenAPI auth.
+ func (d *Daemon) resolveOdooAuth() error {
+-	appID := strings.TrimSpace(os.Getenv("MULTICA_APP_ID"))
+-	appSecret := strings.TrimSpace(os.Getenv("MULTICA_APP_SECRET"))
++	appID := strings.TrimSpace(d.cfg.AppID)
++	appSecret := strings.TrimSpace(d.cfg.AppSecret)
+ 	if appID == "" || appSecret == "" {
+-		return fmt.Errorf("MULTICA_APP_ID and MULTICA_APP_SECRET are required for Odoo backend mode")
++		return fmt.Errorf("Odoo backend mode requires an app id and secret (env MULTICA_APP_ID/MULTICA_APP_SECRET or app_id/app_secret in config.json)")
+ 	}
+ 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+ 	defer cancel()
+@@ -963,8 +963,8 @@ func (d *Daemon) connectDaemon(ctx conte
+ // odooTokenRefreshLoop periodically refreshes the Odoo OpenAPI access_token
+ // before it expires. refreshAt = expires_in - 5 minutes (safe margin).
+ func (d *Daemon) odooTokenRefreshLoop(ctx context.Context) {
+-	appID := strings.TrimSpace(os.Getenv("MULTICA_APP_ID"))
+-	appSecret := strings.TrimSpace(os.Getenv("MULTICA_APP_SECRET"))
++	appID := strings.TrimSpace(d.cfg.AppID)
++	appSecret := strings.TrimSpace(d.cfg.AppSecret)
+ 	for {
+ 		expiresIn := d.client.expiresIn
+ 		if expiresIn <= 0 {
+Index: multica/server/internal/daemon/helpers.go
+===================================================================
+--- multica.orig/server/internal/daemon/helpers.go
++++ multica/server/internal/daemon/helpers.go
+@@ -18,6 +18,17 @@ func envOrDefault(key, fallback string)
+ 	return value
+ }
+ 
++// firstNonEmpty returns the first argument whose trimmed value is non-empty,
++// or "" when all are empty. Used for env > config.json > default precedence.
++func firstNonEmpty(values ...string) string {
++	for _, v := range values {
++		if strings.TrimSpace(v) != "" {
++			return v
++		}
++	}
++	return ""
++}
++
+ func durationFromEnv(key string, fallback time.Duration) (time.Duration, error) {
+ 	value := strings.TrimSpace(os.Getenv(key))
+ 	if value == "" {

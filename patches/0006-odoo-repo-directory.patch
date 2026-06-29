@@ -59,7 +59,7 @@ Index: multica/server/internal/daemon/daemon.go
  func (d *Daemon) clearTaskRepoRefs(workspaceID, taskID string) {
  	taskID = strings.TrimSpace(taskID)
  	if taskID == "" {
-@@ -4641,7 +4670,7 @@ func convertReposForEnv(repos []RepoData
+@@ -4656,7 +4685,7 @@ func convertReposForEnv(repos []RepoData
  	}
  	result := make([]execenv.RepoContextForEnv, len(repos))
  	for i, r := range repos {

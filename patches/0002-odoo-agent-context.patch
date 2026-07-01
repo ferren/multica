@@ -2,15 +2,31 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -3680,6 +3680,7 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3680,6 +3680,23 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
 +	accessToken, apiKey := d.client.OdooCredentials()
++	if d.cfg.BackendMode == "odoo" && agentID != "" {
++		// Swap the shared daemon-wide credential for one scoped to this
++		// specific agent, so Odoo can tell which agent is calling from the
++		// credential itself instead of a self-reported header. Best-effort:
++		// fall back to the shared credential (today's behavior) rather than
++		// failing the task if minting is unavailable.
++		mintCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
++		scopedAccessToken, scopedAPIKey, _, mintErr := d.client.MintAgentToken(mintCtx, agentID)
++		cancel()
++		if mintErr != nil {
++			d.logger.Warn("mint per-agent odoo token failed; falling back to shared daemon credentials",
++				"agent_id", agentID, "error", mintErr)
++		} else {
++			accessToken, apiKey = scopedAccessToken, scopedAPIKey
++		}
++	}
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:                          task.IssueID,
  		TriggerCommentID:                 task.TriggerCommentID,
-@@ -3713,6 +3714,10 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3713,6 +3730,10 @@ func (d *Daemon) runTask(ctx context.Con
  		InitiatorName:                    task.InitiatorName,
  		InitiatorEmail:                   task.InitiatorEmail,
  		WorkspaceContext:                 task.WorkspaceContext,
@@ -21,7 +37,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  
  	// Mark candidate env roots as active before any env work so the GC loop
-@@ -3864,10 +3869,25 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3864,10 +3885,25 @@ func (d *Daemon) runTask(ctx context.Con
  	// MULTICA_TOKEN is bound to (agent, task) by the server. Never fall back
  	// to the daemon's own credential here: doing so lets agent CLI writes land
  	// as the runtime owner's member actor and can retrigger the same agent.
@@ -51,7 +67,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  	agentEnv := map[string]string{
  		"MULTICA_TOKEN":        agentToken,
-@@ -3879,6 +3899,11 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3879,6 +3915,11 @@ func (d *Daemon) runTask(ctx context.Con
  		"MULTICA_TASK_ID":      task.ID,
  		"MULTICA_TASK_SLOT":    strconv.Itoa(slot),
  	}
@@ -83,7 +99,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config.go
 +++ multica/server/internal/daemon/execenv/runtime_config.go
-@@ -832,6 +832,46 @@ func buildMetaSkillContent(provider stri
+@@ -832,6 +832,40 @@ func buildMetaSkillContent(provider stri
  		b.WriteString("Bad: \"1. Read the issue 2. Found the bug in auth.go 3. Created branch 4. ...\"\n")
  		b.WriteString("When referencing an issue in a comment, use the issue mention format `[MUL-123](mention://issue/<issue-id>)` so it renders as a clickable link. (Issue mentions have no side effect; only member/agent mentions do — see the Mentions section above.)\n")
  	}
@@ -94,34 +110,28 @@ Index: multica/server/internal/daemon/execenv/runtime_config.go
 +			fmt.Fprintf(&b, "Base URL: %s\n\n", ctx.OdooURL)
 +		}
 +		b.WriteString("### Required Headers\n")
-+		b.WriteString("**EVERY** request below MUST send all of these headers, on every single call:\n\n")
++		b.WriteString("**EVERY** request below MUST send both of these headers, on every single call. They are scoped to you specifically — Odoo identifies which agent is acting from the credential itself, so there is no separate agent-id header to remember:\n\n")
 +		if ctx.OdooAccessToken != "" {
 +			fmt.Fprintf(&b, "- `X-GALAXY-ACCESS-TOKEN: Bearer %s`\n", ctx.OdooAccessToken)
 +		}
 +		if ctx.OdooAPIKey != "" {
 +			fmt.Fprintf(&b, "- `X-GALAXY-API-KEY: %s`\n", ctx.OdooAPIKey)
 +		}
-+		if ctx.AgentID != "" {
-+			fmt.Fprintf(&b, "- `X-MULTICA-AGENT-ID: %s` ← **this is YOU**. It tells Odoo which agent is acting. If you omit it, your comments and status changes are attributed to a DIFFERENT agent and the user sees the wrong author. Never drop it, never change the value.\n", ctx.AgentID)
-+		}
 +		b.WriteString("\nTip: keep these as a shell variable so you cannot forget one, e.g.\n")
-+		if ctx.OdooAccessToken != "" && ctx.AgentID != "" {
-+			fmt.Fprintf(&b, "```sh\nH=(-H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -H 'X-MULTICA-AGENT-ID: %s')\ncurl -s \"${H[@]}\" %s/multica/agent/issues/<id>\n```\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.AgentID, ctx.OdooURL)
++		if ctx.OdooAccessToken != "" {
++			fmt.Fprintf(&b, "```sh\nH=(-H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s')\ncurl -s \"${H[@]}\" %s/multica/agent/issues/<id>\n```\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
 +		}
 +		b.WriteString("\n### REST APIs\n\n")
-+		b.WriteString("All examples already include the three required headers above — copy them verbatim, keeping `X-MULTICA-AGENT-ID` intact:\n\n")
++		b.WriteString("All examples already include the two required headers above — copy them verbatim:\n\n")
 +		if ctx.OdooURL != "" && ctx.OdooAccessToken != "" {
-+			fmt.Fprintf(&b, "- List:   `curl -s -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -H 'X-MULTICA-AGENT-ID: %s' %s/multica/agent/issues`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.AgentID, ctx.OdooURL)
-+			fmt.Fprintf(&b, "- Create: `curl -s -X POST -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -H 'X-MULTICA-AGENT-ID: %s' -d '{\"title\":\"...\"}' %s/multica/agent/issues`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.AgentID, ctx.OdooURL)
-+			fmt.Fprintf(&b, "- Get:    `curl -s -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -H 'X-MULTICA-AGENT-ID: %s' %s/multica/agent/issues/<id>`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.AgentID, ctx.OdooURL)
-+			fmt.Fprintf(&b, "- Update: `curl -s -X PATCH -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -H 'X-MULTICA-AGENT-ID: %s' -d '{\"status\":\"Done\"}' %s/multica/agent/issues/<id>`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.AgentID, ctx.OdooURL)
-+			fmt.Fprintf(&b, "- Comment:`curl -s -X POST -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -H 'X-MULTICA-AGENT-ID: %s' -d '{\"body\":\"...\"}' %s/multica/agent/issues/<id>/comments`\n\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.AgentID, ctx.OdooURL)
++			fmt.Fprintf(&b, "- List:   `curl -s -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' %s/multica/agent/issues`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
++			fmt.Fprintf(&b, "- Create: `curl -s -X POST -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -d '{\"title\":\"...\"}' %s/multica/agent/issues`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
++			fmt.Fprintf(&b, "- Get:    `curl -s -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' %s/multica/agent/issues/<id>`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
++			fmt.Fprintf(&b, "- Update: `curl -s -X PATCH -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -d '{\"status\":\"Done\"}' %s/multica/agent/issues/<id>`\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
++			fmt.Fprintf(&b, "- Comment:`curl -s -X POST -H 'Content-Type: application/json' -H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s' -d '{\"body\":\"...\"}' %s/multica/agent/issues/<id>/comments`\n\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
 +		}
 +		b.WriteString("### Rules\n")
 +		b.WriteString("1. Use the REST APIs above for issue/comment operations — no multica CLI for these\n")
-+		if ctx.AgentID != "" {
-+			fmt.Fprintf(&b, "1a. Send ALL three Required Headers on every request, including `X-MULTICA-AGENT-ID: %s`. This is how Odoo knows the action is yours; without it your comment/update is logged under another agent's identity. Double-check it is present before every POST/PATCH.\n", ctx.AgentID)
-+		}
 +		b.WriteString("2. Work in current directory for file operations\n")
 +		b.WriteString("3. Output a clear summary at the end\n")
 +		b.WriteString("4. Odoo task status values: Backlog, Todo, In Progress, In Review, Done\n")

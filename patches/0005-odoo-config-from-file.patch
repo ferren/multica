@@ -96,17 +96,87 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
  	defer cancel()
-@@ -970,8 +970,8 @@ func (d *Daemon) connectDaemon(ctx conte
+@@ -894,7 +894,7 @@ func (d *Daemon) resolveOdooAuth() error
+ 		return fmt.Errorf("fetch odoo token: %w", err)
+ 	}
+ 	accessToken, _ := d.client.OdooCredentials()
+-	d.logger.Info("authenticated (Odoo mode)", "expires_in", d.client.expiresIn, "db", d.cfg.DBName)
++	d.logger.Info("authenticated (Odoo mode)", "expires_in", d.client.OdooExpiresIn(), "db", d.cfg.DBName)
+ 	_ = accessToken
+ 
+ 	// Set up on-error callback to refresh token on 401
+@@ -967,31 +967,57 @@ func (d *Daemon) connectDaemon(ctx conte
+ 	return nil
+ }
+ 
++// odooTokenRefreshLoopMinInterval floors the normal refresh cadence so a
++// server reporting a tiny or zero expires_in can't turn this into a busy
++// loop.
++const odooTokenRefreshLoopMinInterval = 60 * time.Second
++
++// odooTokenRefreshFailureRetryInterval is how soon a *failed* refresh is
++// retried. It is deliberately much shorter than the normal expires_in-based
++// cadence: recomputing the normal wait from the (unchanged, now-stale)
++// expires_in after a failure would sleep almost a full token lifetime again
++// before trying once more, while the token itself may already have expired
++// — leaving every request to rely on the racy, unbounded per-401 refresh
++// path for however long that takes to notice and recover on its own.
++const odooTokenRefreshFailureRetryInterval = 30 * time.Second
++
  // odooTokenRefreshLoop periodically refreshes the Odoo OpenAPI access_token
- // before it expires. refreshAt = expires_in - 5 minutes (safe margin).
+-// before it expires. refreshAt = expires_in - 5 minutes (safe margin).
++// before it expires. The steady-state wait is expires_in - 5 minutes (safe
++// margin); a failed refresh instead retries after
++// odooTokenRefreshFailureRetryInterval so a transient blip (network hiccup,
++// Odoo restart) can't leave the daemon on an expiring/expired token for
++// anywhere near a full cycle.
  func (d *Daemon) odooTokenRefreshLoop(ctx context.Context) {
 -	appID := strings.TrimSpace(os.Getenv("MULTICA_APP_ID"))
 -	appSecret := strings.TrimSpace(os.Getenv("MULTICA_APP_SECRET"))
+-	for {
+-		expiresIn := d.client.expiresIn
 +	appID := strings.TrimSpace(d.cfg.AppID)
 +	appSecret := strings.TrimSpace(d.cfg.AppSecret)
- 	for {
- 		expiresIn := d.client.expiresIn
++
++	nextWait := func(expiresIn int) time.Duration {
  		if expiresIn <= 0 {
+ 			expiresIn = 7200
+ 		}
+-		refreshAt := time.Duration(expiresIn-300) * time.Second
+-		if refreshAt < 60*time.Second {
+-			refreshAt = 60 * time.Second
++		wait := time.Duration(expiresIn-300) * time.Second
++		if wait < odooTokenRefreshLoopMinInterval {
++			wait = odooTokenRefreshLoopMinInterval
+ 		}
++		return wait
++	}
++
++	wait := nextWait(d.client.OdooExpiresIn())
++	for {
+ 		select {
+ 		case <-ctx.Done():
+ 			return
+-		case <-time.After(refreshAt):
++		case <-time.After(wait):
+ 			refreshCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+-			if err := d.client.FetchOdooToken(refreshCtx, appID, appSecret, d.cfg.DBName); err != nil {
+-				d.logger.Warn("odoo token refresh failed", "error", err)
+-			} else {
+-				d.logger.Info("odoo token refreshed", "expires_in", d.client.expiresIn, "db", d.cfg.DBName)
+-			}
++			err := d.client.FetchOdooToken(refreshCtx, appID, appSecret, d.cfg.DBName)
+ 			cancel()
++			if err != nil {
++				d.logger.Warn("odoo token refresh failed; retrying soon", "error", err, "retry_in", odooTokenRefreshFailureRetryInterval)
++				wait = odooTokenRefreshFailureRetryInterval
++				continue
++			}
++			d.logger.Info("odoo token refreshed", "expires_in", d.client.OdooExpiresIn(), "db", d.cfg.DBName)
++			wait = nextWait(d.client.OdooExpiresIn())
+ 		}
+ 	}
+ }
 Index: multica/server/internal/daemon/helpers.go
 ===================================================================
 --- multica.orig/server/internal/daemon/helpers.go
@@ -129,3 +199,97 @@ Index: multica/server/internal/daemon/helpers.go
  func durationFromEnv(key string, fallback time.Duration) (time.Duration, error) {
  	value := strings.TrimSpace(os.Getenv(key))
  	if value == "" {
+Index: multica/server/internal/daemon/daemon_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon_test.go
++++ multica/server/internal/daemon/daemon_test.go
+@@ -43,6 +43,89 @@ func createDaemonTestRepo(t *testing.T)
+ 	return dir
+ }
+ 
++// TestOdooTokenRefreshLoop_FailureRetriesSoonNotAfterFullCycle pins the
++// relationship between the two odooTokenRefreshLoop timing constants: a
++// failed refresh must retry much sooner than the normal expires_in-based
++// cadence. Before this fix, a failed refresh recomputed the wait from the
++// stale (unchanged) expires_in and ended up sleeping almost a full token
++// lifetime again — during which the token could already be expired — before
++// trying once more. If a future change collapses these back to the same
++// value, this test catches it.
++func TestOdooTokenRefreshLoop_FailureRetriesSoonNotAfterFullCycle(t *testing.T) {
++	if odooTokenRefreshFailureRetryInterval != 30*time.Second {
++		t.Errorf("odooTokenRefreshFailureRetryInterval = %s, want 30s", odooTokenRefreshFailureRetryInterval)
++	}
++	if odooTokenRefreshLoopMinInterval != 60*time.Second {
++		t.Errorf("odooTokenRefreshLoopMinInterval = %s, want 60s", odooTokenRefreshLoopMinInterval)
++	}
++	// The normal steady-state wait for a realistic expires_in (e.g. 7200s,
++	// the loop's own fallback default) must dwarf the failure retry — that
++	// gap is exactly what used to leave the daemon stuck on an
++	// expired/expiring token after one failed refresh.
++	steadyState := time.Duration(7200-300) * time.Second
++	if odooTokenRefreshFailureRetryInterval >= steadyState/10 {
++		t.Errorf("failure retry interval %s is not meaningfully shorter than the steady-state wait %s", odooTokenRefreshFailureRetryInterval, steadyState)
++	}
++}
++
++// TestResolveOdooAuth_TokenErrorCallbackRefreshesAndMatches exercises
++// resolveOdooAuth end to end against a fake /openapi/token endpoint: it must
++// fetch an initial token, then wire up an onTokenError callback that
++// (through the now-locked-and-deduped Client.FetchOdooToken) fetches a fresh,
++// *matched* accessToken/apiKey pair when invoked — using the daemon's own
++// configured app id/secret/db, not stale or mismatched values.
++func TestResolveOdooAuth_TokenErrorCallbackRefreshesAndMatches(t *testing.T) {
++	var calls atomic.Int32
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if got := r.URL.Query().Get("appid"); got != "app-1" {
++			t.Errorf("appid = %q, want app-1", got)
++		}
++		if got := r.URL.Query().Get("secret"); got != "secret-1" {
++			t.Errorf("secret = %q, want secret-1", got)
++		}
++		if got := r.URL.Query().Get("db"); got != "db-1" {
++			t.Errorf("db = %q, want db-1", got)
++		}
++		n := calls.Add(1)
++		w.Header().Set("Content-Type", "application/json")
++		json.NewEncoder(w).Encode(map[string]any{
++			"access_token": fmt.Sprintf("tok-%d", n),
++			"api_key":      fmt.Sprintf("key-%d", n),
++			"expires_in":   7200,
++		})
++	}))
++	defer srv.Close()
++
++	d := New(Config{
++		BackendMode:    "odoo",
++		ServerBaseURL:  srv.URL,
++		AppID:          "app-1",
++		AppSecret:      "secret-1",
++		DBName:         "db-1",
++		WorkspacesRoot: t.TempDir(),
++	}, slog.Default())
++
++	if err := d.resolveOdooAuth(); err != nil {
++		t.Fatalf("resolveOdooAuth: %v", err)
++	}
++	firstAccess, firstKey := d.client.OdooCredentials()
++	if firstAccess != "tok-1" || firstKey != "key-1" {
++		t.Fatalf("unexpected initial credentials: accessToken=%q apiKey=%q", firstAccess, firstKey)
++	}
++
++	// Simulate a 401: invoke the callback resolveOdooAuth registered on the
++	// client, exactly as postJSONVia/getJSON would on token expiry.
++	d.client.onTokenError()
++
++	secondAccess, secondKey := d.client.OdooCredentials()
++	if secondAccess != "tok-2" || secondKey != "key-2" {
++		t.Fatalf("unexpected refreshed credentials: accessToken=%q apiKey=%q", secondAccess, secondKey)
++	}
++	if got := calls.Load(); got != 2 {
++		t.Fatalf("expected 2 token fetches (initial + refresh), got %d", got)
++	}
++}
++
+ func TestNormalizeServerBaseURL(t *testing.T) {
+ 	t.Parallel()
+ 

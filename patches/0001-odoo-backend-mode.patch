@@ -2,15 +2,27 @@ Index: multica/server/internal/daemon/client.go
 ===================================================================
 --- multica.orig/server/internal/daemon/client.go
 +++ multica/server/internal/daemon/client.go
-@@ -8,6 +8,7 @@ import (
+@@ -8,13 +8,19 @@ import (
  	"fmt"
  	"io"
  	"net/http"
 +	"net/url"
  	"runtime"
  	"strings"
++	"sync"
  	"time"
-@@ -88,9 +89,19 @@ func isRuntimeNotFoundError(err error) b
+ 
++	"golang.org/x/sync/singleflight"
++
+ 	"github.com/multica-ai/multica/server/pkg/protocol"
+ )
+ 
++const odooTokenRefreshKey = "odoo-token-refresh"
++
+ // requestError is returned by postJSON/getJSON when the server responds with an error status.
+ type requestError struct {
+ 	Method     string
+@@ -88,9 +94,28 @@ func isRuntimeNotFoundError(err error) b
  
  // Client handles HTTP communication with the Multica server daemon API.
  type Client struct {
@@ -25,15 +37,24 @@ Index: multica/server/internal/daemon/client.go
 +
 +	// Odoo OpenAPI dual-token auth. When apiKey is set, requests use
 +	// X-GALAXY-ACCESS-TOKEN + X-GALAXY-API-KEY headers instead of
-+	// Authorization: Bearer.
++	// Authorization: Bearer. tokenMu guards the three fields below: many
++	// goroutines (per-runtime heartbeat, workspace sync, task poll, the
++	// refresh loop) read them on every request and can all hit a 401 within
++	// the same instant when the token actually expires, so unsynchronized
++	// access can hand out a mismatched accessToken/apiKey pair that the
++	// server will reject forever. tokenRefresh coalesces concurrent
++	// FetchOdooToken calls (from those simultaneous 401s, or a 401 racing the
++	// refresh loop's own timer) into a single HTTP round trip.
++	tokenMu      sync.RWMutex
 +	apiKey       string
 +	accessToken  string
-+	expiresIn    int    // seconds until access_token expires
++	expiresIn    int // seconds until access_token expires
++	tokenRefresh singleflight.Group
 +	onTokenError func() // called when a 401 signals token expiry
  
  	// bundleClient downloads skill bundles. Unlike client it carries no fixed
  	// Timeout: bundles can be large and slow on jittery links, so the caller
-@@ -114,9 +125,17 @@ func NewClient(baseURL string) *Client {
+@@ -114,9 +139,17 @@ func NewClient(baseURL string) *Client {
  		bundleClient: &http.Client{},
  		platform:     "daemon",
  		os:           normalizeGOOS(runtime.GOOS),
@@ -51,7 +72,7 @@ Index: multica/server/internal/daemon/client.go
  func cloneDefaultTransport() http.RoundTripper {
  	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
  		return transport.Clone()
-@@ -169,6 +188,19 @@ func (c *Client) setIdentityHeaders(req
+@@ -169,6 +202,22 @@ func (c *Client) setIdentityHeaders(req
  	req.Header.Set("X-Client-Capabilities", protocol.DaemonCapabilitySkillBundlesV1)
  }
  
@@ -60,9 +81,12 @@ Index: multica/server/internal/daemon/client.go
 +// to Bearer token.
 +func (c *Client) setAuthHeaders(req *http.Request) {
 +	c.setIdentityHeaders(req)
-+	if c.apiKey != "" {
-+		req.Header.Set("X-GALAXY-ACCESS-TOKEN", "Bearer "+c.accessToken)
-+		req.Header.Set("X-GALAXY-API-KEY", c.apiKey)
++	c.tokenMu.RLock()
++	apiKey, accessToken := c.apiKey, c.accessToken
++	c.tokenMu.RUnlock()
++	if apiKey != "" {
++		req.Header.Set("X-GALAXY-ACCESS-TOKEN", "Bearer "+accessToken)
++		req.Header.Set("X-GALAXY-API-KEY", apiKey)
 +	} else if c.token != "" {
 +		req.Header.Set("Authorization", "Bearer "+c.token)
 +	}
@@ -71,13 +95,25 @@ Index: multica/server/internal/daemon/client.go
  // SetToken sets the auth token for authenticated requests.
  func (c *Client) SetToken(token string) {
  	c.token = token
-@@ -179,11 +211,76 @@ func (c *Client) Token() string {
+@@ -179,11 +228,100 @@ func (c *Client) Token() string {
  	return c.token
  }
  
 +// FetchOdooToken calls GET /openapi/token with appid+secret to obtain
-+// access_token and api_key. Stores both for subsequent requests.
++// access_token and api_key, storing both for subsequent requests. Concurrent
++// callers (a 401 on one request racing another, or the refresh loop's timer
++// firing at the same instant a request 401s) are coalesced via tokenRefresh
++// into a single HTTP round trip that they all share the result of — this is
++// what keeps accessToken/apiKey from ending up as a mismatched pair written
++// by two overlapping fetches.
 +func (c *Client) FetchOdooToken(ctx context.Context, appID, appSecret, dbName string) error {
++	_, err, _ := c.tokenRefresh.Do(odooTokenRefreshKey, func() (any, error) {
++		return nil, c.fetchOdooTokenOnce(ctx, appID, appSecret, dbName)
++	})
++	return err
++}
++
++func (c *Client) fetchOdooTokenOnce(ctx context.Context, appID, appSecret, dbName string) error {
 +	u, err := url.Parse(c.baseURL + "/openapi/token")
 +	if err != nil {
 +		return fmt.Errorf("parse token url: %w", err)
@@ -124,9 +160,11 @@ Index: multica/server/internal/daemon/client.go
 +		return fmt.Errorf("fetch odoo token: empty access_token or api_key")
 +	}
 +
++	c.tokenMu.Lock()
 +	c.accessToken = tokenResp.AccessToken
 +	c.apiKey = tokenResp.APIKey
 +	c.expiresIn = tokenResp.ExpiresIn
++	c.tokenMu.Unlock()
 +	return nil
 +}
 +
@@ -137,7 +175,17 @@ Index: multica/server/internal/daemon/client.go
 +
 +// OdooCredentials returns the current Odoo OpenAPI token pair.
 +func (c *Client) OdooCredentials() (accessToken, apiKey string) {
++	c.tokenMu.RLock()
++	defer c.tokenMu.RUnlock()
 +	return c.accessToken, c.apiKey
++}
++
++// OdooExpiresIn returns the lifetime (in seconds) reported by the last
++// successful FetchOdooToken call, or 0 if none has succeeded yet.
++func (c *Client) OdooExpiresIn() int {
++	c.tokenMu.RLock()
++	defer c.tokenMu.RUnlock()
++	return c.expiresIn
 +}
 +
  func (c *Client) ClaimTask(ctx context.Context, runtimeID string) (*Task, error) {
@@ -149,7 +197,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return resp.Task, nil
-@@ -200,7 +297,7 @@ func (c *Client) ResolveSkillBundle(ctx
+@@ -200,7 +338,7 @@ func (c *Client) ResolveSkillBundle(ctx
  	var resp struct {
  		Bundles []SkillData `json:"bundles"`
  	}
@@ -158,7 +206,7 @@ Index: multica/server/internal/daemon/client.go
  	if err := c.postJSONViaWithRetry(ctx, c.bundleClient, path, map[string]any{
  		"skills": []SkillRefData{ref},
  	}, &resp, skillBundleResolveRetrySchedule); err != nil {
-@@ -213,11 +310,11 @@ func (c *Client) ResolveSkillBundle(ctx
+@@ -213,11 +351,11 @@ func (c *Client) ResolveSkillBundle(ctx
  }
  
  func (c *Client) ExtendTaskPrepareLease(ctx context.Context, runtimeID, taskID string) error {
@@ -172,7 +220,7 @@ Index: multica/server/internal/daemon/client.go
  }
  
  // MarkTaskWaitingLocalDirectory parks a freshly-dispatched task in the
-@@ -230,13 +327,13 @@ func (c *Client) StartTask(ctx context.C
+@@ -230,13 +368,13 @@ func (c *Client) StartTask(ctx context.C
  // underlying SQL filters on status='dispatched', so the second call is a
  // 400 the daemon swallows and proceeds to wait).
  func (c *Client) MarkTaskWaitingLocalDirectory(ctx context.Context, taskID, reason string) error {
@@ -188,7 +236,7 @@ Index: multica/server/internal/daemon/client.go
  		"summary": summary,
  		"step":    step,
  		"total":   total,
-@@ -254,7 +351,7 @@ type TaskMessageData struct {
+@@ -254,7 +392,7 @@ type TaskMessageData struct {
  }
  
  func (c *Client) ReportTaskMessages(ctx context.Context, taskID string, messages []TaskMessageData) error {
@@ -197,7 +245,7 @@ Index: multica/server/internal/daemon/client.go
  		"messages": messages,
  	}, nil)
  }
-@@ -270,14 +367,14 @@ func (c *Client) CompleteTask(ctx contex
+@@ -270,14 +408,14 @@ func (c *Client) CompleteTask(ctx contex
  	if workDir != "" {
  		body["work_dir"] = workDir
  	}
@@ -214,7 +262,7 @@ Index: multica/server/internal/daemon/client.go
  		"usage": usage,
  	}, nil)
  }
-@@ -293,7 +390,7 @@ func (c *Client) FailTask(ctx context.Co
+@@ -293,7 +431,7 @@ func (c *Client) FailTask(ctx context.Co
  	if failureReason != "" {
  		body["failure_reason"] = failureReason
  	}
@@ -223,7 +271,7 @@ Index: multica/server/internal/daemon/client.go
  }
  
  // PinTaskSession persists the agent's session_id and work_dir on the task
-@@ -309,14 +406,14 @@ func (c *Client) PinTaskSession(ctx cont
+@@ -309,14 +447,14 @@ func (c *Client) PinTaskSession(ctx cont
  	if workDir != "" {
  		body["work_dir"] = workDir
  	}
@@ -240,7 +288,7 @@ Index: multica/server/internal/daemon/client.go
  }
  
  // GetTaskStatus returns the current status of a task. Used by the daemon to
-@@ -326,7 +423,7 @@ func (c *Client) GetTaskStatus(ctx conte
+@@ -326,7 +464,7 @@ func (c *Client) GetTaskStatus(ctx conte
  	var resp struct {
  		Status string `json:"status"`
  	}
@@ -249,7 +297,7 @@ Index: multica/server/internal/daemon/client.go
  		return "", err
  	}
  	return resp.Status, nil
-@@ -345,7 +442,7 @@ type (
+@@ -345,7 +483,7 @@ type (
  
  func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*HeartbeatResponse, error) {
  	var resp HeartbeatResponse
@@ -258,7 +306,7 @@ Index: multica/server/internal/daemon/client.go
  		"runtime_id":            runtimeID,
  		"supports_batch_import": true,
  	}, &resp); err != nil {
-@@ -356,28 +453,30 @@ func (c *Client) SendHeartbeat(ctx conte
+@@ -356,28 +494,30 @@ func (c *Client) SendHeartbeat(ctx conte
  
  // ReportUpdateResult sends the CLI update result back to the server.
  func (c *Client) ReportUpdateResult(ctx context.Context, runtimeID, updateID string, result map[string]any) error {
@@ -295,7 +343,7 @@ Index: multica/server/internal/daemon/client.go
  }
  
  // RenewTokenResponse mirrors handler.RenewPATResponse — kept loose (string +
-@@ -402,9 +501,14 @@ func (c *Client) RenewToken(ctx context.
+@@ -402,9 +542,14 @@ func (c *Client) RenewToken(ctx context.
  }
  
  // ListWorkspaces fetches all workspaces the authenticated user belongs to.
@@ -312,7 +360,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return workspaces, nil
-@@ -419,7 +523,7 @@ type IssueGCStatus struct {
+@@ -419,7 +564,7 @@ type IssueGCStatus struct {
  // GetIssueGCCheck returns the status and updated_at of an issue for GC decisions.
  func (c *Client) GetIssueGCCheck(ctx context.Context, issueID string) (*IssueGCStatus, error) {
  	var resp IssueGCStatus
@@ -321,7 +369,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return &resp, nil
-@@ -437,7 +541,7 @@ type ChatSessionGCStatus struct {
+@@ -437,7 +582,7 @@ type ChatSessionGCStatus struct {
  // signal.
  func (c *Client) GetChatSessionGCCheck(ctx context.Context, sessionID string) (*ChatSessionGCStatus, error) {
  	var resp ChatSessionGCStatus
@@ -330,7 +378,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return &resp, nil
-@@ -456,7 +560,7 @@ type AutopilotRunGCStatus struct {
+@@ -456,7 +601,7 @@ type AutopilotRunGCStatus struct {
  // GetAutopilotRunGCCheck returns the status of an autopilot run for GC decisions.
  func (c *Client) GetAutopilotRunGCCheck(ctx context.Context, runID string) (*AutopilotRunGCStatus, error) {
  	var resp AutopilotRunGCStatus
@@ -339,7 +387,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return &resp, nil
-@@ -473,14 +577,14 @@ type TaskGCStatus struct {
+@@ -473,14 +618,14 @@ type TaskGCStatus struct {
  // GetTaskGCCheck returns the status of an agent task for GC decisions.
  func (c *Client) GetTaskGCCheck(ctx context.Context, taskID string) (*TaskGCStatus, error) {
  	var resp TaskGCStatus
@@ -356,7 +404,7 @@ Index: multica/server/internal/daemon/client.go
  		"runtime_ids": runtimeIDs,
  	}, nil)
  }
-@@ -495,7 +599,24 @@ type RegisterResponse struct {
+@@ -495,7 +640,24 @@ type RegisterResponse struct {
  
  func (c *Client) Register(ctx context.Context, req map[string]any) (*RegisterResponse, error) {
  	var resp RegisterResponse
@@ -382,7 +430,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return &resp, nil
-@@ -510,7 +631,7 @@ type WorkspaceReposResponse struct {
+@@ -510,7 +672,7 @@ type WorkspaceReposResponse struct {
  
  func (c *Client) GetWorkspaceRepos(ctx context.Context, workspaceID string) (*WorkspaceReposResponse, error) {
  	var resp WorkspaceReposResponse
@@ -391,7 +439,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return &resp, nil
-@@ -547,7 +668,7 @@ type RuntimeProfilesResponse struct {
+@@ -547,7 +709,7 @@ type RuntimeProfilesResponse struct {
  // continues with built-in runtimes only.
  func (c *Client) GetRuntimeProfiles(ctx context.Context, workspaceID string) (*RuntimeProfilesResponse, error) {
  	var resp RuntimeProfilesResponse
@@ -400,50 +448,125 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return &resp, nil
-@@ -689,10 +810,7 @@ func (c *Client) postJSONVia(ctx context
- 		return err
+@@ -675,34 +837,51 @@ func (c *Client) postJSON(ctx context.Co
+ // to control the timeout regime: c.client (fixed 30s) for control-plane calls,
+ // c.bundleClient (deadline from ctx) for large skill-bundle downloads.
+ func (c *Client) postJSONVia(ctx context.Context, httpClient *http.Client, path string, reqBody any, respBody any) error {
+-	var body io.Reader
++	var data []byte
+ 	if reqBody != nil {
+-		data, err := json.Marshal(reqBody)
++		var err error
++		data, err = json.Marshal(reqBody)
+ 		if err != nil {
+ 			return err
+ 		}
+-		body = bytes.NewReader(data)
  	}
- 	req.Header.Set("Content-Type", "application/json")
+ 
+-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, body)
+-	if err != nil {
+-		return err
+-	}
+-	req.Header.Set("Content-Type", "application/json")
 -	if c.token != "" {
 -		req.Header.Set("Authorization", "Bearer "+c.token)
--	}
--	c.setIdentityHeaders(req)
-+	c.setAuthHeaders(req)
- 
- 	resp, err := httpClient.Do(req)
- 	if err != nil {
-@@ -700,6 +818,9 @@ func (c *Client) postJSONVia(ctx context
++	do := func() (*http.Response, error) {
++		var body io.Reader
++		if data != nil {
++			body = bytes.NewReader(data)
++		}
++		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, body)
++		if err != nil {
++			return nil, err
++		}
++		req.Header.Set("Content-Type", "application/json")
++		c.setAuthHeaders(req)
++		return httpClient.Do(req)
  	}
- 	defer resp.Body.Close()
+-	c.setIdentityHeaders(req)
  
-+	if resp.StatusCode == 401 && c.apiKey != "" && c.onTokenError != nil {
-+		c.onTokenError()
-+	}
- 	if resp.StatusCode >= 400 {
- 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
- 		return &requestError{Method: http.MethodPost, Path: path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
-@@ -716,10 +837,7 @@ func (c *Client) getJSON(ctx context.Con
+-	resp, err := httpClient.Do(req)
++	resp, err := do()
  	if err != nil {
  		return err
  	}
--	if c.token != "" {
--		req.Header.Set("Authorization", "Bearer "+c.token)
--	}
--	c.setIdentityHeaders(req)
-+	c.setAuthHeaders(req)
- 
- 	resp, err := c.client.Do(req)
- 	if err != nil {
-@@ -727,6 +845,9 @@ func (c *Client) getJSON(ctx context.Con
- 	}
++	// A 401 in Odoo mode almost always means the access_token expired mid-run
++	// rather than the caller passing bad credentials. Refresh (deduped/locked
++	// in FetchOdooToken, see tokenMu/tokenRefresh) and retry this one request
++	// with the new token so an ordinary expiry is invisible to the caller
++	// instead of surfacing as a guaranteed failed call on every rollover.
++	if resp.StatusCode == 401 && c.odooAuthActive() && c.onTokenError != nil {
++		resp.Body.Close()
++		c.onTokenError()
++		resp, err = do()
++		if err != nil {
++			return err
++		}
++	}
  	defer resp.Body.Close()
  
-+	if resp.StatusCode == 401 && c.apiKey != "" && c.onTokenError != nil {
-+		c.onTokenError()
-+	}
  	if resp.StatusCode >= 400 {
- 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
- 		return &requestError{Method: http.MethodGet, Path: path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+-		return &requestError{Method: http.MethodPost, Path: path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
++		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
++		return &requestError{Method: http.MethodPost, Path: path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(errBody))}
+ 	}
+ 	if respBody == nil {
+ 		io.Copy(io.Discard, resp.Body)
+@@ -711,25 +890,42 @@ func (c *Client) postJSONVia(ctx context
+ 	return json.NewDecoder(resp.Body).Decode(respBody)
+ }
+ 
++// odooAuthActive reports whether the client currently holds an Odoo OpenAPI
++// token pair (as opposed to native-mode Bearer auth, where a 401 means
++// "re-login", not "refresh").
++func (c *Client) odooAuthActive() bool {
++	c.tokenMu.RLock()
++	defer c.tokenMu.RUnlock()
++	return c.apiKey != ""
++}
++
+ func (c *Client) getJSON(ctx context.Context, path string, respBody any) error {
+-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+-	if err != nil {
+-		return err
+-	}
+-	if c.token != "" {
+-		req.Header.Set("Authorization", "Bearer "+c.token)
++	do := func() (*http.Response, error) {
++		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
++		if err != nil {
++			return nil, err
++		}
++		c.setAuthHeaders(req)
++		return c.client.Do(req)
+ 	}
+-	c.setIdentityHeaders(req)
+ 
+-	resp, err := c.client.Do(req)
++	resp, err := do()
+ 	if err != nil {
+ 		return err
+ 	}
++	if resp.StatusCode == 401 && c.odooAuthActive() && c.onTokenError != nil {
++		resp.Body.Close()
++		c.onTokenError()
++		resp, err = do()
++		if err != nil {
++			return err
++		}
++	}
+ 	defer resp.Body.Close()
+ 
+ 	if resp.StatusCode >= 400 {
+-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+-		return &requestError{Method: http.MethodGet, Path: path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
++		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
++		return &requestError{Method: http.MethodGet, Path: path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(errBody))}
+ 	}
+ 	if respBody == nil {
+ 		io.Copy(io.Discard, resp.Body)
 Index: multica/server/internal/daemon/config.go
 ===================================================================
 --- multica.orig/server/internal/daemon/config.go
@@ -847,3 +970,192 @@ Index: multica/server/pkg/protocol/messages.go
  	PendingUpdate           *DaemonHeartbeatPendingUpdate           `json:"pending_update,omitempty"`
  	PendingModelList        *DaemonHeartbeatPendingModelList        `json:"pending_model_list,omitempty"`
  	PendingLocalSkills      *DaemonHeartbeatPendingLocalSkills      `json:"pending_local_skills,omitempty"`
+Index: multica/server/internal/daemon/client_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/client_test.go
++++ multica/server/internal/daemon/client_test.go
+@@ -4,9 +4,12 @@ import (
+ 	"context"
+ 	"encoding/json"
+ 	"errors"
++	"fmt"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"runtime"
++	"strings"
++	"sync"
+ 	"sync/atomic"
+ 	"testing"
+ 	"time"
+@@ -253,3 +256,171 @@ func TestNormalizeGOOS(t *testing.T) {
+ 		}
+ 	}
+ }
++
++// TestClient_FetchOdooToken_ConcurrentCallsAreDeduped guards against the bug
++// where every goroutine that sees a 401 at the moment the Odoo access_token
++// truly expires (heartbeat, workspace sync, task poll, the refresh loop's own
++// timer — all independent goroutines) called FetchOdooToken on its own. With
++// no locking, two overlapping fetches could interleave their writes to
++// accessToken/apiKey and leave a mismatched pair that the server rejects
++// forever. tokenRefresh (singleflight) should collapse concurrent callers
++// into exactly one HTTP round trip, and tokenMu should make the result
++// visible as one atomic, matched pair. Run with -race to catch the data race
++// directly, not just the symptom.
++func TestClient_FetchOdooToken_ConcurrentCallsAreDeduped(t *testing.T) {
++	var calls atomic.Int32
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		n := calls.Add(1)
++		// Widen the race window so concurrent callers are likely to overlap
++		// even on a fast machine.
++		time.Sleep(20 * time.Millisecond)
++		w.Header().Set("Content-Type", "application/json")
++		json.NewEncoder(w).Encode(map[string]any{
++			"access_token": fmt.Sprintf("tok-%d", n),
++			"api_key":      fmt.Sprintf("key-%d", n),
++			"expires_in":   7200,
++		})
++	}))
++	defer srv.Close()
++
++	c := NewClient(srv.URL)
++	const n = 20
++	var wg sync.WaitGroup
++	wg.Add(n)
++	for i := 0; i < n; i++ {
++		go func() {
++			defer wg.Done()
++			if err := c.FetchOdooToken(context.Background(), "app", "secret", ""); err != nil {
++				t.Errorf("FetchOdooToken: %v", err)
++			}
++		}()
++	}
++	wg.Wait()
++
++	if got := calls.Load(); got != 1 {
++		t.Fatalf("expected exactly 1 HTTP call to /openapi/token (deduped), got %d", got)
++	}
++	accessToken, apiKey := c.OdooCredentials()
++	suffix := strings.TrimPrefix(accessToken, "tok-")
++	if suffix == accessToken || apiKey != "key-"+suffix {
++		t.Fatalf("mismatched credential pair: accessToken=%q apiKey=%q", accessToken, apiKey)
++	}
++}
++
++// TestClient_PostJSON_RetriesOnceAfterOdooTokenRefresh verifies that an
++// ordinary token-expiry 401 is invisible to the caller: postJSONVia should
++// refresh (via onTokenError) and retry the same request once with the new
++// credentials, rather than surfacing the first 401 as an error.
++func TestClient_PostJSON_RetriesOnceAfterOdooTokenRefresh(t *testing.T) {
++	var tokenCalls atomic.Int32
++	var apiCalls atomic.Int32
++	var mu sync.Mutex
++	validKey := ""
++
++	mux := http.NewServeMux()
++	mux.HandleFunc("/openapi/token", func(w http.ResponseWriter, r *http.Request) {
++		n := tokenCalls.Add(1)
++		newKey := fmt.Sprintf("key-%d", n)
++		mu.Lock()
++		validKey = newKey
++		mu.Unlock()
++		w.Header().Set("Content-Type", "application/json")
++		json.NewEncoder(w).Encode(map[string]any{
++			"access_token": fmt.Sprintf("tok-%d", n),
++			"api_key":      newKey,
++			"expires_in":   7200,
++		})
++	})
++	mux.HandleFunc("/api/daemon/test", func(w http.ResponseWriter, r *http.Request) {
++		apiCalls.Add(1)
++		mu.Lock()
++		key := validKey
++		mu.Unlock()
++		if r.Header.Get("X-GALAXY-API-KEY") != key {
++			w.WriteHeader(http.StatusUnauthorized)
++			return
++		}
++		w.WriteHeader(http.StatusOK)
++	})
++	srv := httptest.NewServer(mux)
++	defer srv.Close()
++
++	c := NewClient(srv.URL)
++	// Seed a stale credential pair, mimicking a token that expired since the
++	// daemon's last successful fetch.
++	c.accessToken = "stale-token"
++	c.apiKey = "stale-key"
++	c.SetOnTokenError(func() {
++		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++		defer cancel()
++		_ = c.FetchOdooToken(ctx, "app", "secret", "")
++	})
++
++	if err := c.postJSON(context.Background(), "/api/daemon/test", nil, nil); err != nil {
++		t.Fatalf("postJSON: %v", err)
++	}
++	if got := apiCalls.Load(); got != 2 {
++		t.Fatalf("expected 2 calls to /api/daemon/test (401 then retry), got %d", got)
++	}
++	if got := tokenCalls.Load(); got != 1 {
++		t.Fatalf("expected exactly 1 token refresh, got %d", got)
++	}
++}
++
++// TestClient_GetJSON_RetriesOnceAfterOdooTokenRefresh mirrors the postJSON
++// case for getJSON, which has its own independent 401-handling branch.
++func TestClient_GetJSON_RetriesOnceAfterOdooTokenRefresh(t *testing.T) {
++	var tokenCalls atomic.Int32
++	var apiCalls atomic.Int32
++	var mu sync.Mutex
++	validKey := ""
++
++	mux := http.NewServeMux()
++	mux.HandleFunc("/openapi/token", func(w http.ResponseWriter, r *http.Request) {
++		n := tokenCalls.Add(1)
++		newKey := fmt.Sprintf("key-%d", n)
++		mu.Lock()
++		validKey = newKey
++		mu.Unlock()
++		w.Header().Set("Content-Type", "application/json")
++		json.NewEncoder(w).Encode(map[string]any{
++			"access_token": fmt.Sprintf("tok-%d", n),
++			"api_key":      newKey,
++			"expires_in":   7200,
++		})
++	})
++	mux.HandleFunc("/api/daemon/test", func(w http.ResponseWriter, r *http.Request) {
++		apiCalls.Add(1)
++		mu.Lock()
++		key := validKey
++		mu.Unlock()
++		if r.Header.Get("X-GALAXY-API-KEY") != key {
++			w.WriteHeader(http.StatusUnauthorized)
++			return
++		}
++		w.Header().Set("Content-Type", "application/json")
++		w.Write([]byte(`{}`))
++	})
++	srv := httptest.NewServer(mux)
++	defer srv.Close()
++
++	c := NewClient(srv.URL)
++	c.accessToken = "stale-token"
++	c.apiKey = "stale-key"
++	c.SetOnTokenError(func() {
++		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++		defer cancel()
++		_ = c.FetchOdooToken(ctx, "app", "secret", "")
++	})
++
++	var out map[string]any
++	if err := c.getJSON(context.Background(), "/api/daemon/test", &out); err != nil {
++		t.Fatalf("getJSON: %v", err)
++	}
++	if got := apiCalls.Load(); got != 2 {
++		t.Fatalf("expected 2 calls to /api/daemon/test (401 then retry), got %d", got)
++	}
++	if got := tokenCalls.Load(); got != 1 {
++		t.Fatalf("expected exactly 1 token refresh, got %d", got)
++	}
++}

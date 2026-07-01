@@ -46,7 +46,7 @@ Index: multica/server/internal/daemon/config.go
  		if oc := openclawOverrideFrom(cliCfg); oc != nil {
  			applyOpenclawOverride(oc)
  		}
-@@ -439,11 +443,17 @@ func LoadConfig(overrides Overrides) (Co
+@@ -446,11 +450,17 @@ func LoadConfig(overrides Overrides) (Co
  		return Config{}, err
  	}
  
@@ -69,7 +69,7 @@ Index: multica/server/internal/daemon/config.go
  
  	// Health port: override > default
  	healthPort := DefaultHealthPort
-@@ -542,6 +552,8 @@ func LoadConfig(overrides Overrides) (Co
+@@ -549,6 +559,8 @@ func LoadConfig(overrides Overrides) (Co
  		CodebuddyArgs:                  codebuddyArgs,
  		BackendMode:                    backendMode,
  		DBName:                         dbName,

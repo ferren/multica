@@ -615,7 +615,7 @@ Index: multica/server/internal/daemon/config.go
  
  	// ProfileCommandOverrides maps a custom runtime profile_id -> the absolute
  	// executable path to use for that profile on THIS machine (MUL-3284).
-@@ -437,6 +439,12 @@ func LoadConfig(overrides Overrides) (Co
+@@ -444,6 +446,12 @@ func LoadConfig(overrides Overrides) (Co
  		return Config{}, err
  	}
  
@@ -628,7 +628,7 @@ Index: multica/server/internal/daemon/config.go
  	// Health port: override > default
  	healthPort := DefaultHealthPort
  	if overrides.HealthPort > 0 {
-@@ -490,6 +498,11 @@ func LoadConfig(overrides Overrides) (Co
+@@ -497,6 +505,11 @@ func LoadConfig(overrides Overrides) (Co
  	if overrides.DisableAutoUpdate {
  		autoUpdateEnabled = false
  	}
@@ -640,7 +640,7 @@ Index: multica/server/internal/daemon/config.go
  	autoUpdateInterval, err := durationFromEnv("MULTICA_DAEMON_AUTO_UPDATE_INTERVAL", DefaultAutoUpdateCheckInterval)
  	if err != nil {
  		return Config{}, err
-@@ -527,6 +540,8 @@ func LoadConfig(overrides Overrides) (Co
+@@ -534,6 +547,8 @@ func LoadConfig(overrides Overrides) (Co
  		ClaudeArgs:                     claudeArgs,
  		CodexArgs:                      codexArgs,
  		CodebuddyArgs:                  codebuddyArgs,
@@ -984,7 +984,7 @@ Index: multica/server/internal/daemon/daemon.go
  }
  
  // handleModelList resolves the provider's supported models (via static
-@@ -3805,7 +3993,7 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3823,7 +4011,7 @@ func (d *Daemon) runTask(ctx context.Con
  	if task.Agent != nil && task.Agent.Model != "" {
  		model = task.Agent.Model
  	}

@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -3680,6 +3680,23 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3698,6 +3698,23 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
@@ -26,7 +26,7 @@ Index: multica/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:                          task.IssueID,
  		TriggerCommentID:                 task.TriggerCommentID,
-@@ -3713,6 +3730,10 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3731,6 +3748,10 @@ func (d *Daemon) runTask(ctx context.Con
  		InitiatorName:                    task.InitiatorName,
  		InitiatorEmail:                   task.InitiatorEmail,
  		WorkspaceContext:                 task.WorkspaceContext,
@@ -37,7 +37,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  
  	// Mark candidate env roots as active before any env work so the GC loop
-@@ -3864,10 +3885,25 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3882,10 +3903,25 @@ func (d *Daemon) runTask(ctx context.Con
  	// MULTICA_TOKEN is bound to (agent, task) by the server. Never fall back
  	// to the daemon's own credential here: doing so lets agent CLI writes land
  	// as the runtime owner's member actor and can retrigger the same agent.
@@ -67,7 +67,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  	agentEnv := map[string]string{
  		"MULTICA_TOKEN":        agentToken,
-@@ -3879,6 +3915,11 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3897,6 +3933,11 @@ func (d *Daemon) runTask(ctx context.Con
  		"MULTICA_TASK_ID":      task.ID,
  		"MULTICA_TASK_SLOT":    strconv.Itoa(slot),
  	}
@@ -99,7 +99,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config.go
 +++ multica/server/internal/daemon/execenv/runtime_config.go
-@@ -832,6 +832,40 @@ func buildMetaSkillContent(provider stri
+@@ -833,6 +833,40 @@ func buildMetaSkillContent(provider stri
  		b.WriteString("Bad: \"1. Read the issue 2. Found the bug in auth.go 3. Created branch 4. ...\"\n")
  		b.WriteString("When referencing an issue in a comment, use the issue mention format `[MUL-123](mention://issue/<issue-id>)` so it renders as a clickable link. (Issue mentions have no side effect; only member/agent mentions do — see the Mentions section above.)\n")
  	}

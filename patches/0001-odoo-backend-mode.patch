@@ -1022,7 +1022,7 @@ Index: multica/server/internal/daemon/client_test.go
  	"sync/atomic"
  	"testing"
  	"time"
-@@ -253,3 +256,238 @@ func TestNormalizeGOOS(t *testing.T) {
+@@ -253,3 +256,268 @@ func TestNormalizeGOOS(t *testing.T) {
  		}
  	}
  }
@@ -1259,5 +1259,35 @@ Index: multica/server/internal/daemon/client_test.go
 +	c := NewClient(srv.URL)
 +	if err := c.FetchOdooToken(context.Background(), "app", "secret", ""); err == nil {
 +		t.Fatal("expected an error when no api_key has ever been provided, got nil")
++	}
++}
++
++// TestClient_MintAgentToken_PostsToAgentScopedEndpoint verifies MintAgentToken
++// hits the Odoo-mode per-agent minting route (not the daemon-wide
++// /openapi/token) and parses the resulting access_token/api_key/expires_in.
++func TestClient_MintAgentToken_PostsToAgentScopedEndpoint(t *testing.T) {
++	var gotPath string
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		gotPath = r.URL.Path
++		w.Header().Set("Content-Type", "application/json")
++		json.NewEncoder(w).Encode(map[string]any{
++			"access_token": "agent-tok",
++			"api_key":      "agent-key",
++			"expires_in":   7200,
++		})
++	}))
++	defer srv.Close()
++
++	c := NewClient(srv.URL)
++	c.SetPathPrefix("/multica")
++	accessToken, apiKey, expiresIn, err := c.MintAgentToken(context.Background(), "42")
++	if err != nil {
++		t.Fatalf("MintAgentToken: %v", err)
++	}
++	if accessToken != "agent-tok" || apiKey != "agent-key" || expiresIn != 7200 {
++		t.Fatalf("unexpected result: accessToken=%q apiKey=%q expiresIn=%d", accessToken, apiKey, expiresIn)
++	}
++	if want := "/multica/daemon/agents/42/token"; gotPath != want {
++		t.Fatalf("path = %q, want %q", gotPath, want)
 +	}
 +}

@@ -43,7 +43,7 @@ Index: multica/server/cmd/multica/cmd_id_resolver.go
  		return resolvedID{ID: trimmed, Display: trimmed}, nil
  	}
  
-@@ -139,7 +139,7 @@ func resolveIssueRef(ctx context.Context
+@@ -150,7 +150,7 @@ func resolveIssueRef(ctx context.Context
  	if looksLikeIssueIdentifier(trimmed) {
  		return fetchIssueRef(ctx, client, trimmed)
  	}
@@ -51,8 +51,8 @@ Index: multica/server/cmd/multica/cmd_id_resolver.go
 +	if looksLikeDirectID(trimmed) {
  		return fetchIssueRef(ctx, client, trimmed)
  	}
- 	return resolveIDByPrefix(ctx, client, "issue", trimmed, fetchIssueCandidates)
-@@ -284,7 +284,7 @@ func fetchAutopilotCandidates(ctx contex
+ 
+@@ -275,7 +275,7 @@ func fetchAutopilotCandidates(ctx contex
  
  func resolveTaskRunID(ctx context.Context, client *cli.APIClient, issueID, input string) (resolvedID, error) {
  	trimmed := strings.TrimSpace(input)
@@ -61,7 +61,7 @@ Index: multica/server/cmd/multica/cmd_id_resolver.go
  		return resolvedID{ID: trimmed, Display: trimmed}, nil
  	}
  	if strings.TrimSpace(issueID) == "" {
-@@ -317,7 +317,7 @@ func fetchTaskRunCandidatesForIssue(ctx
+@@ -308,7 +308,7 @@ func fetchTaskRunCandidatesForIssue(ctx
  
  func resolveAutopilotTriggerID(ctx context.Context, client *cli.APIClient, autopilotID, input string) (resolvedID, error) {
  	trimmed := strings.TrimSpace(input)

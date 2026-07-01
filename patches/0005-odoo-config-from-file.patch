@@ -82,7 +82,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -876,10 +876,10 @@ func (d *Daemon) resolveAuth() error {
+@@ -883,10 +883,10 @@ func (d *Daemon) resolveAuth() error {
  // resolveOdooAuth calls /openapi/token with MULTICA_APP_ID + MULTICA_APP_SECRET
  // to obtain access_token and api_key for Odoo OpenAPI auth.
  func (d *Daemon) resolveOdooAuth() error {
@@ -96,7 +96,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
  	defer cancel()
-@@ -963,8 +963,8 @@ func (d *Daemon) connectDaemon(ctx conte
+@@ -970,8 +970,8 @@ func (d *Daemon) connectDaemon(ctx conte
  // odooTokenRefreshLoop periodically refreshes the Odoo OpenAPI access_token
  // before it expires. refreshAt = expires_in - 5 minutes (safe margin).
  func (d *Daemon) odooTokenRefreshLoop(ctx context.Context) {

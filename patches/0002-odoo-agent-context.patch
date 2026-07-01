@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -3634,6 +3634,7 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3680,6 +3680,7 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
@@ -10,7 +10,7 @@ Index: multica/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:                          task.IssueID,
  		TriggerCommentID:                 task.TriggerCommentID,
-@@ -3667,6 +3668,10 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3713,6 +3714,10 @@ func (d *Daemon) runTask(ctx context.Con
  		InitiatorName:                    task.InitiatorName,
  		InitiatorEmail:                   task.InitiatorEmail,
  		WorkspaceContext:                 task.WorkspaceContext,
@@ -21,7 +21,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  
  	// Mark candidate env roots as active before any env work so the GC loop
-@@ -3818,10 +3823,25 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3864,10 +3869,25 @@ func (d *Daemon) runTask(ctx context.Con
  	// MULTICA_TOKEN is bound to (agent, task) by the server. Never fall back
  	// to the daemon's own credential here: doing so lets agent CLI writes land
  	// as the runtime owner's member actor and can retrigger the same agent.
@@ -51,7 +51,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  	agentEnv := map[string]string{
  		"MULTICA_TOKEN":        agentToken,
-@@ -3833,6 +3853,11 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3879,6 +3899,11 @@ func (d *Daemon) runTask(ctx context.Con
  		"MULTICA_TASK_ID":      task.ID,
  		"MULTICA_TASK_SLOT":    strconv.Itoa(slot),
  	}

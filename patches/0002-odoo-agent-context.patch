@@ -99,7 +99,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config.go
 +++ multica/server/internal/daemon/execenv/runtime_config.go
-@@ -833,6 +833,40 @@ func buildMetaSkillContent(provider stri
+@@ -833,6 +833,50 @@ func buildMetaSkillContent(provider stri
  		b.WriteString("Bad: \"1. Read the issue 2. Found the bug in auth.go 3. Created branch 4. ...\"\n")
  		b.WriteString("When referencing an issue in a comment, use the issue mention format `[MUL-123](mention://issue/<issue-id>)` so it renders as a clickable link. (Issue mentions have no side effect; only member/agent mentions do — see the Mentions section above.)\n")
  	}
@@ -121,6 +121,15 @@ Index: multica/server/internal/daemon/execenv/runtime_config.go
 +		if ctx.OdooAccessToken != "" {
 +			fmt.Fprintf(&b, "```sh\nH=(-H 'X-GALAXY-ACCESS-TOKEN: Bearer %s' -H 'X-GALAXY-API-KEY: %s')\ncurl -s \"${H[@]}\" %s/multica/agent/issues/<id>\n```\n", ctx.OdooAccessToken, ctx.OdooAPIKey, ctx.OdooURL)
 +		}
++		// Resumed sessions carry the previous run's (now-rotated) header values
++		// in their own conversation history; the file on disk is rewritten with
++		// fresh credentials every run, so a 401 means "re-read the file", not
++		// "the backend is broken".
++		briefFile := filepath.Base(runtimeConfigPath(".", provider))
++		if briefFile == "" || briefFile == "." {
++			briefFile = "CLAUDE.md / AGENTS.md"
++		}
++		fmt.Fprintf(&b, "\n⚠️ These credentials are re-issued fresh for every run and expire between runs. If any request returns **401**, the header values you are using are stale — this is expected in a resumed session, where your earlier messages contain last run's now-expired credentials. Do NOT keep retrying the same values and do NOT abandon the task: re-read the Required Headers section of `%s` in your working directory (the file has already been rewritten with fresh credentials), rebuild your header variable from it, and retry.\n", briefFile)
 +		b.WriteString("\n### REST APIs\n\n")
 +		b.WriteString("All examples already include the two required headers above — copy them verbatim:\n\n")
 +		if ctx.OdooURL != "" && ctx.OdooAccessToken != "" {
@@ -132,6 +141,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config.go
 +		}
 +		b.WriteString("### Rules\n")
 +		b.WriteString("1. Use the REST APIs above for issue/comment operations — no multica CLI for these\n")
++		fmt.Fprintf(&b, "1a. On any **401** response: re-read the Required Headers from `%s` and retry with the fresh values — never reuse header values remembered from earlier in a resumed conversation.\n", briefFile)
 +		b.WriteString("2. Work in current directory for file operations\n")
 +		b.WriteString("3. Output a clear summary at the end\n")
 +		b.WriteString("4. Odoo task status values: Backlog, Todo, In Progress, In Review, Done\n")

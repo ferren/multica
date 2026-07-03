@@ -984,7 +984,7 @@ Index: multica/server/internal/daemon/daemon.go
  }
  
  // handleModelList resolves the provider's supported models (via static
-@@ -3823,7 +4011,7 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3824,7 +4012,7 @@ func (d *Daemon) runTask(ctx context.Con
  	if task.Agent != nil && task.Agent.Model != "" {
  		model = task.Agent.Model
  	}

@@ -59,7 +59,7 @@ Index: multica/server/internal/daemon/daemon.go
  func (d *Daemon) clearTaskRepoRefs(workspaceID, taskID string) {
  	taskID = strings.TrimSpace(taskID)
  	if taskID == "" {
-@@ -4762,7 +4791,7 @@ func convertReposForEnv(repos []RepoData
+@@ -4763,7 +4792,7 @@ func convertReposForEnv(repos []RepoData
  	}
  	result := make([]execenv.RepoContextForEnv, len(repos))
  	for i, r := range repos {
@@ -72,7 +72,7 @@ Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
 +++ multica/server/internal/daemon/execenv/execenv.go
-@@ -17,6 +17,7 @@ type RepoContextForEnv struct {
+@@ -19,6 +19,7 @@ type RepoContextForEnv struct {
  	URL         string // remote URL
  	Description string // optional repo description
  	Ref         string // optional default checkout ref for this task
@@ -84,7 +84,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config_sections.go
 +++ multica/server/internal/daemon/execenv/runtime_config_sections.go
-@@ -200,11 +200,23 @@ func writeRepositories(b *strings.Builde
+@@ -244,11 +244,23 @@ func writeRepositories(b *strings.Builde
  	b.WriteString("## Repositories\n\n")
  	b.WriteString("Available in this workspace — `multica repo checkout <url> [--ref <branch-or-sha>]` to fetch (creates a git worktree on a dedicated branch).\n\n")
  	for _, repo := range ctx.Repos {
@@ -136,7 +136,7 @@ Index: multica/server/internal/daemon/repocache/cache.go
 ===================================================================
 --- multica.orig/server/internal/daemon/repocache/cache.go
 +++ multica/server/internal/daemon/repocache/cache.go
-@@ -379,6 +379,7 @@ type WorktreeParams struct {
+@@ -420,6 +420,7 @@ type WorktreeParams struct {
  	RepoURL             string // remote URL to look up in the cache
  	WorkDir             string // parent directory for the worktree (e.g. task workdir)
  	Ref                 string // optional branch, tag, or commit to base the worktree on
@@ -144,7 +144,7 @@ Index: multica/server/internal/daemon/repocache/cache.go
  	AgentName           string // for branch naming
  	TaskID              string // for branch naming uniqueness
  	CoAuthoredByEnabled bool   // install prepare-commit-msg hook for Co-authored-by trailer
-@@ -446,9 +447,21 @@ func (c *Cache) CreateWorktree(params Wo
+@@ -487,9 +488,21 @@ func (c *Cache) CreateWorktree(params Wo
  	// Build branch name: agent/{sanitized-name}/{short-task-id}
  	branchName := fmt.Sprintf("agent/%s/%s", sanitizeName(params.AgentName), shortID(params.TaskID))
  
@@ -168,7 +168,7 @@ Index: multica/server/internal/daemon/repocache/cache.go
  
  	// If worktree already exists (reused environment from a prior task),
  	// update it to the latest remote code instead of creating a new one.
-@@ -937,6 +950,27 @@ func excludeFromGit(worktreePath, patter
+@@ -954,6 +967,27 @@ func excludeFromGit(worktreePath, patter
  	return nil
  }
  
@@ -200,7 +200,7 @@ Index: multica/server/internal/daemon/types.go
 ===================================================================
 --- multica.orig/server/internal/daemon/types.go
 +++ multica/server/internal/daemon/types.go
-@@ -27,6 +27,11 @@ type RepoData struct {
+@@ -31,6 +31,11 @@ type RepoData struct {
  	URL         string `json:"url"`
  	Description string `json:"description,omitempty"`
  	Ref         string `json:"ref,omitempty"`

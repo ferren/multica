@@ -26,10 +26,10 @@ Index: multica/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:                          task.IssueID,
  		TriggerCommentID:                 task.TriggerCommentID,
-@@ -3731,6 +3748,10 @@ func (d *Daemon) runTask(ctx context.Con
- 		InitiatorName:                    task.InitiatorName,
+@@ -3732,6 +3749,10 @@ func (d *Daemon) runTask(ctx context.Con
  		InitiatorEmail:                   task.InitiatorEmail,
  		WorkspaceContext:                 task.WorkspaceContext,
+ 		ConnectedApps:                    task.ConnectedApps,
 +		BackendMode:                      d.cfg.BackendMode,
 +		OdooURL:                          d.cfg.ServerBaseURL,
 +		OdooAccessToken:                  accessToken,
@@ -37,7 +37,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  
  	// Mark candidate env roots as active before any env work so the GC loop
-@@ -3882,10 +3903,25 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3883,10 +3904,25 @@ func (d *Daemon) runTask(ctx context.Con
  	// MULTICA_TOKEN is bound to (agent, task) by the server. Never fall back
  	// to the daemon's own credential here: doing so lets agent CLI writes land
  	// as the runtime owner's member actor and can retrigger the same agent.
@@ -67,7 +67,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  	agentEnv := map[string]string{
  		"MULTICA_TOKEN":        agentToken,
-@@ -3897,6 +3933,11 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3898,6 +3934,11 @@ func (d *Daemon) runTask(ctx context.Con
  		"MULTICA_TASK_ID":      task.ID,
  		"MULTICA_TASK_SLOT":    strconv.Itoa(slot),
  	}
@@ -83,7 +83,7 @@ Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
 +++ multica/server/internal/daemon/execenv/execenv.go
-@@ -101,6 +101,11 @@ type TaskContextForEnv struct {
+@@ -107,6 +107,11 @@ type TaskContextForEnv struct {
  	// context and the agent stays anonymous-user mode.
  	RequestingUserName               string
  	RequestingUserProfileDescription string
@@ -99,7 +99,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config.go
 +++ multica/server/internal/daemon/execenv/runtime_config.go
-@@ -833,6 +833,50 @@ func buildMetaSkillContent(provider stri
+@@ -834,6 +834,50 @@ func buildMetaSkillContent(provider stri
  		b.WriteString("Bad: \"1. Read the issue 2. Found the bug in auth.go 3. Created branch 4. ...\"\n")
  		b.WriteString("When referencing an issue in a comment, use the issue mention format `[MUL-123](mention://issue/<issue-id>)` so it renders as a clickable link. (Issue mentions have no side effect; only member/agent mentions do — see the Mentions section above.)\n")
  	}
@@ -154,15 +154,15 @@ Index: multica/server/cmd/multica/cmd_agent.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_agent.go
 +++ multica/server/cmd/multica/cmd_agent.go
-@@ -249,7 +249,10 @@ func newAPIClient(cmd *cobra.Command) (*
+@@ -256,7 +256,10 @@ func newAPIClient(cmd *cobra.Command) (*
  	if serverURL == "" {
  		return nil, fmt.Errorf("server URL not set: use --server-url flag, MULTICA_SERVER_URL env, or 'multica config set server_url <url>'")
  	}
--	if inAgentExecutionContext() && !strings.HasPrefix(token, "mat_") {
+-	if inDaemonManagedExecutionContext() && !strings.HasPrefix(token, "mat_") {
 +	// Odoo backend mode does not mint mat_ tokens; the agent authenticates to
 +	// Odoo via Galaxy headers, so the task-scoped token requirement is bypassed.
-+	if inAgentExecutionContext() && os.Getenv("MULTICA_BACKEND_MODE") != "odoo" &&
++	if inDaemonManagedExecutionContext() && os.Getenv("MULTICA_BACKEND_MODE") != "odoo" &&
 +		!strings.HasPrefix(token, "mat_") {
- 		return nil, fmt.Errorf("agent execution context requires MULTICA_TOKEN to be a task-scoped mat_ token")
- 	}
- 
+ 		// When the ONLY daemon signal is a workdir marker (no MULTICA_AGENT_ID /
+ 		// MULTICA_TASK_ID / MULTICA_DAEMON_PORT), the likeliest cause outside a
+ 		// real task is a leftover marker from a crashed daemon task in a

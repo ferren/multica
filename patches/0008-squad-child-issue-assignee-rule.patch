@@ -1,0 +1,21 @@
+Index: multica/server/internal/handler/squad_briefing.go
+===================================================================
+--- multica.orig/server/internal/handler/squad_briefing.go
++++ multica/server/internal/handler/squad_briefing.go
+@@ -94,7 +94,15 @@ Hard rules:
+   work, the agent runs twice in parallel (once from the mention, once
+   from the assignment). Pick exactly one path: either delegate by
+   @mention on this issue, or create a ` + "`" + `todo` + "`" + ` child issue assigned to
+-  them. Never both for the same work.`
++  them. Never both for the same work.
++- If you pick the child-issue path, you MUST pass ` + "`" + `--assignee <member>` + "`" + `
++  when you run ` + "`" + `multica issue create` + "`" + `. Omitting it does NOT leave the
++  child unassigned — it silently defaults to YOU as the assignee, so the
++  member never receives the work and the child issue just sits there
++  looking delegated when it isn't. If you already created a child issue
++  without an assignee, fix it with
++  ` + "`" + `multica issue update <child-id> --assignee <member>` + "`" + ` rather than
++  leaving it or recreating it.`
+ 
+ // buildSquadLeaderBriefing composes the full system briefing appended to a
+ // squad leader's Instructions when it claims a task on a squad-assigned

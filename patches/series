@@ -4,3 +4,4 @@
 0004-odoo-cli-numeric-id.patch
 0005-odoo-config-from-file.patch
 0006-odoo-repo-directory.patch
+0007-odoo-cli-galaxy-auth.patch

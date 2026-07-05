@@ -1,0 +1,90 @@
+Index: multica/server/internal/cli/client.go
+===================================================================
+--- multica.orig/server/internal/cli/client.go
++++ multica/server/internal/cli/client.go
+@@ -51,6 +51,8 @@ type APIClient struct {
+ 	PathPrefix  string // replaces the native "/api" prefix; "/multica/agent" for Odoo backend
+ 	WorkspaceID string
+ 	Token       string
++	APIKey      string // Odoo backend only: paired with Token for X-GALAXY-API-KEY (see setHeaders)
++	OdooBackend bool   // true when talking to an Odoo backend; changes the auth headers setHeaders sends
+ 	AgentID     string // When set, requests are attributed to this agent instead of the user.
+ 	TaskID      string // When set, sent as X-Task-ID for agent-task validation.
+ 	HTTPClient  *http.Client
+@@ -166,6 +168,8 @@ func NewAPIClient(baseURL, workspaceID,
+ 	// controllers. Native mode leaves PathPrefix empty (no rewrite).
+ 	if os.Getenv("MULTICA_BACKEND_MODE") == "odoo" {
+ 		c.PathPrefix = "/multica/agent"
++		c.OdooBackend = true
++		c.APIKey = strings.TrimSpace(os.Getenv("MULTICA_ODOO_API_KEY"))
+ 	}
+ 	return c
+ }
+@@ -181,7 +185,20 @@ func (c *APIClient) url(path string) str
+ }
+ 
+ func (c *APIClient) setHeaders(req *http.Request) {
+-	if c.Token != "" {
++	if c.OdooBackend {
++		// Odoo's auth='openapi' (_auth_method_openapi) requires these two
++		// headers together — a plain Authorization: Bearer is not enough and
++		// gets rejected with 400 before the token is even checked. Set both
++		// even if APIKey is empty (Odoo mode with no key configured) so the
++		// resulting 400 clearly reports "missing", not a silent auth-as-
++		// wrong-identity fallback.
++		if c.Token != "" {
++			req.Header.Set("X-GALAXY-ACCESS-TOKEN", "Bearer "+c.Token)
++		}
++		if c.APIKey != "" {
++			req.Header.Set("X-GALAXY-API-KEY", c.APIKey)
++		}
++	} else if c.Token != "" {
+ 		req.Header.Set("Authorization", "Bearer "+c.Token)
+ 	}
+ 	if c.WorkspaceID != "" {
+Index: multica/server/internal/daemon/daemon.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -3961,16 +3961,18 @@ func (d *Daemon) runTask(ctx context.Con
+ 	// as the runtime owner's member actor and can retrigger the same agent.
+ 	var agentToken string
+ 	if d.cfg.BackendMode == "odoo" {
+-		// Odoo backend mode: the agent authenticates to Odoo via the Galaxy
+-		// headers injected into its runtime brief (see execenv runtime_config),
+-		// not via a task-scoped mat_ token — Odoo does not mint mat_ tokens.
+-		// Restore the pre-MUL-3292 fallback to the daemon's own credential so
+-		// MULTICA_TOKEN is still populated for daemon-local CLI calls. Cross-agent
+-		// attribution here relies on per-task X-MULTICA-AGENT-ID, not token scope.
+-		agentToken = strings.TrimSpace(task.AuthToken)
+-		if agentToken == "" {
+-			agentToken = d.client.Token()
+-		}
++		// Odoo backend mode: the agent authenticates to Odoo via Galaxy
++		// headers (X-GALAXY-ACCESS-TOKEN / X-GALAXY-API-KEY), both in its
++		// runtime brief text (see execenv runtime_config) and now in the CLI's
++		// own request headers (cli.APIClient.setHeaders). Odoo never sets
++		// task.AuthToken (that field is native-mode-only, mat_ tokens), so
++		// reuse the same accessToken/apiKey pair already resolved above
++		// (per-agent scoped via MintAgentToken when available, matching what
++		// the brief advertises) instead of falling back to the daemon's own
++		// shared credential — that fallback predates the 2026-07-01 per-agent
++		// credential work and would silently re-attribute writes to the
++		// daemon's runtime-owner identity instead of the calling agent.
++		agentToken = accessToken
+ 	} else {
+ 		tok, err := taskScopedAuthToken(task)
+ 		if err != nil {
+@@ -3993,6 +3995,12 @@ func (d *Daemon) runTask(ctx context.Con
+ 		// Signals the agent CLI to skip the task-scoped mat_ token requirement
+ 		// (Odoo auths via Galaxy headers, see newAPIClient / runtime brief).
+ 		agentEnv["MULTICA_BACKEND_MODE"] = "odoo"
++		// Odoo's auth='openapi' requires X-GALAXY-ACCESS-TOKEN *and*
++		// X-GALAXY-API-KEY together (inair_open_api ir_http.py
++		// _auth_method_openapi checks both independently) — MULTICA_TOKEN
++		// above only carries the access-token half. Without this the CLI's
++		// own requests (cli.APIClient.setHeaders) 400 on every call.
++		agentEnv["MULTICA_ODOO_API_KEY"] = apiKey
+ 	}
+ 	if task.AutopilotRunID != "" {
+ 		agentEnv["MULTICA_AUTOPILOT_RUN_ID"] = task.AutopilotRunID

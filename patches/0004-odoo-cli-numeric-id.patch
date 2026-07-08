@@ -87,7 +87,7 @@ Index: multica/server/cmd/multica/cmd_workspace.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_workspace.go
 +++ multica/server/cmd/multica/cmd_workspace.go
-@@ -273,7 +273,7 @@ func runWorkspaceSwitch(cmd *cobra.Comma
+@@ -291,7 +291,7 @@ func runWorkspaceSwitch(cmd *cobra.Comma
  func resolveWorkspaceArg(cmd *cobra.Command, args []string) (string, error) {
  	if len(args) > 0 {
  		trimmed := strings.TrimSpace(args[0])

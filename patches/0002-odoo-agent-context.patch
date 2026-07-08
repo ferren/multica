@@ -37,7 +37,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  
  	// Mark candidate env roots as active before any env work so the GC loop
-@@ -3885,10 +3906,25 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3889,10 +3910,25 @@ func (d *Daemon) runTask(ctx context.Con
  	// MULTICA_TOKEN is bound to (agent, task) by the server. Never fall back
  	// to the daemon's own credential here: doing so lets agent CLI writes land
  	// as the runtime owner's member actor and can retrigger the same agent.
@@ -67,9 +67,9 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  	agentEnv := map[string]string{
  		"MULTICA_TOKEN":        agentToken,
-@@ -3900,6 +3936,11 @@ func (d *Daemon) runTask(ctx context.Con
- 		"MULTICA_TASK_ID":      task.ID,
- 		"MULTICA_TASK_SLOT":    strconv.Itoa(slot),
+@@ -3907,6 +3943,11 @@ func (d *Daemon) runTask(ctx context.Con
+ 		"TMP":                  taskTempDir,
+ 		"TEMP":                 taskTempDir,
  	}
 +	if d.cfg.BackendMode == "odoo" {
 +		// Signals the agent CLI to skip the task-scoped mat_ token requirement

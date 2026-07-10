@@ -10,7 +10,7 @@ Index: multica/server/internal/daemon/daemon.go
  	settings        json.RawMessage              // workspace settings (JSONB)
  	lastRepoSyncErr string
  	repoRefreshMu   sync.Mutex
-@@ -1445,6 +1446,9 @@ func (d *Daemon) registerTaskRepos(works
+@@ -1455,6 +1456,9 @@ func (d *Daemon) registerTaskRepos(works
  	if taskID != "" && ws.taskRepoRefs == nil {
  		ws.taskRepoRefs = make(map[string]map[string]string)
  	}
@@ -20,7 +20,7 @@ Index: multica/server/internal/daemon/daemon.go
  	candidates := make([]repoCandidate, 0, len(repos))
  	for _, repo := range repos {
  		url := strings.TrimSpace(repo.URL)
-@@ -1463,6 +1467,12 @@ func (d *Daemon) registerTaskRepos(works
+@@ -1473,6 +1477,12 @@ func (d *Daemon) registerTaskRepos(works
  			if _, exists := ws.taskRepoRefs[taskID][url]; !exists {
  				ws.taskRepoRefs[taskID][url] = strings.TrimSpace(repo.Ref)
  			}
@@ -33,7 +33,7 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  		candidates = append(candidates, repoCandidate{
  			url:     url,
-@@ -1507,6 +1517,25 @@ func (d *Daemon) taskRepoDefaultRef(work
+@@ -1517,6 +1527,25 @@ func (d *Daemon) taskRepoDefaultRef(work
  	return strings.TrimSpace(ws.taskRepoRefs[taskID][repoURL])
  }
  
@@ -59,7 +59,7 @@ Index: multica/server/internal/daemon/daemon.go
  func (d *Daemon) clearTaskRepoRefs(workspaceID, taskID string) {
  	taskID = strings.TrimSpace(taskID)
  	if taskID == "" {
-@@ -4772,7 +4801,7 @@ func convertReposForEnv(repos []RepoData
+@@ -4795,7 +4824,7 @@ func convertReposForEnv(repos []RepoData
  	}
  	result := make([]execenv.RepoContextForEnv, len(repos))
  	for i, r := range repos {
@@ -84,7 +84,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config_sections.go
 +++ multica/server/internal/daemon/execenv/runtime_config_sections.go
-@@ -246,11 +246,23 @@ func writeRepositories(b *strings.Builde
+@@ -247,11 +247,23 @@ func writeRepositories(b *strings.Builde
  	b.WriteString("## Repositories\n\n")
  	b.WriteString("Available in this workspace — `multica repo checkout <url> [--ref <branch-or-sha>]` to fetch (creates a git worktree on a dedicated branch).\n\n")
  	for _, repo := range ctx.Repos {

@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -3698,6 +3698,23 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3707,6 +3707,23 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
@@ -26,7 +26,7 @@ Index: multica/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:                          task.IssueID,
  		TriggerCommentID:                 task.TriggerCommentID,
-@@ -3732,6 +3749,10 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3742,6 +3759,10 @@ func (d *Daemon) runTask(ctx context.Con
  		InitiatorEmail:                   task.InitiatorEmail,
  		WorkspaceContext:                 task.WorkspaceContext,
  		ConnectedApps:                    task.ConnectedApps,
@@ -37,7 +37,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  
  	// Mark candidate env roots as active before any env work so the GC loop
-@@ -3889,10 +3910,25 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3911,10 +3932,25 @@ func (d *Daemon) runTask(ctx context.Con
  	// MULTICA_TOKEN is bound to (agent, task) by the server. Never fall back
  	// to the daemon's own credential here: doing so lets agent CLI writes land
  	// as the runtime owner's member actor and can retrigger the same agent.
@@ -67,7 +67,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  	agentEnv := map[string]string{
  		"MULTICA_TOKEN":        agentToken,
-@@ -3907,6 +3943,11 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -3929,6 +3965,11 @@ func (d *Daemon) runTask(ctx context.Con
  		"TMP":                  taskTempDir,
  		"TEMP":                 taskTempDir,
  	}
@@ -83,7 +83,7 @@ Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
 +++ multica/server/internal/daemon/execenv/execenv.go
-@@ -107,6 +107,11 @@ type TaskContextForEnv struct {
+@@ -120,6 +120,11 @@ type TaskContextForEnv struct {
  	// context and the agent stays anonymous-user mode.
  	RequestingUserName               string
  	RequestingUserProfileDescription string
@@ -95,14 +95,38 @@ Index: multica/server/internal/daemon/execenv/execenv.go
  	// Initiator* identify the actor who triggered THIS task (the real
  	// requester) as distinct from the runtime owner. Rendered into the brief
  	// as `## Task Initiator` when a name is present; InitiatorEmail is shown
-Index: multica/server/internal/daemon/execenv/runtime_config.go
+Index: multica/server/cmd/multica/cmd_agent.go
 ===================================================================
---- multica.orig/server/internal/daemon/execenv/runtime_config.go
-+++ multica/server/internal/daemon/execenv/runtime_config.go
-@@ -834,6 +834,50 @@ func buildMetaSkillContent(provider stri
- 		b.WriteString("Bad: \"1. Read the issue 2. Found the bug in auth.go 3. Created branch 4. ...\"\n")
- 		b.WriteString("When referencing an issue in a comment, use the issue mention format `[MUL-123](mention://issue/<issue-id>)` so it renders as a clickable link. (Issue mentions have no side effect; only member/agent mentions do — see the Mentions section above.)\n")
+--- multica.orig/server/cmd/multica/cmd_agent.go
++++ multica/server/cmd/multica/cmd_agent.go
+@@ -256,7 +256,10 @@ func newAPIClient(cmd *cobra.Command) (*
+ 	if serverURL == "" {
+ 		return nil, fmt.Errorf("server URL not set: use --server-url flag, MULTICA_SERVER_URL env, or 'multica config set server_url <url>'")
  	}
+-	if inDaemonManagedExecutionContext() && !strings.HasPrefix(token, "mat_") {
++	// Odoo backend mode does not mint mat_ tokens; the agent authenticates to
++	// Odoo via Galaxy headers, so the task-scoped token requirement is bypassed.
++	if inDaemonManagedExecutionContext() && os.Getenv("MULTICA_BACKEND_MODE") != "odoo" &&
++		!strings.HasPrefix(token, "mat_") {
+ 		// When the ONLY daemon signal is a workdir marker (no MULTICA_AGENT_ID /
+ 		// MULTICA_TASK_ID / MULTICA_DAEMON_PORT), the likeliest cause outside a
+ 		// real task is a leftover marker from a crashed daemon task in a
+Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
+===================================================================
+--- multica.orig/server/internal/daemon/execenv/runtime_config_sections.go
++++ multica/server/internal/daemon/execenv/runtime_config_sections.go
+@@ -2,6 +2,7 @@ package execenv
+ 
+ import (
+ 	"fmt"
++	"path/filepath"
+ 	"strings"
+ 
+ 	"github.com/multica-ai/multica/server/internal/runtimeapps"
+@@ -586,5 +587,50 @@ func buildMetaSkillContentSlim(provider
+ 	writeAlwaysUseCLI(&b)
+ 	writeOutput(&b, kind, ctx)
+ 
 +	// Odoo backend: append Odoo-specific REST API context
 +	if ctx.BackendMode == "odoo" {
 +		b.WriteString("\n## Odoo Backend\n\n")
@@ -147,22 +171,6 @@ Index: multica/server/internal/daemon/execenv/runtime_config.go
 +		b.WriteString("4. Odoo task status values: Backlog, Todo, In Progress, In Review, Done\n")
 +		b.WriteString("5. Issue lifecycle — PATCH the issue status via the Update API above: BEFORE you begin work, set status to \"In Progress\"; WHEN finished, set \"In Review\" (work done, awaiting acceptance), or \"Done\" if fully complete, or \"Blocked\" if you cannot proceed. Skip this step only if your Agent Identity forbids issue status changes.\n")
 +	}
- 
++
  	return b.String()
  }
-Index: multica/server/cmd/multica/cmd_agent.go
-===================================================================
---- multica.orig/server/cmd/multica/cmd_agent.go
-+++ multica/server/cmd/multica/cmd_agent.go
-@@ -256,7 +256,10 @@ func newAPIClient(cmd *cobra.Command) (*
- 	if serverURL == "" {
- 		return nil, fmt.Errorf("server URL not set: use --server-url flag, MULTICA_SERVER_URL env, or 'multica config set server_url <url>'")
- 	}
--	if inDaemonManagedExecutionContext() && !strings.HasPrefix(token, "mat_") {
-+	// Odoo backend mode does not mint mat_ tokens; the agent authenticates to
-+	// Odoo via Galaxy headers, so the task-scoped token requirement is bypassed.
-+	if inDaemonManagedExecutionContext() && os.Getenv("MULTICA_BACKEND_MODE") != "odoo" &&
-+		!strings.HasPrefix(token, "mat_") {
- 		// When the ONLY daemon signal is a workdir marker (no MULTICA_AGENT_ID /
- 		// MULTICA_TASK_ID / MULTICA_DAEMON_PORT), the likeliest cause outside a
- 		// real task is a leftover marker from a crashed daemon task in a

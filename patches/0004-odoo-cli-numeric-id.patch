@@ -74,7 +74,7 @@ Index: multica/server/cmd/multica/cmd_issue.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_issue.go
 +++ multica/server/cmd/multica/cmd_issue.go
-@@ -2136,7 +2136,7 @@ func resolveAssigneeByID(ctx context.Con
+@@ -2653,7 +2653,7 @@ func resolveAssigneeByID(ctx context.Con
  		return "", "", fmt.Errorf("workspace ID is required to resolve assignees; use --workspace-id or set MULTICA_WORKSPACE_ID")
  	}
  	input := strings.TrimSpace(id)

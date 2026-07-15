@@ -40,7 +40,7 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 	// instead of inheriting from the outer Claude Code session.
 	var mcpConfigPath string
 	var mcpFileCleanup func() // non-nil while this function owns the temp file
-	if len(opts.McpConfig) > 0 {
+	if hasManagedMcpConfig(opts.McpConfig) {
 		path, err := writeMcpConfigToTemp(opts.McpConfig)
 		if err != nil {
 			cancel()
@@ -571,7 +571,6 @@ func buildClaudeArgs(opts ExecOptions, logger *slog.Logger) []string {
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--verbose",
-		"--strict-mcp-config",
 		"--permission-mode", "bypassPermissions",
 		// AskUserQuestion is Claude Code's built-in interactive question tool.
 		// The daemon runs Claude in non-interactive stream-json mode and has
@@ -580,6 +579,12 @@ func buildClaudeArgs(opts ExecOptions, logger *slog.Logger) []string {
 		// never sees the question (see GitHub #2588). User-facing
 		// clarification belongs in an issue comment instead.
 		"--disallowedTools", "AskUserQuestion",
+	}
+	if hasManagedMcpConfig(opts.McpConfig) {
+		// A saved agent-level config is authoritative, including an explicitly
+		// empty object. With no managed config, omit strict mode so Claude can
+		// inherit the user's local runtime MCP servers.
+		args = append(args, "--strict-mcp-config")
 	}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
@@ -754,8 +759,9 @@ func isFilteredChildEnvKey(key string) bool {
 type blockedArgMode int
 
 const (
-	blockedWithValue  blockedArgMode = iota // flag takes a value (next arg or =value)
-	blockedStandalone                       // flag is boolean, no value
+	blockedWithValue     blockedArgMode = iota // flag takes a value (next arg or =value)
+	blockedStandalone                          // flag is boolean, no value
+	blockedOptionalValue                       // flag may take the next non-flag arg or =value
 )
 
 // filterCustomArgs removes protocol-critical flags from user-configured custom
@@ -775,12 +781,8 @@ func filterCustomArgs(args []string, blocked map[string]blockedArgMode, logger *
 		return args
 	}
 	filtered := make([]string, 0, len(args))
-	skip := false
-	for _, raw := range args {
-		if skip {
-			skip = false
-			continue
-		}
+	for i := 0; i < len(args); i++ {
+		raw := args[i]
 		arg := unshellQuoteArg(raw)
 		flag := arg
 		hasInlineValue := false
@@ -793,7 +795,13 @@ func filterCustomArgs(args []string, blocked map[string]blockedArgMode, logger *
 			logger.Warn("custom_args: blocked protocol-critical flag, skipping", "flag", flag)
 			if mode == blockedWithValue && !hasInlineValue {
 				// The next arg is the value for this flag — skip it too.
-				skip = true
+				i++
+			} else if mode == blockedOptionalValue && !hasInlineValue && i+1 < len(args) &&
+				!strings.HasPrefix(unshellQuoteArg(args[i+1]), "-") {
+				// Optional values are consumed only when the next token is not
+				// another flag, so a boolean form cannot swallow an unrelated
+				// option.
+				i++
 			}
 			continue
 		}

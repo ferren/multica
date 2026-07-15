@@ -105,7 +105,7 @@ Index: multica/server/internal/cli/client.go
  	if err != nil {
  		return err
  	}
-@@ -436,7 +455,7 @@ func (c *APIClient) UploadFile(ctx conte
+@@ -439,7 +458,7 @@ func (c *APIClient) UploadFile(ctx conte
  		return "", fmt.Errorf("close multipart writer: %w", err)
  	}
  
@@ -114,7 +114,7 @@ Index: multica/server/internal/cli/client.go
  	if err != nil {
  		return "", err
  	}
-@@ -485,7 +504,7 @@ func (c *APIClient) UploadFileWithURL(ct
+@@ -551,7 +570,7 @@ func (c *APIClient) UploadFileWithURL(ct
  		return "", "", fmt.Errorf("close multipart writer: %w", err)
  	}
  

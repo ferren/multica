@@ -7,6 +7,8 @@ dist
 # build outputs
 .turbo
 .next
+.pc
+.codegraph
 out
 build
 bin

@@ -2,9 +2,9 @@ Index: multica/server/internal/cli/config.go
 ===================================================================
 --- multica.orig/server/internal/cli/config.go
 +++ multica/server/internal/cli/config.go
-@@ -17,6 +17,16 @@ type CLIConfig struct {
- 	WorkspaceID string `json:"workspace_id,omitempty"`
- 	Token       string `json:"token,omitempty"`
+@@ -111,6 +111,16 @@ type CLIConfig struct {
+ 	// env, this field, DefaultAutoUpdateCheckInterval.
+ 	AutoUpdateCheckInterval string `json:"auto_update_check_interval,omitempty"`
  
 +	// Odoo backend mode settings. Mirrors the MULTICA_BACKEND_MODE / MULTICA_DB_NAME
 +	// / MULTICA_APP_ID / MULTICA_APP_SECRET environment variables so the daemon can
@@ -82,7 +82,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -1088,10 +1088,10 @@ func (d *Daemon) resolveAuth() error {
+@@ -1103,10 +1103,10 @@ func (d *Daemon) resolveAuth() error {
  // resolveOdooAuth calls /openapi/token with MULTICA_APP_ID + MULTICA_APP_SECRET
  // to obtain access_token and api_key for Odoo OpenAPI auth.
  func (d *Daemon) resolveOdooAuth() error {
@@ -96,7 +96,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
  	defer cancel()
-@@ -1099,7 +1099,7 @@ func (d *Daemon) resolveOdooAuth() error
+@@ -1114,7 +1114,7 @@ func (d *Daemon) resolveOdooAuth() error
  		return fmt.Errorf("fetch odoo token: %w", err)
  	}
  	accessToken, _ := d.client.OdooCredentials()
@@ -105,7 +105,7 @@ Index: multica/server/internal/daemon/daemon.go
  	_ = accessToken
  
  	// Set up on-error callback to refresh token on 401
-@@ -1172,31 +1172,57 @@ func (d *Daemon) connectDaemon(ctx conte
+@@ -1187,31 +1187,57 @@ func (d *Daemon) connectDaemon(ctx conte
  	return nil
  }
  

@@ -46,7 +46,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -4344,16 +4344,18 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -4438,16 +4438,18 @@ func (d *Daemon) runTask(ctx context.Con
  	// as the runtime owner's member actor and can retrigger the same agent.
  	var agentToken string
  	if d.cfg.BackendMode == "odoo" {
@@ -75,7 +75,7 @@ Index: multica/server/internal/daemon/daemon.go
  	} else {
  		tok, err := taskScopedAuthToken(task)
  		if err != nil {
-@@ -4379,6 +4381,12 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -4476,6 +4478,12 @@ func (d *Daemon) runTask(ctx context.Con
  		// Signals the agent CLI to skip the task-scoped mat_ token requirement
  		// (Odoo auths via Galaxy headers, see newAPIClient / runtime brief).
  		agentEnv["MULTICA_BACKEND_MODE"] = "odoo"

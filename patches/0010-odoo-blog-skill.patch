@@ -1,0 +1,189 @@
+Index: multica/server/internal/service/builtin_skills/multica-publishing-blog/SKILL.md
+===================================================================
+--- /dev/null
++++ multica/server/internal/service/builtin_skills/multica-publishing-blog/SKILL.md
+@@ -0,0 +1,104 @@
++---
++name: multica-publishing-blog
++description: "Use when the user asks to turn content into a published technical document or blog post — e.g. 'write this up as a technical doc', 'publish this to the blog', 'post this as an article', '把这个写成技术文档/发到博客'. Backed by the `multica blog` CLI talking to the inair_website_blog API (Odoo, auth='openapi'). Publishes Markdown as a DRAFT into the agent-dedicated blog by default; a human reviews and publishes it. Covers publish / list / get / update, the draft-by-default contract, the agent-dedicated blog, zero-config X-GALAXY auth, and how a missing install or missing permission surfaces. Do NOT pass --publish unless the user explicitly asks to publish now. Traced to server/cmd/multica/cmd_blog.go and inair_website_blog/controllers/blog_api.py."
++user-invocable: false
++allowed-tools: Bash(multica *)
++---
++
++# Publishing a technical doc to the blog
++
++This skill is the contract for the `multica blog` CLI, which publishes Markdown
++to the Inair website blog (`inair_website_blog`). Every claim below is pinned to
++source in `references/publishing-blog-source-map.md`.
++
++## The end-to-end flow
++
++1. You write the document as Markdown to a file in the working directory.
++2. `multica blog publish --title "…" --file doc.md` creates a **draft** post.
++3. The command prints the post id, state, and `URL:` on stdout.
++4. You report that URL back to the user (typically in an issue comment) so a
++   human can review and publish it on the website.
++
++A draft is the default and the point: the agent-dedicated blog is a review
++queue. A human edits and publishes; the agent does not publish unless asked.
++
++## The contract (what is true by construction)
++
++- **Draft by default.** `publish` sends `is_published=false`; only `--publish`
++  flips it. (decision 2)
++- **Agent-dedicated blog.** With no `--blog`, the post lands in the seeded
++  「智能体技术文档」blog (or whatever `inair_website_blog.default_blog_id`
++  points at). `--blog <id>` overrides it; `multica blog list` lists ids.
++  (decision 3)
++- **Markdown in, HTML stored.** `publish` sends `content_format: "markdown"`; the
++  server converts via `inair_multica.utils.md_to_html`. Send Markdown, not HTML.
++- **Zero-config auth.** In `MULTICA_BACKEND_MODE=odoo` the shared APIClient sets
++  the `X-GALAXY-ACCESS-TOKEN` / `X-GALAXY-API-KEY` headers the
++  `auth='openapi'` endpoints require. The daemon injects them into the agent
++  process, so no token setup is needed inside an agent run.
++- **Path is not under /api.** `/inair_website_blog/...` is left untouched by the
++  client's prefix rewrite and reaches the Odoo controller directly.
++
++## Commands
++
++```
++multica blog list                                   # list blogs (id, name, posts)
++multica blog publish --title "Title" --file doc.md  # create a draft (stdin if no --file)
++multica blog publish --title "Title" --file doc.md --tag Odoo --tag 文档
++multica blog get 42                                 # show one post
++multica blog update 42 --publish                    # publish a draft
++multica blog update 42 --title "New title" --file doc.md
++```
++
++Flags on `publish`: `--title` (required), `--file` (stdin if omitted),
++`--blog <id>`, `--subtitle`, `--tag` (repeatable), `--publish`, `--output json`.
++Flags on `update`: `--title`, `--subtitle`, `--file`, `--tag` (repeatable, replaces),
++`--publish` (`--publish=false` unpublishes), `--output json`.
++
++Use `--output json` when you need to read a field programmatically; the human
++text form already prints the `URL:` line for the common case.
++
++## What does NOT happen (so the result doesn't surprise you)
++
++- **No auto-publish.** Without `--publish` the post is a draft and is not
++  visible on the website. That is intended.
++- **No blog is created.** `publish` targets an existing blog (the agent blog by
++  default). If there is no blog at all, the API returns `400 no target blog
++  available`.
++- **Tags are names, not ids.** Repeatable `--tag "Name"`; the server matches
++  case-insensitively and creates missing tags.
++- **Auth/permission failures are not retried by the CLI.** They surface as:
++  - `401` / `Access token …` → the run is not in Odoo backend mode, or the
++    daemon did not inject X-GALAXY creds. Not something to fix from inside the
++    run; report it.
++  - `403` / `access denied` → the agent's Odoo user is not in the
++    「智能体博客作者」group (which implies the website designer group that holds
++    blog write ACLs), or the `inair_website_blog` module is not installed.
++    Report it as a setup step for a human admin — do not attempt to grant it.
++
++## Incorrect → Correct
++
++Incorrect: pasting raw HTML as `--file`.
++  → the server treats it as Markdown; tags get escaped. Send Markdown.
++
++Incorrect: `multica blog publish --title "X"` with no file and no piped stdin
++in a non-interactive run.
++  → it blocks reading stdin, or sends empty content. Write the doc to a file
++    first, or pipe it: `cat doc.md | multica blog publish --title "X"`.
++
++Incorrect: assuming the post is live because publish returned a URL.
++  → the URL exists but the post is a draft until a human publishes it
++    (`is_published` in the output says which).
++
++Correct:
++  1. Write the doc to `./tech-note.md`.
++  2. `multica blog publish --title "Odoo 19 website_blog 二次开发" --file ./tech-note.md`
++  3. Read the `URL:` line from stdout.
++  4. Post the URL back to the user, noting it is a draft awaiting review.
++
++## References
++
++`references/publishing-blog-source-map.md` — file:line evidence for the CLI
++flags, the Odoo-mode X-GALAXY auth wiring, the non-/api path passthrough, the
++API endpoints and their request/response shapes, the seeded agent blog, and the
++author permission group.
+Index: multica/server/internal/service/builtin_skills/multica-publishing-blog/references/publishing-blog-source-map.md
+===================================================================
+--- /dev/null
++++ multica/server/internal/service/builtin_skills/multica-publishing-blog/references/publishing-blog-source-map.md
+@@ -0,0 +1,75 @@
++# Publishing a blog — source map
++
++Every claim in `SKILL.md` traces to a line below. Re-derive against the current
++tree before trusting any line number; the behavior is the contract, the line is
++a pointer. The CLI lives in the multica repo (`server/...`); the API it calls
++lives in a separate repo under `inair-addons/inair_website_blog/` — both are
++listed.
++
++## The CLI commands and flags (`multica blog`)
++
++| Fact | Source |
++| --- | --- |
++| `blogCmd` parent + `blog`/`publish`/`list`/`get`/`update` subcommands | `server/cmd/multica/cmd_blog.go:48,63,70,81,88` |
++| Registered on the root: `rootCmd.AddCommand(blogCmd)` | `server/cmd/multica/main.go:90` |
++| `publish` flags: `--title` (required), `--file`, `--blog`, `--subtitle`, `--tag` (repeatable), `--publish`, `--output` | `server/cmd/multica/cmd_blog.go:104-110` |
++| `update` flags: `--title`, `--subtitle`, `--file`, `--tag` (repeatable), `--publish`, `--output` | `server/cmd/multica/cmd_blog.go:114-118` |
++| `--publish=false` unpublishes (bool flag, `Changed`-gated) | `server/cmd/multica/cmd_blog.go:118,309-311` |
++| `--file` reads a file; otherwise stdin is read for content | `server/cmd/multica/cmd_blog.go:196-209` |
++| `--title` required on publish (empty → error) | `server/cmd/multica/cmd_blog.go:189-192` |
++| `--blog` parsed as int64, sent as `blog_id`; default 0 = use agent blog | `server/cmd/multica/cmd_blog.go:106,217-220` |
++
++## The draft-by-default + Markdown contract (CLI side)
++
++| Fact | Source |
++| --- | --- |
++| `publish` sends `is_published: false` unless `--publish` | `server/cmd/multica/cmd_blog.go:214-215,227-228` |
++| `publish` sends `content_format: "markdown"` | `server/cmd/multica/cmd_blog.go:214` |
++| `update` sends `content_format: "markdown"` only when `--file` is set | `server/cmd/multica/cmd_blog.go:296-303` |
++| Tags sent as `tag_names` (string array); update replaces | `server/cmd/multica/cmd_blog.go:224-225,305-307` |
++| `list` → `GET /inair_website_blog/blogs` | `server/cmd/multica/cmd_blog.go:173` |
++| `publish` → `POST /inair_website_blog/posts` | `server/cmd/multica/cmd_blog.go:239` |
++| `get` → `GET /inair_website_blog/posts/<id>` | `server/cmd/multica/cmd_blog.go:270` |
++| `update` → `PATCH /inair_website_blog/posts/<id>` | `server/cmd/multica/cmd_blog.go:314` |
++| Response decoded into `blogPostDTO{ID,Name,Subtitle,BlogID,BlogName,IsPublished,TagNames,URL}` | `server/cmd/multica/cmd_blog.go:35-45` |
++| Human output prints `Post <id> drafted/published in "<blog>".` then `URL: <url>` | `server/cmd/multica/cmd_blog.go:249-256` |
++
++## Zero-config auth (Odoo backend mode)
++
++| Fact | Source |
++| --- | --- |
++| `MULTICA_BACKEND_MODE=odoo` sets `PathPrefix="/multica/agent"`, `OdooBackend=true`, `APIKey` from `MULTICA_ODOO_API_KEY` | `server/internal/cli/client.go:168-173` |
++| `setHeaders` sends `X-GALAXY-ACCESS-TOKEN: Bearer <token>` and `X-GALAXY-API-KEY` only in Odoo mode | `server/internal/cli/client.go:187-203` |
++| `url()` rewrites only paths starting with `/api`; `/inair_website_blog/...` is passed through untouched | `server/internal/cli/client.go:177-185` |
++| `newAPIClient` bypasses the `mat_` task-token requirement in Odoo mode | `server/cmd/multica/cmd_agent.go:262-266` |
++| CLI >=400 responses funnel to `*HTTPError` so exit codes classify 401/403/404 | `server/internal/cli/client.go:67-91` |
++
++## The API contract (inair_website_blog, cross-repo)
++
++Paths are relative to the `inair_website_blog` Odoo module (repo
++`inair-addons/inair_website_blog`, branch `inair-1.0.19-dev`, commit `aa3c316`).
++
++| Fact | Source |
++| --- | --- |
++| All four routes use `auth='openapi'`, `type='http'`, `csrf=False` | `inair_website_blog/controllers/blog_api.py` (route decorators) |
++| `POST /inair_website_blog/posts` validates `name`, resolves blog, creates `blog.post`, returns `201 {id,name,blog_id,blog_name,is_published,url}` | `inair_website_blog/controllers/blog_api.py` (`create_post`) |
++| `is_published` defaults to `bool(data.get('is_published'))` → draft | `inair_website_blog/controllers/blog_api.py` (`create_post`) |
++| Markdown content converted via `from inair_multica.utils import md_to_html` | `inair_website_blog/controllers/blog_api.py` (`_convert_content`) |
++| Blog resolution order: `blog_id` → config `inair_website_blog.default_blog_id` → seeded `inair_website_blog.blog_agent` → first blog | `inair_website_blog/controllers/blog_api.py` (`_resolve_blog`) |
++| `AccessError` → `403 {error}`; missing title → `400`; no blog → `400` | `inair_website_blog/controllers/blog_api.py` (`_catch_access_error`, handlers) |
++
++## The agent-dedicated blog + permission group (inair_website_blog)
++
++| Fact | Source |
++| --- | --- |
++| Seeded blog `inair_website_blog.blog_agent` named 「智能体技术文档」 (draft area), `noupdate=1` | `inair_website_blog/data/inair_blog_data.xml` |
++| Default-blog setting `inair_blog_default_blog_id` (`res.config.settings`, config_parameter) | `inair_website_blog/models/res_config_settings.py` |
++| Group `group_inair_blog_author` implies `website.group_website_designer` (which holds blog.post/blog.blog/blog.tag write ACLs) | `inair_website_blog/security/inair_website_blog_security.xml` |
++| website_blog's write/create ACLs are gated on `website.group_website_designer` | `odoo/addons/website_blog/security/ir.model.access.csv` (upstream) |
++
++## Skill loading (this skill is auto-discovered)
++
++| Fact | Source |
++| --- | --- |
++| `//go:embed builtin_skills` embeds the whole tree; `loadBuiltinSkills` walks every `multica-*` dir with a `SKILL.md` | `server/internal/service/builtin_skills.go:10-31` |
++| Supporting files (e.g. `references/*`) are attached preserving relative path | `server/internal/service/builtin_skills.go:48-58` |

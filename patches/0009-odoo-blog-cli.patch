@@ -1,0 +1,360 @@
+Index: multica/server/cmd/multica/cmd_blog.go
+===================================================================
+--- /dev/null
++++ multica/server/cmd/multica/cmd_blog.go
+@@ -0,0 +1,343 @@
++package main
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"os"
++	"strconv"
++	"strings"
++
++	"github.com/spf13/cobra"
++
++	"github.com/multica-ai/multica/server/internal/cli"
++)
++
++// multica blog — publish technical docs to the Inair website blog
++// (inair_website_blog). The blog API lives on the Odoo backend under
++// auth='openapi' (see inair_website_blog/controllers/blog_api.py). In
++// MULTICA_BACKEND_MODE=odoo the shared APIClient sets the X-GALAXY-ACCESS-TOKEN
++// / X-GALAXY-API-KEY headers, so an agent running inside a daemon task calls
++// these endpoints zero-config — same auth path as issue/comment.
++//
++// The endpoints are NOT under /api, so APIClient.url() leaves the path
++// untouched and the request lands on {BaseURL}/inair_website_blog/...
++//
++// Product defaults (issue #100 decisions): posts are created as DRAFT
++// (is_published=false) and target the agent-dedicated blog; pass --publish to
++// publish immediately.
++
++type blogBlogDTO struct {
++	ID        int64  `json:"id"`
++	Name      string `json:"name"`
++	Subtitle  string `json:"subtitle"`
++	PostCount int64  `json:"post_count"`
++}
++
++type blogPostDTO struct {
++	ID          int64    `json:"id"`
++	Name        string   `json:"name"`
++	Subtitle    string   `json:"subtitle,omitempty"`
++	BlogID      int64    `json:"blog_id"`
++	BlogName    string   `json:"blog_name,omitempty"`
++	IsPublished bool     `json:"is_published"`
++	TagNames    []string `json:"tag_names,omitempty"`
++	URL         string   `json:"url"`
++}
++
++var blogCmd = &cobra.Command{
++	Use:   "blog",
++	Short: "Publish technical docs to the Inair website blog",
++	Long: `Publish Markdown content as blog posts on the Inair website blog
++(inair_website_blog). Intended for agents writing technical documentation:
++the content is created as a draft in the agent-dedicated blog by default; a
++human reviews and publishes it.
++
++  multica blog publish --title "Odoo 19 指南" --file doc.md
++  cat doc.md | multica blog publish --title "Odoo 19 指南"
++  multica blog list                  # list available blogs
++  multica blog get 42                # show one post
++  multica blog update 42 --publish   # publish a draft`,
++}
++
++var blogListCmd = &cobra.Command{
++	Use:   "list",
++	Short: "List available blogs",
++	Args:  exactArgs(0),
++	RunE:  runBlogList,
++}
++
++var blogPublishCmd = &cobra.Command{
++	Use:   "publish",
++	Short: "Create a blog post (draft by default) from Markdown",
++	Long: `Create a blog post from Markdown content. Content is read from --file,
++or from stdin when --file is omitted. The post is created as a DRAFT in the
++agent-dedicated blog unless --blog selects another blog and/or --publish
++publishes immediately.`,
++	Args: exactArgs(0),
++	RunE: runBlogPublish,
++}
++
++var blogGetCmd = &cobra.Command{
++	Use:   "get <post-id>",
++	Short: "Show one blog post",
++	Args:  exactArgs(1),
++	RunE:  runBlogGet,
++}
++
++var blogUpdateCmd = &cobra.Command{
++	Use:   "update <post-id>",
++	Short: "Update a blog post (title, content, tags, or publish state)",
++	Args:  exactArgs(1),
++	RunE:  runBlogUpdate,
++}
++
++func init() {
++	blogCmd.AddCommand(blogListCmd)
++	blogCmd.AddCommand(blogPublishCmd)
++	blogCmd.AddCommand(blogGetCmd)
++	blogCmd.AddCommand(blogUpdateCmd)
++
++	blogListCmd.Flags().String("output", "table", "Output format: table or json")
++
++	blogPublishCmd.Flags().String("output", "table", "Output format: table or json")
++	blogPublishCmd.Flags().String("title", "", "Post title (required)")
++	blogPublishCmd.Flags().String("file", "", "Path to a Markdown file for the post body (reads stdin if omitted)")
++	blogPublishCmd.Flags().Int64("blog", 0, "Target blog id (defaults to the agent-dedicated blog)")
++	blogPublishCmd.Flags().String("subtitle", "", "Post subtitle")
++	blogPublishCmd.Flags().StringArray("tag", nil, "Tag name (repeatable)")
++	blogPublishCmd.Flags().Bool("publish", false, "Publish immediately instead of saving as a draft")
++
++	blogGetCmd.Flags().String("output", "table", "Output format: table or json")
++
++	blogUpdateCmd.Flags().String("output", "table", "Output format: table or json")
++	blogUpdateCmd.Flags().String("title", "", "New post title")
++	blogUpdateCmd.Flags().String("file", "", "Path to a Markdown file replacing the post body")
++	blogUpdateCmd.Flags().String("subtitle", "", "New post subtitle")
++	blogUpdateCmd.Flags().StringArray("tag", nil, "Replacement tag list (repeatable)")
++	blogUpdateCmd.Flags().Bool("publish", false, "Set published state (--publish=false unpublishes)")
++}
++
++func printBlogTable(blogs []blogBlogDTO) {
++	headers := []string{"ID", "NAME", "SUBTITLE", "POSTS"}
++	rows := make([][]string, 0, len(blogs))
++	for _, b := range blogs {
++		rows = append(rows, []string{
++			strconv.FormatInt(b.ID, 10),
++			b.Name,
++			b.Subtitle,
++			strconv.FormatInt(b.PostCount, 10),
++		})
++	}
++	cli.PrintTable(os.Stdout, headers, rows)
++}
++
++func printBlogPostTable(post blogPostDTO) {
++	state := "draft"
++	if post.IsPublished {
++		state = "published"
++	}
++	tags := strings.Join(post.TagNames, ", ")
++	headers := []string{"ID", "TITLE", "STATE", "BLOG", "TAGS", "URL"}
++	cli.PrintTable(os.Stdout, headers, [][]string{{
++		strconv.FormatInt(post.ID, 10),
++		post.Name,
++		state,
++		post.BlogName,
++		tags,
++		post.URL,
++	}})
++}
++
++// readMarkdownFile returns the contents of path. It does NOT fall back to
++// stdin so callers control exactly when stdin is consumed.
++func readMarkdownFile(path string) (string, error) {
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return "", fmt.Errorf("read --file %s: %w", path, err)
++	}
++	return string(data), nil
++}
++
++func runBlogList(cmd *cobra.Command, _ []string) error {
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		return err
++	}
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++
++	var result struct {
++		Blogs []blogBlogDTO `json:"blogs"`
++	}
++	if err := client.GetJSON(ctx, "/inair_website_blog/blogs", &result); err != nil {
++		return fmt.Errorf("list blogs: %w", err)
++	}
++	output, _ := cmd.Flags().GetString("output")
++	if output == "json" {
++		return cli.PrintJSON(os.Stdout, result.Blogs)
++	}
++	if len(result.Blogs) == 0 {
++		fmt.Fprintln(os.Stdout, "No blogs found.")
++		return nil
++	}
++	printBlogTable(result.Blogs)
++	return nil
++}
++
++func runBlogPublish(cmd *cobra.Command, _ []string) error {
++	title, _ := cmd.Flags().GetString("title")
++	if strings.TrimSpace(title) == "" {
++		return fmt.Errorf("--title is required")
++	}
++
++	// Content: --file wins; otherwise read stdin so the agent can pipe Markdown.
++	var content string
++	filePath, _ := cmd.Flags().GetString("file")
++	if filePath != "" {
++		c, err := readMarkdownFile(filePath)
++		if err != nil {
++			return err
++		}
++		content = c
++	} else {
++		data, err := io.ReadAll(os.Stdin)
++		if err != nil {
++			return fmt.Errorf("read stdin: %w", err)
++		}
++		content = string(data)
++	}
++
++	body := map[string]any{
++		"name":           title,
++		"content":        content,
++		"content_format": "markdown",
++		"is_published":   false,
++	}
++	if cmd.Flags().Changed("blog") {
++		body["blog_id"] = blogIDFlag(cmd)
++	}
++	if cmd.Flags().Changed("subtitle") {
++		subtitle, _ := cmd.Flags().GetString("subtitle")
++		body["subtitle"] = subtitle
++	}
++	if tags, _ := cmd.Flags().GetStringArray("tag"); len(tags) > 0 {
++		body["tag_names"] = tags
++	}
++	if publish, _ := cmd.Flags().GetBool("publish"); publish {
++		body["is_published"] = true
++	}
++
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		return err
++	}
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++
++	var post blogPostDTO
++	if err := client.PostJSON(ctx, "/inair_website_blog/posts", body, &post); err != nil {
++		return fmt.Errorf("publish blog post: %w", err)
++	}
++	output, _ := cmd.Flags().GetString("output")
++	if output == "json" {
++		return cli.PrintJSON(os.Stdout, post)
++	}
++	state := "drafted"
++	if post.IsPublished {
++		state = "published"
++	}
++	fmt.Fprintf(os.Stdout, "Post %d %s in %q.\n", post.ID, state, post.BlogName)
++	if post.URL != "" {
++		fmt.Fprintf(os.Stdout, "URL: %s\n", post.URL)
++	}
++	return nil
++}
++
++func runBlogGet(cmd *cobra.Command, args []string) error {
++	id, err := strconv.ParseInt(args[0], 10, 64)
++	if err != nil {
++		return fmt.Errorf("post id must be an integer: %w", err)
++	}
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		return err
++	}
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++
++	var post blogPostDTO
++	if err := client.GetJSON(ctx, fmt.Sprintf("/inair_website_blog/posts/%d", id), &post); err != nil {
++		return fmt.Errorf("get blog post: %w", err)
++	}
++	output, _ := cmd.Flags().GetString("output")
++	if output == "json" {
++		return cli.PrintJSON(os.Stdout, post)
++	}
++	printBlogPostTable(post)
++	return nil
++}
++
++func runBlogUpdate(cmd *cobra.Command, args []string) error {
++	id, err := strconv.ParseInt(args[0], 10, 64)
++	if err != nil {
++		return fmt.Errorf("post id must be an integer: %w", err)
++	}
++
++	body := map[string]any{}
++	if cmd.Flags().Changed("title") {
++		title, _ := cmd.Flags().GetString("title")
++		body["name"] = title
++	}
++	if cmd.Flags().Changed("subtitle") {
++		subtitle, _ := cmd.Flags().GetString("subtitle")
++		body["subtitle"] = subtitle
++	}
++	if cmd.Flags().Changed("file") {
++		filePath, _ := cmd.Flags().GetString("file")
++		content, err := readMarkdownFile(filePath)
++		if err != nil {
++			return err
++		}
++		body["content"] = content
++		body["content_format"] = "markdown"
++	}
++	if cmd.Flags().Changed("tag") {
++		tags, _ := cmd.Flags().GetStringArray("tag")
++		body["tag_names"] = tags
++	}
++	if cmd.Flags().Changed("publish") {
++		publish, _ := cmd.Flags().GetBool("publish")
++		body["is_published"] = publish
++	}
++	if len(body) == 0 {
++		return fmt.Errorf("nothing to update; pass --title, --subtitle, --file, --tag, or --publish")
++	}
++
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		return err
++	}
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++
++	var post blogPostDTO
++	if err := client.PatchJSON(ctx, fmt.Sprintf("/inair_website_blog/posts/%d", id), body, &post); err != nil {
++		return fmt.Errorf("update blog post: %w", err)
++	}
++	output, _ := cmd.Flags().GetString("output")
++	if output == "json" {
++		return cli.PrintJSON(os.Stdout, post)
++	}
++	fmt.Fprintf(os.Stdout, "Post %d updated.\n", post.ID)
++	if post.URL != "" {
++		fmt.Fprintf(os.Stdout, "URL: %s\n", post.URL)
++	}
++	return nil
++}
++
++// blogIDFlag returns the --blog value; only meaningful when Changed("blog").
++func blogIDFlag(cmd *cobra.Command) int64 {
++	id, _ := cmd.Flags().Int64("blog")
++	return id
++}
+Index: multica/server/cmd/multica/main.go
+===================================================================
+--- multica.orig/server/cmd/multica/main.go
++++ multica/server/cmd/multica/main.go
+@@ -87,6 +87,7 @@ func init() {
+ 	rootCmd.AddCommand(loginCmd)
+ 	rootCmd.AddCommand(setupCmd)
+ 	rootCmd.AddCommand(attachmentCmd)
++	rootCmd.AddCommand(blogCmd)
+ 	rootCmd.AddCommand(configCmd)
+ 	rootCmd.AddCommand(updateCmd)
+ 	rootCmd.AddCommand(versionCmd)

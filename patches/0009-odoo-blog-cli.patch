@@ -343,7 +343,7 @@ Index: multica/server/cmd/multica/cmd_blog.go
 +
 +// blogIDFlag returns the --blog value; only meaningful when Changed("blog").
 +func blogIDFlag(cmd *cobra.Command) int64 {
-+	id, _ := cmd.Flags().Int64("blog")
++	id, _ := cmd.Flags().GetInt64("blog")
 +	return id
 +}
 Index: multica/server/cmd/multica/main.go

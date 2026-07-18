@@ -1,0 +1,50 @@
+Index: multica/server/internal/daemon/config.go
+===================================================================
+--- multica.orig/server/internal/daemon/config.go
++++ multica/server/internal/daemon/config.go
+@@ -567,9 +567,10 @@ func LoadConfig(overrides Overrides) (Co
+ 	if overrides.DisableAutoUpdate {
+ 		autoUpdateEnabled = false
+ 	}
+-	// Odoo backend mode: disable GC and auto-update.
++	// Odoo backend mode: auto-update is off (Odoo deployments manage the
++	// daemon binary themselves). GC stays on — inair_multica's gc-check
++	// endpoints back it; disable with MULTICA_GC_ENABLED=false if needed.
+ 	if backendMode == "odoo" {
+-		gcEnabled = false
+ 		autoUpdateEnabled = false
+ 	}
+ 	autoUpdateInterval, err := durationFromEnv("MULTICA_DAEMON_AUTO_UPDATE_INTERVAL", DefaultAutoUpdateCheckInterval)
+Index: multica/server/internal/daemon/config_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/config_test.go
++++ multica/server/internal/daemon/config_test.go
+@@ -533,6 +533,28 @@ func TestLoadConfig_AutoUpdateEnv_Forces
+ 	}
+ }
+ 
++// TestLoadConfig_OdooModeKeepsGCOnAutoUpdateOff locks in the Odoo backend
++// defaults after GC was re-enabled: GC runs (inair_multica's gc-check endpoints
++// back it), while auto-update stays off (Odoo manages the daemon binary).
++func TestLoadConfig_OdooModeKeepsGCOnAutoUpdateOff(t *testing.T) {
++	stageFakeAgent(t)
++	t.Setenv("MULTICA_BACKEND_MODE", "odoo")
++	t.Setenv("MULTICA_GC_ENABLED", "") // no ambient opt-out
++	cfg, err := LoadConfig(Overrides{
++		ServerURL:      "http://localhost:8080",
++		WorkspacesRoot: t.TempDir(),
++	})
++	if err != nil {
++		t.Fatalf("LoadConfig: %v", err)
++	}
++	if !cfg.GCEnabled {
++		t.Fatalf("GCEnabled = false in Odoo mode, want true (gc-check endpoints back it)")
++	}
++	if cfg.AutoUpdateEnabled {
++		t.Fatalf("AutoUpdateEnabled = true in Odoo mode, want false")
++	}
++}
++
+ // TestLoadConfig_AutoUpdate_NoFlagWinsOverCloudDefault keeps the legacy CLI
+ // flag working: --no-auto-update (translated into overrides.DisableAutoUpdate)
+ // forces auto-update off even when the cloud default and env var would enable.

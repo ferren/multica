@@ -1,0 +1,264 @@
+Index: multica/server/internal/daemon/daemon.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -3524,7 +3524,7 @@ func (d *Daemon) acquireLocalDirectoryLo
+ 		return nil, false
+ 	}
+ 	taskLog = taskLog.With("local_directory", assignment.AbsPath)
+-	if err := validateLocalPath(assignment.AbsPath); err != nil {
++	if err := validateLocalPath(assignment.AbsPath, d.cfg.WorkspacesRoot); err != nil {
+ 		taskLog.Error("local_directory: path validation failed", "error", err)
+ 		if failErr := d.client.FailTask(ctx, task.ID, err.Error(), "", "", "local_directory_error"); failErr != nil {
+ 			taskLog.Error("fail task after local_directory validation error", "error", failErr)
+Index: multica/server/internal/daemon/local_directory.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_directory.go
++++ multica/server/internal/daemon/local_directory.go
+@@ -154,13 +154,19 @@ func resolveRealPath(absPath string) (st
+ //     this a symlink like /Users/me/proj/home -> /Users/me would slip the
+ //     literal-equality check above while still routing every daemon write
+ //     into $HOME;
++//   - the path is NOT at or under the daemon's workspaces root — the GC
++//     loop reclaims that entire tree, so a "fixed" local_directory pinned
++//     there would be deleted once idle (the LocalDirectory GC override
++//     only shields the per-task envRoot, not the user's workdir, and only
++//     when a marker exists). workspacesRoot is the daemon's resolved
++//     WorkspacesRoot (d.cfg.WorkspacesRoot); pass "" to skip the check;
+ //   - the path exists, is a directory (not a regular file or device);
+ //   - the daemon process can read and write inside it (the agent will need
+ //     both — read for context discovery, write for the issue's edits).
+ //
+ // Each failure returns a typed error message so the daemon can forward it
+ // onto the task's fail comment verbatim.
+-func validateLocalPath(absPath string) error {
++func validateLocalPath(absPath, workspacesRoot string) error {
+ 	if absPath == "" {
+ 		return errors.New("local_directory: local_path is empty")
+ 	}
+@@ -206,12 +212,54 @@ func validateLocalPath(absPath string) e
+ 		}
+ 		return fmt.Errorf("local_directory: %s (canonical path %q)", reason, absPath)
+ 	}
++	// Reject paths at or under the daemon's workspaces root. The GC loop
++	// reclaims anything in that tree, so a local_directory pinned there would
++	// be swept once idle. Check both the literal cleaned path (what the GC
++	// enumerates) and the symlink-resolved realPath (where writes actually
++	// land) against the canonical workspaces root, failing closed either way.
++	if wr := canonicalWorkspacesRoot(workspacesRoot); wr != "" {
++		if isSameOrUnderPath(filepath.Clean(absPath), wr) || isSameOrUnderPath(realPath, wr) {
++			return fmt.Errorf("local_directory: %q is inside the daemon workspaces root %q; pick a path outside it (the GC loop reclaims that tree)", absPath, wr)
++		}
++	}
+ 	if err := checkDirReadWrite(absPath); err != nil {
+ 		return fmt.Errorf("local_directory: %w", err)
+ 	}
+ 	return nil
+ }
+ 
++// canonicalWorkspacesRoot returns the symlink-resolved, cleaned form of the
++// daemon's workspaces root, or "" if it is unset or unresolvable. Used by
++// validateLocalPath to compare candidate local_directory paths on equal
++// canonical footing.
++func canonicalWorkspacesRoot(workspacesRoot string) string {
++	wr := strings.TrimSpace(workspacesRoot)
++	if wr == "" {
++		return ""
++	}
++	if r, err := filepath.EvalSymlinks(wr); err == nil {
++		return filepath.Clean(r)
++	}
++	return filepath.Clean(wr)
++}
++
++// isSameOrUnderPath reports whether target is equal to base or nested below
++// it (base is a path-boundary prefix of target). It uses filepath.Rel so the
++// "/a/b" vs "/a/bad" boundary is handled correctly, not by raw string prefix.
++func isSameOrUnderPath(target, base string) bool {
++	if base == "" {
++		return false
++	}
++	if target == base {
++		return true
++	}
++	rel, err := filepath.Rel(base, target)
++	if err != nil {
++		return false
++	}
++	return rel != "." && rel != ".." && !strings.HasPrefix(rel, "../")
++}
++
+ // isBlacklistedLocalPath rejects paths that map to the whole machine or an
+ // entire user profile. The intent is to keep the daemon from accidentally
+ // stamping context files (.agent_context/, .claude/skills/, .multica/) at
+Index: multica/server/internal/daemon/local_directory_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_directory_test.go
++++ multica/server/internal/daemon/local_directory_test.go
+@@ -223,26 +223,26 @@ func TestValidateLocalPath(t *testing.T)
+ 	dir := t.TempDir()
+ 
+ 	t.Run("accepts a writable directory", func(t *testing.T) {
+-		if err := validateLocalPath(dir); err != nil {
++		if err := validateLocalPath(dir, ""); err != nil {
+ 			t.Errorf("unexpected: %v", err)
+ 		}
+ 	})
+ 
+ 	t.Run("rejects relative path", func(t *testing.T) {
+-		if err := validateLocalPath("relative"); err == nil {
++		if err := validateLocalPath("relative", ""); err == nil {
+ 			t.Errorf("expected error")
+ 		}
+ 	})
+ 
+ 	t.Run("rejects empty path", func(t *testing.T) {
+-		if err := validateLocalPath(""); err == nil {
++		if err := validateLocalPath("", ""); err == nil {
+ 			t.Errorf("expected error")
+ 		}
+ 	})
+ 
+ 	t.Run("rejects system roots", func(t *testing.T) {
+ 		for _, banned := range []string{"/", "/Users", "/home"} {
+-			if err := validateLocalPath(banned); err == nil {
++			if err := validateLocalPath(banned, ""); err == nil {
+ 				t.Errorf("expected error for %q", banned)
+ 			}
+ 		}
+@@ -253,14 +253,14 @@ func TestValidateLocalPath(t *testing.T)
+ 		if err != nil || home == "" {
+ 			t.Skip("no home dir")
+ 		}
+-		if err := validateLocalPath(home); err == nil {
++		if err := validateLocalPath(home, ""); err == nil {
+ 			t.Errorf("expected error for $HOME")
+ 		}
+ 	})
+ 
+ 	t.Run("rejects missing path", func(t *testing.T) {
+ 		missing := filepath.Join(dir, "does-not-exist")
+-		if err := validateLocalPath(missing); err == nil {
++		if err := validateLocalPath(missing, ""); err == nil {
+ 			t.Errorf("expected error")
+ 		}
+ 	})
+@@ -270,7 +270,7 @@ func TestValidateLocalPath(t *testing.T)
+ 		if err := os.WriteFile(f, []byte("hi"), 0o644); err != nil {
+ 			t.Fatalf("write: %v", err)
+ 		}
+-		if err := validateLocalPath(f); err == nil {
++		if err := validateLocalPath(f, ""); err == nil {
+ 			t.Errorf("expected error")
+ 		}
+ 	})
+@@ -285,7 +285,7 @@ func TestValidateLocalPath(t *testing.T)
+ 			t.Fatalf("mkdir: %v", err)
+ 		}
+ 		t.Cleanup(func() { _ = os.Chmod(ro, 0o755) })
+-		if err := validateLocalPath(ro); err == nil {
++		if err := validateLocalPath(ro, ""); err == nil {
+ 			t.Errorf("expected error for read-only directory")
+ 		}
+ 	})
+@@ -301,7 +301,7 @@ func TestValidateLocalPath(t *testing.T)
+ 		}
+ 		// The literal cleaned path is dir/home-link, which is NOT in the
+ 		// blacklist. Without the realpath check this used to pass.
+-		err = validateLocalPath(link)
++		err = validateLocalPath(link, "")
+ 		if err == nil {
+ 			t.Fatal("expected error for symlink pointing at $HOME")
+ 		}
+@@ -319,7 +319,7 @@ func TestValidateLocalPath(t *testing.T)
+ 		if err := os.Symlink(target, link); err != nil {
+ 			t.Fatalf("symlink: %v", err)
+ 		}
+-		err := validateLocalPath(link)
++		err := validateLocalPath(link, "")
+ 		if err == nil {
+ 			t.Fatal("expected error for symlink pointing at a system root")
+ 		}
+@@ -337,7 +337,7 @@ func TestValidateLocalPath(t *testing.T)
+ 		if err := os.Symlink(target, link); err != nil {
+ 			t.Fatalf("symlink: %v", err)
+ 		}
+-		if err := validateLocalPath(link); err != nil {
++		if err := validateLocalPath(link, ""); err != nil {
+ 			t.Errorf("symlink to a regular directory should pass, got %v", err)
+ 		}
+ 	})
+@@ -357,7 +357,7 @@ func TestValidateLocalPath(t *testing.T)
+ 				t.Logf("skipping %q: %v", p, statErr)
+ 				continue
+ 			}
+-			err := validateLocalPath(p)
++			err := validateLocalPath(p, "")
+ 			if err == nil {
+ 				t.Errorf("expected error for canonical %q", p)
+ 				continue
+@@ -368,6 +368,64 @@ func TestValidateLocalPath(t *testing.T)
+ 		}
+ 	})
+ 
++	t.Run("rejects a path inside the daemon workspaces root", func(t *testing.T) {
++		wsRoot := t.TempDir()
++		inside := filepath.Join(wsRoot, "proj")
++		if err := os.Mkdir(inside, 0o755); err != nil {
++			t.Fatalf("mkdir: %v", err)
++		}
++		// Both the root itself and a nested dir fall under the GC tree.
++		for _, p := range []string{wsRoot, inside} {
++			if err := validateLocalPath(p, wsRoot); err == nil {
++				t.Errorf("expected error for %q under workspaces root %q", p, wsRoot)
++			}
++		}
++		// An empty workspacesRoot disables the check (back-compat).
++		if err := validateLocalPath(inside, ""); err != nil {
++			t.Errorf("empty workspacesRoot should skip the check, got: %v", err)
++		}
++		// A directory outside the root is unaffected.
++		outside := t.TempDir()
++		if err := validateLocalPath(outside, wsRoot); err != nil {
++			t.Errorf("unexpected error for path outside workspaces root: %v", err)
++		}
++		// A symlink whose literal path is outside the root but resolves into
++		// it is also rejected (writes would land in the GC-managed tree).
++		link := filepath.Join(t.TempDir(), "into-ws")
++		if err := os.Symlink(inside, link); err != nil {
++			t.Fatalf("symlink: %v", err)
++		}
++		if err := validateLocalPath(link, wsRoot); err == nil {
++			t.Errorf("expected error for symlink resolving into workspaces root")
++		}
++	})
++
++}
++
++// TestIsSameOrUnderPath locks the path-boundary semantics used by the
++// workspaces-root containment check: equal-or-nested is true, a sibling that
++// merely shares a string prefix ("/a/b" vs "/a/bad") is not.
++func TestIsSameOrUnderPath(t *testing.T) {
++	cases := []struct {
++		name   string
++		target string
++		base   string
++		want   bool
++	}{
++		{"equal", "/a/b", "/a/b", true},
++		{"nested", "/a/b/c", "/a/b", true},
++		{"prefix collision sibling", "/a/bad", "/a/b", false},
++		{"sibling", "/a/c", "/a/b", false},
++		{"parent of base", "/a", "/a/b", false},
++		{"empty base", "/a/b", "", false},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			if got := isSameOrUnderPath(tc.target, tc.base); got != tc.want {
++				t.Errorf("isSameOrUnderPath(%q, %q) = %v, want %v", tc.target, tc.base, got, tc.want)
++			}
++		})
++	}
+ }
+ 
+ // TestIsDriveRoot covers the Windows drive-root generalisation. Static

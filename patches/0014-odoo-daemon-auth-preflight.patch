@@ -1,0 +1,49 @@
+Index: multica/server/cmd/multica/cmd_daemon.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_daemon.go
++++ multica/server/cmd/multica/cmd_daemon.go
+@@ -248,11 +248,25 @@ var daemonExecutable = selfexec.Resolve
+ // warning. Checking before spawning turns that silent stall into an
+ // immediate, actionable error. Mirrors daemon.resolveAuth: the daemon only
+ // authenticates via the stored config token, never MULTICA_TOKEN.
++//
++// Odoo backend mode authenticates via app_id/app_secret instead of a login
++// token (mirrors daemon.resolveOdooAuth); check those credentials instead of
++// cfg.Token there, with the same env-override-wins-over-config.json
++// precedence used to resolve backend_mode/app_id/app_secret elsewhere.
+ func requireDaemonAuth(profile string) error {
+ 	cfg, err := cli.LoadCLIConfigForProfile(profile)
+ 	if err != nil {
+ 		return fmt.Errorf("load CLI config: %w", err)
+ 	}
++	backendMode := strings.ToLower(firstNonEmptyStr(os.Getenv("MULTICA_BACKEND_MODE"), cfg.BackendMode, "multica"))
++	if backendMode == "odoo" {
++		appID := firstNonEmptyStr(strings.TrimSpace(os.Getenv("MULTICA_APP_ID")), cfg.AppID)
++		appSecret := firstNonEmptyStr(strings.TrimSpace(os.Getenv("MULTICA_APP_SECRET")), cfg.AppSecret)
++		if appID == "" || appSecret == "" {
++			return fmt.Errorf("Odoo backend mode requires an app id and secret (env MULTICA_APP_ID/MULTICA_APP_SECRET or app_id/app_secret in config.json)")
++		}
++		return nil
++	}
+ 	if cfg.Token == "" {
+ 		loginHint := "multica login"
+ 		if profile != "" {
+@@ -263,6 +277,18 @@ func requireDaemonAuth(profile string) e
+ 	return nil
+ }
+ 
++// firstNonEmptyStr returns the first non-empty string among vals. Mirrors
++// daemon.firstNonEmpty (internal/daemon/config.go), which isn't exported for
++// use here.
++func firstNonEmptyStr(vals ...string) string {
++	for _, v := range vals {
++		if v != "" {
++			return v
++		}
++	}
++	return ""
++}
++
+ func runDaemonStart(cmd *cobra.Command, _ []string) error {
+ 	foreground, _ := cmd.Flags().GetBool("foreground")
+ 	if foreground {

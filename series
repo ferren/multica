@@ -11,3 +11,4 @@
 0011-odoo-local-directory-workspaces-root-guard.patch
 0012-odoo-enable-gc.patch
 0013-odoo-claim-preinject-context.patch
+0014-odoo-daemon-auth-preflight.patch

@@ -10,3 +10,4 @@
 0010-odoo-blog-skill.patch
 0011-odoo-local-directory-workspaces-root-guard.patch
 0012-odoo-enable-gc.patch
+0013-odoo-claim-preinject-context.patch

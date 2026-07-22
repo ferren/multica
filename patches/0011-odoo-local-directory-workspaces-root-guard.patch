@@ -2,15 +2,15 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -3524,7 +3524,7 @@ func (d *Daemon) acquireLocalDirectoryLo
+@@ -3606,7 +3606,7 @@ func (d *Daemon) acquireLocalDirectoryLo
  		return nil, false
  	}
  	taskLog = taskLog.With("local_directory", assignment.AbsPath)
 -	if err := validateLocalPath(assignment.AbsPath); err != nil {
 +	if err := validateLocalPath(assignment.AbsPath, d.cfg.WorkspacesRoot); err != nil {
  		taskLog.Error("local_directory: path validation failed", "error", err)
- 		if failErr := d.client.FailTask(ctx, task.ID, err.Error(), "", "", "local_directory_error"); failErr != nil {
- 			taskLog.Error("fail task after local_directory validation error", "error", failErr)
+ 		if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
+ 			kind:          terminalTaskReportFail,
 Index: multica/server/internal/daemon/local_directory.go
 ===================================================================
 --- multica.orig/server/internal/daemon/local_directory.go

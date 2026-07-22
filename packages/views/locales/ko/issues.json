@@ -66,6 +66,7 @@
   },
   "display": {
     "tooltip": "보기 설정",
+    "button": "보기",
     "grouping_section": "그룹화",
     "ordering_section": "정렬",
     "card_properties_section": "카드 속성",
@@ -112,6 +113,7 @@
     "sort_ascending": "오름차순",
     "sort_descending": "내림차순",
     "toggle_sub_issues": "하위 이슈 펼치기 또는 접기",
+    "rename_title": "이슈 이름 변경",
     "empty_value": "비어 있음",
     "quick_create_placeholder": "이슈 추가…",
     "quick_create_submit": "추가",

@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -195,6 +195,7 @@ type workspaceState struct {
+@@ -196,6 +196,7 @@ type workspaceState struct {
  	allowedRepoURLs map[string]struct{}
  	taskRepoURLs    map[string]struct{}
  	taskRepoRefs    map[string]map[string]string // taskID -> repo URL -> checkout ref
@@ -10,7 +10,7 @@ Index: multica/server/internal/daemon/daemon.go
  	settings        json.RawMessage              // workspace settings (JSONB)
  	lastRepoSyncErr string
  	repoRefreshMu   sync.Mutex
-@@ -1736,6 +1737,9 @@ func (d *Daemon) registerTaskRepos(works
+@@ -1796,6 +1797,9 @@ func (d *Daemon) registerTaskRepos(works
  	if taskID != "" && ws.taskRepoRefs == nil {
  		ws.taskRepoRefs = make(map[string]map[string]string)
  	}
@@ -20,7 +20,7 @@ Index: multica/server/internal/daemon/daemon.go
  	candidates := make([]repoCandidate, 0, len(repos))
  	for _, repo := range repos {
  		url := strings.TrimSpace(repo.URL)
-@@ -1754,6 +1758,12 @@ func (d *Daemon) registerTaskRepos(works
+@@ -1814,6 +1818,12 @@ func (d *Daemon) registerTaskRepos(works
  			if _, exists := ws.taskRepoRefs[taskID][url]; !exists {
  				ws.taskRepoRefs[taskID][url] = strings.TrimSpace(repo.Ref)
  			}
@@ -33,7 +33,7 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  		candidates = append(candidates, repoCandidate{
  			url:     url,
-@@ -1798,6 +1808,25 @@ func (d *Daemon) taskRepoDefaultRef(work
+@@ -1858,6 +1868,25 @@ func (d *Daemon) taskRepoDefaultRef(work
  	return strings.TrimSpace(ws.taskRepoRefs[taskID][repoURL])
  }
  
@@ -59,7 +59,7 @@ Index: multica/server/internal/daemon/daemon.go
  func (d *Daemon) clearTaskRepoRefs(workspaceID, taskID string) {
  	taskID = strings.TrimSpace(taskID)
  	if taskID == "" {
-@@ -5628,7 +5657,7 @@ func convertReposForEnv(repos []RepoData
+@@ -5731,7 +5760,7 @@ func convertReposForEnv(repos []RepoData
  	}
  	result := make([]execenv.RepoContextForEnv, len(repos))
  	for i, r := range repos {
@@ -84,7 +84,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config_sections.go
 +++ multica/server/internal/daemon/execenv/runtime_config_sections.go
-@@ -246,11 +246,23 @@ func writeRepositories(b *strings.Builde
+@@ -276,11 +276,23 @@ func writeRepositories(b *strings.Builde
  	b.WriteString("## Repositories\n\n")
  	b.WriteString("Available in this workspace — `multica repo checkout <url> [--ref <branch-or-sha>]` to fetch (creates a repository checkout on a dedicated branch).\n\n")
  	for _, repo := range ctx.Repos {
@@ -168,7 +168,7 @@ Index: multica/server/internal/daemon/repocache/cache.go
  
  	// Once a workdir has moved to isolated metadata, keep using that safer
  	// shape even if a later task comes from an older CLI or a different runtime
-@@ -1238,6 +1251,27 @@ func excludeFromGit(worktreePath, patter
+@@ -1292,6 +1305,27 @@ func excludeFromGit(worktreePath, patter
  	return nil
  }
  

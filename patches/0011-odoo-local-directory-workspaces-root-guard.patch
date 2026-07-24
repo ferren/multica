@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -3606,7 +3606,7 @@ func (d *Daemon) acquireLocalDirectoryLo
+@@ -3679,7 +3679,7 @@ func (d *Daemon) acquireLocalDirectoryLo
  		return nil, false
  	}
  	taskLog = taskLog.With("local_directory", assignment.AbsPath)

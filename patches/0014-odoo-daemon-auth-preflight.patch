@@ -2,7 +2,7 @@ Index: multica/server/cmd/multica/cmd_daemon.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_daemon.go
 +++ multica/server/cmd/multica/cmd_daemon.go
-@@ -248,11 +248,25 @@ var daemonExecutable = selfexec.Resolve
+@@ -286,11 +286,25 @@ var daemonExecutable = selfexec.Resolve
  // warning. Checking before spawning turns that silent stall into an
  // immediate, actionable error. Mirrors daemon.resolveAuth: the daemon only
  // authenticates via the stored config token, never MULTICA_TOKEN.
@@ -28,7 +28,7 @@ Index: multica/server/cmd/multica/cmd_daemon.go
  	if cfg.Token == "" {
  		loginHint := "multica login"
  		if profile != "" {
-@@ -263,6 +277,18 @@ func requireDaemonAuth(profile string) e
+@@ -301,6 +315,18 @@ func requireDaemonAuth(profile string) e
  	return nil
  }
  

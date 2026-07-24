@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -4331,6 +4331,9 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -4404,6 +4404,9 @@ func (d *Daemon) runTask(ctx context.Con
  		CommentReplyTargets:              commentReplyThreads(task),
  		NewCommentCount:                  task.NewCommentCount,
  		NewCommentsSince:                 task.NewCommentsSince,
@@ -12,7 +12,7 @@ Index: multica/server/internal/daemon/daemon.go
  		PriorSessionResumed:              task.PriorSessionID != "",
  		AgentID:                          agentID,
  		AgentName:                        agentName,
-@@ -5684,6 +5687,29 @@ func convertProjectResourcesForEnv(resou
+@@ -5787,6 +5790,29 @@ func convertProjectResourcesForEnv(resou
  		}
  	}
  	return result
@@ -81,7 +81,7 @@ Index: multica/server/internal/daemon/execenv/execenv.go
  	PriorSessionResumed bool   // true when the daemon will resume an existing provider session for this task
  	// PriorSessionResumeUnavailable is true when this task carried a prior
  	// session the daemon expected to resume but could NOT (the reused workdir was
-@@ -176,6 +185,22 @@ type TaskContextForEnv struct {
+@@ -177,6 +186,22 @@ type TaskContextForEnv struct {
  	InitiatorEmail string
  }
  
@@ -108,7 +108,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv_test.go
 +++ multica/server/internal/daemon/execenv/execenv_test.go
-@@ -4742,10 +4742,16 @@ func TestInjectRuntimeConfigCommentTrigg
+@@ -4767,10 +4767,16 @@ func TestInjectRuntimeConfigCommentTrigg
  	}
  }
  
@@ -129,7 +129,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
  func TestInjectRuntimeConfigAssignmentTriggerMentionsRecent(t *testing.T) {
  	t.Parallel()
  
-@@ -4759,25 +4765,26 @@ func TestInjectRuntimeConfigAssignmentTr
+@@ -4784,25 +4790,26 @@ func TestInjectRuntimeConfigAssignmentTr
  	}
  	s := string(data)
  
@@ -164,7 +164,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
  		}
  	}
  	for _, banned := range []string{
-@@ -4798,6 +4805,167 @@ func TestInjectRuntimeConfigAssignmentTr
+@@ -4823,6 +4830,167 @@ func TestInjectRuntimeConfigAssignmentTr
  			t.Errorf("assignment Workflow regressed to replacement-style --recent phrasing %q\n---\n%s", banned, s)
  		}
  	}
@@ -336,8 +336,8 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config_sections.go
 +++ multica/server/internal/daemon/execenv/runtime_config_sections.go
-@@ -418,22 +418,120 @@ func writeWorkflowComment(b *strings.Bui
- 	b.WriteString("9. Do NOT change the issue status unless the comment explicitly asks for it\n\n")
+@@ -464,6 +464,97 @@ func writeWorkflowComment(b *strings.Bui
+ 	}
  }
  
 +// writePreInjectedIssueContext emits the `## Issue Context` section: the issue
@@ -432,6 +432,12 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 +}
 +
  // writeWorkflowAssignment emits the assignment-triggered workflow.
+ //
+ // Ordinary agents own the full status arc for their issue: open with
+@@ -474,25 +565,32 @@ func writeWorkflowComment(b *strings.Bui
+ // as ready for review. Leaders move the parent to in_review later, when
+ // a re-trigger (member update / stage barrier) confirms the overall goal
+ // is met; see the Squad Operating Protocol and child-done system comments.
 +//
 +// 方案B (TASK-1-17-1): the numbered "run issue get / metadata list / comment
 +// list" read steps were removed. Context acquisition now lives in the
@@ -459,15 +465,20 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 +		fmt.Fprintf(b, "3. **Post your final results as a comment — this step is mandatory**: post it with `multica issue comment add %s` using the platform-correct non-inline mode from ## Comment Formatting (never inline `--content`). Your results are only visible to the user if posted via this CLI call; text in your terminal or run logs is NOT delivered.\n", ctx.IssueID)
  	}
 -	b.WriteString("7. Before exiting: only if this run produced a fact that clears the high bar (important AND likely to be re-read by future runs on this same issue, e.g. a new PR URL or deploy URL), or you noticed a metadata key from entry that is now stale, pin or clear it via `multica issue metadata set`/`delete`. Most runs write nothing here — that is the expected outcome, not a gap. When in doubt, do not write. See the `## Issue Metadata` section above for the full bar.\n")
--	fmt.Fprintf(b, "8. When done, run `multica issue status %s in_review` unless your Agent Identity forbids issue status changes; if it does, skip this step.\n", ctx.IssueID)
--	fmt.Fprintf(b, "9. If blocked, run `multica issue status %s blocked` unless your Agent Identity forbids issue status changes. Post a comment explaining the blocker unless your Agent Identity forbids issue comments.\n\n", ctx.IssueID)
 +	b.WriteString("4. Before exiting: only if this run produced a fact that clears the high bar (important AND likely to be re-read by future runs on this same issue, e.g. a new PR URL or deploy URL), or you noticed a metadata key from entry that is now stale, pin or clear it via `multica issue metadata set`/`delete`. Most runs write nothing here — that is the expected outcome, not a gap. When in doubt, do not write. See the `## Issue Metadata` section above for the full bar.\n")
-+	fmt.Fprintf(b, "5. When done, run `multica issue status %s in_review` unless your Agent Identity forbids issue status changes; if it does, skip this step.\n", ctx.IssueID)
+ 	if ctx.IsSquadLeader {
+-		fmt.Fprintf(b, "8. After this initial dispatch, leave the parent issue `in_progress` — do NOT run `multica issue status %s in_review` or `done` on this turn. Dispatching members is not completion. You will be re-triggered when members post updates or a stage closes; only then, if the overall goal is met, move the parent to `in_review`.\n", ctx.IssueID)
++		fmt.Fprintf(b, "5. After this initial dispatch, leave the parent issue `in_progress` — do NOT run `multica issue status %s in_review` or `done` on this turn. Dispatching members is not completion. You will be re-triggered when members post updates or a stage closes; only then, if the overall goal is met, move the parent to `in_review`.\n", ctx.IssueID)
+ 	} else {
+-		fmt.Fprintf(b, "8. When done, run `multica issue status %s in_review` unless your Agent Identity forbids issue status changes; if it does, skip this step.\n", ctx.IssueID)
++		fmt.Fprintf(b, "5. When done, run `multica issue status %s in_review` unless your Agent Identity forbids issue status changes; if it does, skip this step.\n", ctx.IssueID)
+ 	}
+-	fmt.Fprintf(b, "9. If blocked, run `multica issue status %s blocked` unless your Agent Identity forbids issue status changes. Post a comment explaining the blocker unless your Agent Identity forbids issue comments.\n\n", ctx.IssueID)
 +	fmt.Fprintf(b, "6. If blocked, run `multica issue status %s blocked` unless your Agent Identity forbids issue status changes. Post a comment explaining the blocker unless your Agent Identity forbids issue comments.\n\n", ctx.IssueID)
  }
  
  // writeSubIssueCreation emits the Sub-issue Creation section (compressed
-@@ -625,6 +723,15 @@ func buildMetaSkillContentSlim(provider
+@@ -684,6 +782,15 @@ func buildMetaSkillContentSlim(provider
  		writeInstructionPrecedence(&b)
  	}
  

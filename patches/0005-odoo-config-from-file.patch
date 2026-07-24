@@ -32,7 +32,7 @@ Index: multica/server/internal/daemon/config.go
  
  	// ProfileCommandOverrides maps a custom runtime profile_id -> the absolute
  	// executable path to use for that profile on THIS machine (MUL-3284).
-@@ -192,10 +194,12 @@ func LoadConfig(overrides Overrides) (Co
+@@ -195,10 +197,12 @@ func LoadConfig(overrides Overrides) (Co
  	// purely from env-var configuration. We log a warning and proceed with
  	// no overrides.
  	var profileCommandOverrides map[string]string
@@ -46,7 +46,7 @@ Index: multica/server/internal/daemon/config.go
  		if oc := openclawOverrideFrom(cliCfg); oc != nil {
  			applyOpenclawOverride(oc)
  		}
-@@ -504,11 +508,17 @@ func LoadConfig(overrides Overrides) (Co
+@@ -507,11 +511,17 @@ func LoadConfig(overrides Overrides) (Co
  		return Config{}, err
  	}
  
@@ -69,7 +69,7 @@ Index: multica/server/internal/daemon/config.go
  
  	// Health port: override > default
  	healthPort := DefaultHealthPort
-@@ -615,6 +625,8 @@ func LoadConfig(overrides Overrides) (Co
+@@ -618,6 +628,8 @@ func LoadConfig(overrides Overrides) (Co
  		QwenArgs:                       qwenArgs,
  		BackendMode:                    backendMode,
  		DBName:                         dbName,
@@ -82,7 +82,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -1168,10 +1168,10 @@ func (d *Daemon) resolveAuth() error {
+@@ -1169,10 +1169,10 @@ func (d *Daemon) resolveAuth() error {
  // resolveOdooAuth calls /openapi/token with MULTICA_APP_ID + MULTICA_APP_SECRET
  // to obtain access_token and api_key for Odoo OpenAPI auth.
  func (d *Daemon) resolveOdooAuth() error {
@@ -96,7 +96,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
  	defer cancel()
-@@ -1179,7 +1179,7 @@ func (d *Daemon) resolveOdooAuth() error
+@@ -1180,7 +1180,7 @@ func (d *Daemon) resolveOdooAuth() error
  		return fmt.Errorf("fetch odoo token: %w", err)
  	}
  	accessToken, _ := d.client.OdooCredentials()
@@ -105,7 +105,7 @@ Index: multica/server/internal/daemon/daemon.go
  	_ = accessToken
  
  	// Set up on-error callback to refresh token on 401
-@@ -1252,31 +1252,57 @@ func (d *Daemon) connectDaemon(ctx conte
+@@ -1253,31 +1253,57 @@ func (d *Daemon) connectDaemon(ctx conte
  	return nil
  }
  

@@ -1035,7 +1035,7 @@ Index: multica/server/pkg/protocol/messages.go
 ===================================================================
 --- multica.orig/server/pkg/protocol/messages.go
 +++ multica/server/pkg/protocol/messages.go
-@@ -264,6 +264,7 @@ type DaemonHeartbeatAckPayload struct {
+@@ -267,6 +267,7 @@ type DaemonHeartbeatAckPayload struct {
  	Status                  string                                  `json:"status"`
  	ServerCapabilities      []string                                `json:"server_capabilities,omitempty"`
  	RuntimeGone             bool                                    `json:"runtime_gone,omitempty"`

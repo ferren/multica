@@ -108,7 +108,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv_test.go
 +++ multica/server/internal/daemon/execenv/execenv_test.go
-@@ -4767,10 +4767,16 @@ func TestInjectRuntimeConfigCommentTrigg
+@@ -4841,10 +4841,16 @@ func TestInjectRuntimeConfigCommentTrigg
  	}
  }
  
@@ -129,7 +129,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
  func TestInjectRuntimeConfigAssignmentTriggerMentionsRecent(t *testing.T) {
  	t.Parallel()
  
-@@ -4784,25 +4790,26 @@ func TestInjectRuntimeConfigAssignmentTr
+@@ -4858,25 +4864,26 @@ func TestInjectRuntimeConfigAssignmentTr
  	}
  	s := string(data)
  
@@ -164,7 +164,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
  		}
  	}
  	for _, banned := range []string{
-@@ -4823,6 +4830,167 @@ func TestInjectRuntimeConfigAssignmentTr
+@@ -4897,6 +4904,167 @@ func TestInjectRuntimeConfigAssignmentTr
  			t.Errorf("assignment Workflow regressed to replacement-style --recent phrasing %q\n---\n%s", banned, s)
  		}
  	}
@@ -336,7 +336,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config_sections.go
 +++ multica/server/internal/daemon/execenv/runtime_config_sections.go
-@@ -464,6 +464,97 @@ func writeWorkflowComment(b *strings.Bui
+@@ -480,6 +480,97 @@ func writeWorkflowComment(b *strings.Bui
  	}
  }
  
@@ -434,7 +434,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
  // writeWorkflowAssignment emits the assignment-triggered workflow.
  //
  // Ordinary agents own the full status arc for their issue: open with
-@@ -474,25 +565,32 @@ func writeWorkflowComment(b *strings.Bui
+@@ -490,25 +581,32 @@ func writeWorkflowComment(b *strings.Bui
  // as ready for review. Leaders move the parent to in_review later, when
  // a re-trigger (member update / stage barrier) confirms the overall goal
  // is met; see the Squad Operating Protocol and child-done system comments.
@@ -478,7 +478,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
  }
  
  // writeSubIssueCreation emits the Sub-issue Creation section (compressed
-@@ -684,6 +782,15 @@ func buildMetaSkillContentSlim(provider
+@@ -701,6 +799,15 @@ func buildMetaSkillContentSlim(provider
  		writeInstructionPrecedence(&b)
  	}
  

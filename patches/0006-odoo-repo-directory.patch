@@ -84,7 +84,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config_sections.go
 +++ multica/server/internal/daemon/execenv/runtime_config_sections.go
-@@ -276,11 +276,23 @@ func writeRepositories(b *strings.Builde
+@@ -290,11 +290,23 @@ func writeRepositories(b *strings.Builde
  	b.WriteString("## Repositories\n\n")
  	b.WriteString("Available in this workspace — `multica repo checkout <url> [--ref <branch-or-sha>]` to fetch (creates a repository checkout on a dedicated branch).\n\n")
  	for _, repo := range ctx.Repos {

@@ -19,7 +19,7 @@ Index: multica/server/internal/daemon/config_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/config_test.go
 +++ multica/server/internal/daemon/config_test.go
-@@ -571,6 +571,28 @@ func TestLoadConfig_AutoUpdateEnv_Forces
+@@ -572,6 +572,28 @@ func TestLoadConfig_AutoUpdateEnv_Forces
  	}
  }
  

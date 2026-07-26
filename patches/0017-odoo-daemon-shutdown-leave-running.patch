@@ -1,0 +1,69 @@
+Index: multica/server/internal/daemon/daemon.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -3848,6 +3848,21 @@ func (d *Daemon) reportTaskResult(ctx co
+ 			taskLog.Error("fail task fallback also failed", "error", failErr)
+ 		}
+ 	default:
++		// Graceful shutdown (`multica daemon stop` → /shutdown, or SIGTERM) cancels
++		// the daemon root ctx, aborting in-flight agent runs mid-flight. A run that
++		// surfaces as Status=="cancelled" is precisely such a shutdown abort — not
++		// a real failure. Reporting it failed would mark the task failed/blocked
++		// (recoverable only by re-dispatch, losing the pinned session). Instead,
++		// leave it untouched (still running); the next daemon start's recover-orphans
++		// pass re-queues it with its pinned session and resumes. A graceful stop
++		// then recovers the same way a crash already does (issue #157). Other
++		// failure statuses are still reported even on shutdown — a genuine failure
++		// must not be masked by a coincidental shutdown.
++		if ctx.Err() != nil && result.Status == "cancelled" {
++			taskLog.Info("daemon shutting down: leaving cancelled task in place for recover-orphans resume",
++				"status", result.Status)
++			return
++		}
+ 		failureReason := result.FailureReason
+ 		if failureReason == "" {
+ 			if result.Status == "cancelled" {
+Index: multica/server/internal/daemon/daemon_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon_test.go
++++ multica/server/internal/daemon/daemon_test.go
+@@ -3074,6 +3074,38 @@ func TestReportTaskResult_CancelledParen
+ 	}
+ }
+ 
++// TestReportTaskResult_ShutdownLeavesCancelledRunForRecoverOrphans pins issue #157:
++// when the daemon is shutting down (parent ctx cancelled) and a run surfaces as
++// Status=="cancelled" — the abort a graceful `multica daemon stop` induces —
++// reportTaskResult must NOT report it. Leaving the task in place lets the next
++// daemon start's recover-orphans pass resume it with its pinned session, instead
++// of failing it (which would force a re-dispatch and lose the session). A genuine
++// failure status is still reported even on shutdown (see ...StillReportsTerminalState/fail).
++func TestReportTaskResult_ShutdownLeavesCancelledRunForRecoverOrphans(t *testing.T) {
++	t.Parallel()
++
++	var calls atomic.Int32
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
++		calls.Add(1)
++		w.WriteHeader(http.StatusOK)
++	}))
++	t.Cleanup(srv.Close)
++
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++
++	d := &Daemon{client: NewClient(srv.URL), logger: slog.Default()}
++	d.reportTaskResult(ctx, "task-shutdown-cancel", TaskResult{
++		Status:    "cancelled",
++		Comment:   "task cancelled by server",
++		SessionID: "ses-resume",
++	}, slog.Default())
++
++	if got := calls.Load(); got != 0 {
++		t.Fatalf("terminal callback calls = %d, want 0 (shutdown-cancelled run left for recover-orphans)", got)
++	}
++}
++
+ // Pins the GitHub multica#1952 fail-closed behaviour: a task whose
+ // agent run never produced a real result (blocked, cancelled, or any
+ // future status we forget to enumerate) MUST go through FailTask, so

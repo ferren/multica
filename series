@@ -14,3 +14,4 @@
 0014-odoo-daemon-auth-preflight.patch
 0015-odoo-daemon-pause-interrupt.patch
 0016-odoo-project-memory-cli.patch
+0017-odoo-daemon-shutdown-leave-running.patch

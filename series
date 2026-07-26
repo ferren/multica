@@ -16,3 +16,4 @@
 0016-odoo-project-memory-cli.patch
 0017-odoo-daemon-shutdown-leave-running.patch
 0018-odoo-daemon-recover-orphans-on-start.patch
+0019-odoo-daemon-recover-orphans-on-connect.patch

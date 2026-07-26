@@ -1,0 +1,25 @@
+Index: multica/server/internal/daemon/daemon.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -1250,6 +1250,20 @@ func (d *Daemon) connectDaemon(ctx conte
+ 	}
+ 	d.mu.Unlock()
+ 
++	// Recover orphans the previous daemon process left on these runtimes.
++	// connectDaemon is the first startup step (before preflightAuth/workspace
++	// sync), and it holds the runtime IDs straight from registration — so this is
++	// the most reliable trigger, independent of workspace/runtime binding in the
++	// sync path (which the recover-orphans call in syncWorkspacesFromAPI also
++	// covers, but only when the workspace API surfaces a matching RuntimeID).
++	// Safe because connectDaemon runs only at startup (Run, line 1078), when the
++	// daemon has no in-flight tasks yet. Idempotent.
++	for _, rt := range resp.Runtimes {
++		if err := d.client.RecoverOrphans(ctx, rt.ID); err != nil {
++			d.logger.Warn("recover-orphans (connect) failed", "runtime_id", rt.ID, "error", err)
++		}
++	}
++
+ 	d.logger.Info("daemon connected (Odoo mode)", "daemon_id", d.cfg.DaemonID, "runtimes", len(resp.Runtimes))
+ 	return nil
+ }

@@ -1,0 +1,1211 @@
+Index: multica/server/cmd/multica/cmd_memory.go
+===================================================================
+--- /dev/null
++++ multica/server/cmd/multica/cmd_memory.go
+@@ -0,0 +1,774 @@
++package main
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net/http"
++	"net/url"
++	"os"
++	"path/filepath"
++	"sort"
++	"strconv"
++	"strings"
++	"unicode/utf8"
++
++	"github.com/spf13/cobra"
++	"gopkg.in/yaml.v3"
++
++	"github.com/multica-ai/multica/server/internal/cli"
++)
++
++// multica memory — project / workspace scoped memories that survive across
++// sessions. Backed by the Odoo model inair.multica.memory (see
++// inair_multica/models/inair_multica_memory.py) and served under
++// /multica/agent/memories by inair_multica/controllers/agent_api.py.
++//
++// Paths below are written as "/api/memories" so APIClient.url() rewrites them
++// to the Odoo prefix ("/multica/agent") exactly like every other agent
++// endpoint. Native Multica has no such feature, so a native backend answers
++// 404 — surfaced with a pointed error instead of a bare status code.
++//
++// Why this exists at all: an agent's only sanctioned channel to the backend is
++// this CLI (no curl). Memories are injected into the task brief as an INDEX
++// (name/type/one-line description); the body is fetched on demand with
++// `memory get`, which is exactly what this command is for.
++
++// memoryContentMaxRunes mirrors _MEMORY_CONTENT_MAX_LEN on the Odoo model.
++// Checked client-side too so `memory import` can report which file is too long
++// (and skip it) instead of firing a doomed request per file.
++const memoryContentMaxRunes = 4000
++
++// memoryTypes mirrors the Selection on inair.multica.memory. user/feedback are
++// injected into the brief in full; project/reference only as an index line.
++var memoryTypes = []string{"user", "feedback", "project", "reference"}
++
++type memoryDTO struct {
++	ID           int64  `json:"id"`
++	Name         string `json:"name"`
++	Description  string `json:"description"`
++	MemoryType   string `json:"memory_type"`
++	ProjectID    *int64 `json:"project_id"`
++	Scope        string `json:"scope"`
++	AgentID      *int64 `json:"agent_id"`
++	SourceTaskID *int64 `json:"source_task_id"`
++	Active       bool   `json:"active"`
++	UpdatedAt    string `json:"updated_at"`
++	Content      string `json:"content,omitempty"`
++}
++
++type memoryListResponse struct {
++	Memories []memoryDTO `json:"memories"`
++	Total    int         `json:"total"`
++}
++
++var memoryCmd = &cobra.Command{
++	Use:   "memory",
++	Short: "Read and write cross-session memories (project or workspace scoped)",
++	Long: `Memories are facts that outlive a single run: conventions, gotchas, pointers
++to external resources. Project memories are injected into every task brief for
++that project; global (workspace) memories into every project's brief.
++
++The brief carries only the INDEX (name, type, one-line description) — read a
++body with 'memory get <name>' instead of guessing from the summary.
++
++Write discipline: only record facts that are important AND will be re-read by
++future runs; most runs write nothing. No secrets, no logs, no single-run
++details, nothing already in the code or git history. Convert relative dates to
++absolute ones. Got it wrong? Overwrite the same name or delete it — never add a
++second, contradicting entry.
++
++  multica memory list                          # global + this project's memories
++  multica memory list --type feedback --full
++  multica memory get redis-session-required
++  multica memory set redis-session-required --description "..." --content-file note.md
++  multica memory set communicate-in-chinese --description "..." --type feedback --global
++  multica memory delete redis-session-required
++  multica memory import ~/.claude/projects/<slug>/memory --dry-run`,
++}
++
++var memoryListCmd = &cobra.Command{
++	Use:   "list",
++	Short: "List memories visible to this project (global + project)",
++	Args:  exactArgs(0),
++	RunE:  runMemoryList,
++}
++
++var memoryGetCmd = &cobra.Command{
++	Use:   "get <name|id>",
++	Short: "Show one memory including its body",
++	Args:  exactArgs(1),
++	RunE:  runMemoryGet,
++}
++
++var memorySetCmd = &cobra.Command{
++	Use:   "set <name>",
++	Short: "Create or overwrite a memory (upsert by name within the scope)",
++	Long: `Create or overwrite a memory. <name> is a kebab-case slug and is the stable
++identity of the fact: writing the same name in the same scope OVERWRITES it
++(and revives it if it had been archived), so memories never pile up duplicates.
++
++Scope is explicit on purpose: --global writes a workspace-wide memory visible
++to every project, otherwise the memory belongs to --project (defaulting to the
++project of the current task workdir). Writing to the wrong scope pollutes every
++brief in the workspace, so the CLI refuses to guess when there is no project in
++context.`,
++	Args: exactArgs(1),
++	RunE: runMemorySet,
++}
++
++var memoryDeleteCmd = &cobra.Command{
++	Use:   "delete <name|id>",
++	Short: "Archive a memory (reversible; frees the name for reuse)",
++	Args:  exactArgs(1),
++	RunE:  runMemoryDelete,
++}
++
++var memoryImportCmd = &cobra.Command{
++	Use:   "import <dir>",
++	Short: "Import Claude Code style memory files (frontmatter .md) into the backend",
++	Long: `Import a directory of Claude Code memory files into the backend.
++
++Each *.md file is expected to carry YAML frontmatter with 'name', 'description'
++and 'metadata.type' (user/feedback/project/reference); the text after the
++frontmatter becomes the body. MEMORY.md (the local index) is skipped — the
++backend builds its own index from the description of each memory.
++
++Files are upserted by name, so re-importing an updated directory refreshes the
++backend instead of duplicating. Bodies over the backend's limit are reported
++and skipped rather than silently truncated.`,
++	Args: exactArgs(1),
++	RunE: runMemoryImport,
++}
++
++func init() {
++	memoryCmd.AddCommand(memoryListCmd)
++	memoryCmd.AddCommand(memoryGetCmd)
++	memoryCmd.AddCommand(memorySetCmd)
++	memoryCmd.AddCommand(memoryDeleteCmd)
++	memoryCmd.AddCommand(memoryImportCmd)
++
++	// Scope flags are repeated per subcommand (rather than persistent on the
++	// parent) so `memory <sub> --help` shows them where they are used.
++	for _, c := range []*cobra.Command{memoryListCmd, memoryGetCmd, memorySetCmd, memoryDeleteCmd, memoryImportCmd} {
++		c.Flags().String("project", "", "Project id or id prefix (defaults to the project of the current task workdir)")
++		c.Flags().Bool("global", false, "Use the workspace-wide (global) scope instead of a project")
++		c.Flags().String("output", "table", "Output format: table or json")
++	}
++
++	memoryListCmd.Flags().String("type", "", "Filter by type: user, feedback, project, or reference")
++	memoryListCmd.Flags().String("name", "", "Filter by exact name (slug)")
++	memoryListCmd.Flags().StringP("query", "q", "", "Fuzzy match on name, description, or body")
++	memoryListCmd.Flags().Bool("full", false, "Include the body of every memory (default: index fields only)")
++	memoryListCmd.Flags().Bool("all", false, "List every memory in the workspace (all projects + global)")
++
++	memorySetCmd.Flags().String("description", "", "One-line summary (required) — the only thing recall sees in the index")
++	memorySetCmd.Flags().String("content", "", "Body text (Markdown); prefer --content-file for anything multi-line")
++	memorySetCmd.Flags().String("content-file", "", "Read the body from a UTF-8 file. The path must be inside the current working directory unless --allow-external-file is set.")
++	memorySetCmd.Flags().Bool("allow-external-file", false, "Allow --content-file to read a path outside the current working directory (MUL-4252).")
++	memorySetCmd.Flags().String("type", "project", "Memory type: user, feedback, project, or reference")
++
++	memoryImportCmd.Flags().Bool("dry-run", false, "Parse and report what would be imported without writing anything")
++	memoryImportCmd.Flags().String("type", "", "Override the type of every imported memory (default: metadata.type from each file)")
++}
++
++// ---------------------------------------------------------------------------
++// scope resolution
++// ---------------------------------------------------------------------------
++
++// memoryScope is either the global (workspace) scope or one project.
++type memoryScope struct {
++	global    bool
++	projectID string
++}
++
++// taskProjectContext is the subset of .multica/project/resources.json the CLI
++// needs. The daemon writes that file into the task workdir on claim, so an
++// agent running inside a task has its project id on disk with zero config.
++type taskProjectContext struct {
++	ProjectID string `json:"project_id"`
++}
++
++// projectIDFromWorkdir walks up from the working directory looking for
++// .multica/project/resources.json and returns its project_id ("" when absent).
++// Walking up (rather than only checking cwd) keeps `memory set` working when
++// the agent has cd'd into a subdirectory of the local directory.
++func projectIDFromWorkdir() string {
++	dir, err := os.Getwd()
++	if err != nil {
++		return ""
++	}
++	for {
++		data, err := os.ReadFile(filepath.Join(dir, ".multica", "project", "resources.json"))
++		if err == nil {
++			var ctx taskProjectContext
++			if json.Unmarshal(data, &ctx) == nil && strings.TrimSpace(ctx.ProjectID) != "" {
++				return strings.TrimSpace(ctx.ProjectID)
++			}
++			return ""
++		}
++		parent := filepath.Dir(dir)
++		if parent == dir {
++			return ""
++		}
++		dir = parent
++	}
++}
++
++// resolveMemoryScope turns --global / --project / the workdir context into a
++// scope. It never silently falls back to global: a memory written to the wrong
++// scope leaks into every project's brief in the workspace, which is far worse
++// than an error message asking for one more flag.
++func resolveMemoryScope(ctx context.Context, client *cli.APIClient, cmd *cobra.Command) (memoryScope, error) {
++	global, _ := cmd.Flags().GetBool("global")
++	projectRef, _ := cmd.Flags().GetString("project")
++	if global && strings.TrimSpace(projectRef) != "" {
++		return memoryScope{}, fmt.Errorf("--global and --project are mutually exclusive")
++	}
++	if global {
++		return memoryScope{global: true}, nil
++	}
++	if ref := strings.TrimSpace(projectRef); ref != "" {
++		resolved, err := resolveProjectID(ctx, client, ref)
++		if err != nil {
++			return memoryScope{}, fmt.Errorf("resolve project: %w", err)
++		}
++		return memoryScope{projectID: resolved.ID}, nil
++	}
++	if id := projectIDFromWorkdir(); id != "" {
++		return memoryScope{projectID: id}, nil
++	}
++	return memoryScope{}, fmt.Errorf(
++		"no project in context: pass --project <id> for a project memory, or --global for a workspace-wide one")
++}
++
++// queryParams renders the scope as list query parameters.
++func (s memoryScope) queryParams() url.Values {
++	params := url.Values{}
++	if s.global {
++		params.Set("scope", "global")
++		return params
++	}
++	if s.projectID != "" {
++		params.Set("project_id", s.projectID)
++	}
++	return params
++}
++
++// applyToBody sets the scope keys on an upsert body.
++func (s memoryScope) applyToBody(body map[string]any) {
++	if s.global {
++		body["global"] = true
++		return
++	}
++	body["project_id"] = s.projectID
++}
++
++func (s memoryScope) describe() string {
++	if s.global {
++		return "global"
++	}
++	return "project " + s.projectID
++}
++
++// ---------------------------------------------------------------------------
++// shared helpers
++// ---------------------------------------------------------------------------
++
++// memoryNotFoundHint decorates a 404 from the memory endpoints. The most
++// likely cause is not "no such memory" but a backend that predates the feature
++// (native Multica, or an inair_multica without the memory model), and that
++// distinction is invisible from the generic "resource not found" copy the
++// error formatter prints for every 404. cli.WithUserMessage takes precedence
++// over that copy while keeping Unwrap intact for exit codes and --debug.
++func memoryNotFoundHint(err error) error {
++	var httpErr *cli.HTTPError
++	if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
++		return cli.WithUserMessage(
++			"记忆接口返回 404：请确认后端是 Odoo（inair_multica）且已升级到带 inair.multica.memory 的版本"+
++				"（原生 Multica 服务端没有这组接口）。若接口存在，则是该 name/id 的记忆不存在。", err)
++	}
++	return err
++}
++
++func printMemoryTable(memories []memoryDTO) {
++	headers := []string{"NAME", "TYPE", "SCOPE", "UPDATED", "DESCRIPTION"}
++	rows := make([][]string, 0, len(memories))
++	for _, m := range memories {
++		updated := m.UpdatedAt
++		if len(updated) > 16 {
++			updated = updated[:16]
++		}
++		rows = append(rows, []string{m.Name, m.MemoryType, m.Scope, updated, m.Description})
++	}
++	cli.PrintTable(os.Stdout, headers, rows)
++}
++
++// printMemoryDetail prints one memory the way an agent reads it: the headline
++// first, then the raw Markdown body verbatim (no table, which would mangle
++// multi-line content).
++func printMemoryDetail(m memoryDTO) {
++	state := ""
++	if !m.Active {
++		state = " [archived]"
++	}
++	fmt.Fprintf(os.Stdout, "%s (%s · %s)%s\n%s\n", m.Name, m.MemoryType, m.Scope, state, m.Description)
++	if strings.TrimSpace(m.Content) != "" {
++		fmt.Fprintf(os.Stdout, "\n%s\n", strings.TrimRight(m.Content, "\n"))
++	}
++}
++
++func validateMemoryType(t string) error {
++	for _, known := range memoryTypes {
++		if t == known {
++			return nil
++		}
++	}
++	return fmt.Errorf("invalid --type %q (expected one of %s)", t, strings.Join(memoryTypes, ", "))
++}
++
++// fetchMemoryByName resolves a slug within a scope. The list endpoint returns
++// global + project memories when a project is given, so a project-scoped hit
++// wins over a same-named global one — the more specific fact is the one the
++// caller meant.
++func fetchMemoryByName(ctx context.Context, client *cli.APIClient, scope memoryScope, name string) (memoryDTO, error) {
++	params := scope.queryParams()
++	params.Set("name", name)
++	params.Set("full", "1")
++	var result memoryListResponse
++	if err := client.GetJSON(ctx, "/api/memories?"+params.Encode(), &result); err != nil {
++		return memoryDTO{}, memoryNotFoundHint(err)
++	}
++	var match *memoryDTO
++	for i := range result.Memories {
++		if result.Memories[i].Name != name {
++			continue
++		}
++		if match == nil || (match.Scope == "global" && result.Memories[i].Scope == "project") {
++			match = &result.Memories[i]
++		}
++	}
++	if match == nil {
++		return memoryDTO{}, fmt.Errorf("memory %q not found in %s", name, scope.describe())
++	}
++	return *match, nil
++}
++
++// resolveMemory accepts either a numeric id or a slug and returns the memory.
++func resolveMemory(ctx context.Context, client *cli.APIClient, cmd *cobra.Command, ref string) (memoryDTO, error) {
++	if id, err := strconv.ParseInt(ref, 10, 64); err == nil {
++		var m memoryDTO
++		if err := client.GetJSON(ctx, fmt.Sprintf("/api/memories/%d", id), &m); err != nil {
++			return memoryDTO{}, memoryNotFoundHint(err)
++		}
++		return m, nil
++	}
++	scope, err := resolveMemoryScope(ctx, client, cmd)
++	if err != nil {
++		return memoryDTO{}, err
++	}
++	return fetchMemoryByName(ctx, client, scope, ref)
++}
++
++// ---------------------------------------------------------------------------
++// list / get / set / delete
++// ---------------------------------------------------------------------------
++
++func runMemoryList(cmd *cobra.Command, _ []string) error {
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		return err
++	}
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++
++	params := url.Values{}
++	all, _ := cmd.Flags().GetBool("all")
++	if all {
++		params.Set("scope", "all")
++	} else {
++		// Without an explicit scope the sensible default is "what this task's
++		// brief would show": global + the current project. A missing project
++		// context degrades to global-only rather than erroring — reading is
++		// harmless, unlike writing.
++		scope, err := resolveMemoryScope(ctx, client, cmd)
++		if err != nil {
++			scope = memoryScope{global: true}
++		}
++		params = scope.queryParams()
++	}
++	if t, _ := cmd.Flags().GetString("type"); t != "" {
++		if err := validateMemoryType(t); err != nil {
++			return err
++		}
++		params.Set("type", t)
++	}
++	if name, _ := cmd.Flags().GetString("name"); name != "" {
++		params.Set("name", name)
++	}
++	if q, _ := cmd.Flags().GetString("query"); q != "" {
++		params.Set("q", q)
++	}
++	if full, _ := cmd.Flags().GetBool("full"); full {
++		params.Set("full", "1")
++	}
++
++	var result memoryListResponse
++	if err := client.GetJSON(ctx, "/api/memories?"+params.Encode(), &result); err != nil {
++		return memoryNotFoundHint(fmt.Errorf("list memories: %w", err))
++	}
++	output, _ := cmd.Flags().GetString("output")
++	if output == "json" {
++		return cli.PrintJSON(os.Stdout, result)
++	}
++	if len(result.Memories) == 0 {
++		fmt.Fprintln(os.Stdout, "No memories found.")
++		return nil
++	}
++	if full, _ := cmd.Flags().GetBool("full"); full {
++		for i, m := range result.Memories {
++			if i > 0 {
++				fmt.Fprintln(os.Stdout, "")
++			}
++			printMemoryDetail(m)
++		}
++		return nil
++	}
++	printMemoryTable(result.Memories)
++	return nil
++}
++
++func runMemoryGet(cmd *cobra.Command, args []string) error {
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		return err
++	}
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++
++	memory, err := resolveMemory(ctx, client, cmd, strings.TrimSpace(args[0]))
++	if err != nil {
++		return err
++	}
++	output, _ := cmd.Flags().GetString("output")
++	if output == "json" {
++		return cli.PrintJSON(os.Stdout, memory)
++	}
++	printMemoryDetail(memory)
++	return nil
++}
++
++// readMemoryContentFlags returns the body from --content-file (preferred) or
++// --content. stdin is deliberately NOT consumed: `memory set` is often run
++// non-interactively from an agent loop, where a blocking read on an empty
++// stdin is a hang, not a feature.
++func readMemoryContentFlags(cmd *cobra.Command) (string, error) {
++	path, _ := cmd.Flags().GetString("content-file")
++	if strings.TrimSpace(path) != "" {
++		if allow, _ := cmd.Flags().GetBool("allow-external-file"); !allow {
++			within, err := fileWithinWorkingDir(path)
++			if err != nil {
++				return "", fmt.Errorf("resolve --content-file path %q: %w", path, err)
++			}
++			if !within {
++				return "", fmt.Errorf(
++					"--content-file path %q resolves outside the current working directory; "+
++						"write the body inside the task workdir rather than machine-shared paths "+
++						"like /tmp, where another run's stale file can be picked up. "+
++						"Pass --allow-external-file to override.", path)
++			}
++		}
++		data, err := os.ReadFile(path)
++		if err != nil {
++			return "", fmt.Errorf("read --content-file %s: %w", path, err)
++		}
++		return string(data), nil
++	}
++	content, _ := cmd.Flags().GetString("content")
++	return content, nil
++}
++
++func runMemorySet(cmd *cobra.Command, args []string) error {
++	name := strings.TrimSpace(args[0])
++	if name == "" {
++		return fmt.Errorf("memory name is required")
++	}
++	description, _ := cmd.Flags().GetString("description")
++	if strings.TrimSpace(description) == "" {
++		return fmt.Errorf("--description is required: the one-line summary is all that recall sees in the index")
++	}
++	memoryType, _ := cmd.Flags().GetString("type")
++	if err := validateMemoryType(memoryType); err != nil {
++		return err
++	}
++	content, err := readMemoryContentFlags(cmd)
++	if err != nil {
++		return err
++	}
++	if n := utf8.RuneCountInString(content); n > memoryContentMaxRunes {
++		return fmt.Errorf("body is %d characters, over the %d limit — split it into several memories or keep the detail in the repo",
++			n, memoryContentMaxRunes)
++	}
++
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		return err
++	}
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++
++	scope, err := resolveMemoryScope(ctx, client, cmd)
++	if err != nil {
++		return err
++	}
++	body := map[string]any{
++		"name":        name,
++		"description": strings.TrimSpace(description),
++		"content":     content,
++		"memory_type": memoryType,
++	}
++	scope.applyToBody(body)
++	// Provenance: which issue this fact was distilled from. Best-effort — the
++	// backend ignores an id it cannot resolve.
++	if taskID := strings.TrimSpace(os.Getenv("MULTICA_TASK_ID")); taskID != "" {
++		body["source_task_id"] = taskID
++	}
++
++	var memory memoryDTO
++	if err := client.PostJSON(ctx, "/api/memories", body, &memory); err != nil {
++		return memoryNotFoundHint(fmt.Errorf("set memory: %w", err))
++	}
++	output, _ := cmd.Flags().GetString("output")
++	if output == "json" {
++		return cli.PrintJSON(os.Stdout, memory)
++	}
++	fmt.Fprintf(os.Stdout, "Memory %q saved (%s · %s).\n", memory.Name, memory.MemoryType, memory.Scope)
++	return nil
++}
++
++func runMemoryDelete(cmd *cobra.Command, args []string) error {
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		return err
++	}
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++
++	memory, err := resolveMemory(ctx, client, cmd, strings.TrimSpace(args[0]))
++	if err != nil {
++		return err
++	}
++	var archived memoryDTO
++	if err := client.DeleteJSONResponse(ctx, fmt.Sprintf("/api/memories/%d", memory.ID), &archived); err != nil {
++		return memoryNotFoundHint(fmt.Errorf("delete memory: %w", err))
++	}
++	output, _ := cmd.Flags().GetString("output")
++	if output == "json" {
++		return cli.PrintJSON(os.Stdout, archived)
++	}
++	fmt.Fprintf(os.Stdout, "Memory %q archived (recoverable in Odoo; the name is free to reuse).\n", memory.Name)
++	return nil
++}
++
++// ---------------------------------------------------------------------------
++// import
++// ---------------------------------------------------------------------------
++
++// memoryFile is one parsed Claude Code memory file.
++type memoryFile struct {
++	Path        string
++	Name        string
++	Description string
++	Type        string
++	Content     string
++	Skip        string // non-empty: why this file is not importable
++}
++
++// memoryFrontmatter is the frontmatter shape Claude Code writes. Unknown keys
++// (node_type, originSessionId, …) are ignored rather than rejected.
++type memoryFrontmatter struct {
++	Name        string `yaml:"name"`
++	Description string `yaml:"description"`
++	Metadata    struct {
++		Type string `yaml:"type"`
++	} `yaml:"metadata"`
++}
++
++// parseMemoryFile splits YAML frontmatter from the Markdown body. The frontmatter
++// must be the first thing in the file, fenced by --- lines.
++func parseMemoryFile(path string, data []byte) memoryFile {
++	mf := memoryFile{Path: path, Name: strings.TrimSuffix(filepath.Base(path), ".md")}
++	text := strings.ReplaceAll(string(data), "\r\n", "\n")
++	if !strings.HasPrefix(text, "---\n") {
++		mf.Skip = "no YAML frontmatter"
++		return mf
++	}
++	rest := text[len("---\n"):]
++	end := strings.Index(rest, "\n---")
++	if end < 0 {
++		mf.Skip = "unterminated YAML frontmatter"
++		return mf
++	}
++	var fm memoryFrontmatter
++	if err := yaml.Unmarshal([]byte(rest[:end+1]), &fm); err != nil {
++		mf.Skip = fmt.Sprintf("invalid frontmatter: %v", err)
++		return mf
++	}
++	body := rest[end+len("\n---"):]
++	body = strings.TrimPrefix(body, "\n")
++	mf.Content = strings.TrimSpace(body)
++	if strings.TrimSpace(fm.Name) != "" {
++		mf.Name = strings.TrimSpace(fm.Name)
++	}
++	mf.Description = strings.TrimSpace(fm.Description)
++	mf.Type = strings.TrimSpace(fm.Metadata.Type)
++	if mf.Description == "" {
++		// The description is the only thing recall sees; a memory without one
++		// is unusable in the index, and inventing a summary here would be
++		// worse than telling the human to write one.
++		mf.Skip = "missing 'description' in frontmatter"
++		return mf
++	}
++	if mf.Type == "" {
++		mf.Type = "project"
++	}
++	if err := validateMemoryType(mf.Type); err != nil {
++		mf.Skip = fmt.Sprintf("unknown metadata.type %q", mf.Type)
++		return mf
++	}
++	if n := utf8.RuneCountInString(mf.Content); n > memoryContentMaxRunes {
++		mf.Skip = fmt.Sprintf("body is %d characters, over the %d limit — split it first", n, memoryContentMaxRunes)
++	}
++	return mf
++}
++
++// collectMemoryFiles reads every *.md in dir (non-recursive; Claude Code keeps
++// memories flat) and parses it. MEMORY.md is the local index, not a memory.
++func collectMemoryFiles(dir string) ([]memoryFile, error) {
++	entries, err := os.ReadDir(dir)
++	if err != nil {
++		return nil, fmt.Errorf("read %s: %w", dir, err)
++	}
++	files := make([]memoryFile, 0, len(entries))
++	for _, e := range entries {
++		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") || e.Name() == "MEMORY.md" {
++			continue
++		}
++		path := filepath.Join(dir, e.Name())
++		data, err := os.ReadFile(path)
++		if err != nil {
++			files = append(files, memoryFile{Path: path, Name: strings.TrimSuffix(e.Name(), ".md"), Skip: err.Error()})
++			continue
++		}
++		files = append(files, parseMemoryFile(path, data))
++	}
++	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
++	if len(files) == 0 {
++		return nil, fmt.Errorf("no memory files (*.md with frontmatter) found in %s", dir)
++	}
++	return files, nil
++}
++
++type memoryImportResult struct {
++	Name   string `json:"name"`
++	Path   string `json:"path"`
++	Type   string `json:"memory_type"`
++	Status string `json:"status"` // imported | skipped | failed | dry-run
++	Detail string `json:"detail,omitempty"`
++}
++
++func runMemoryImport(cmd *cobra.Command, args []string) error {
++	dir := strings.TrimSpace(args[0])
++	// Deliberately NOT workdir-guarded (unlike --content-file): the whole point
++	// is to pull in memories a human accumulated elsewhere, typically under
++	// ~/.claude/projects/<slug>/memory. The path is always explicit and every
++	// imported name is echoed back, so nothing enters the backend unseen.
++	files, err := collectMemoryFiles(dir)
++	if err != nil {
++		return err
++	}
++	typeOverride, _ := cmd.Flags().GetString("type")
++	if typeOverride != "" {
++		if err := validateMemoryType(typeOverride); err != nil {
++			return err
++		}
++	}
++	dryRun, _ := cmd.Flags().GetBool("dry-run")
++	output, _ := cmd.Flags().GetString("output")
++
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		return err
++	}
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++
++	scope, err := resolveMemoryScope(ctx, client, cmd)
++	if err != nil {
++		return err
++	}
++
++	results := make([]memoryImportResult, 0, len(files))
++	imported, skipped, failed := 0, 0, 0
++	for _, f := range files {
++		memoryType := f.Type
++		if typeOverride != "" {
++			memoryType = typeOverride
++		}
++		if f.Skip != "" {
++			skipped++
++			results = append(results, memoryImportResult{Name: f.Name, Path: f.Path, Type: memoryType, Status: "skipped", Detail: f.Skip})
++			continue
++		}
++		if dryRun {
++			results = append(results, memoryImportResult{Name: f.Name, Path: f.Path, Type: memoryType, Status: "dry-run", Detail: f.Description})
++			continue
++		}
++		body := map[string]any{
++			"name":        f.Name,
++			"description": f.Description,
++			"content":     f.Content,
++			"memory_type": memoryType,
++		}
++		scope.applyToBody(body)
++		if taskID := strings.TrimSpace(os.Getenv("MULTICA_TASK_ID")); taskID != "" {
++			body["source_task_id"] = taskID
++		}
++		var memory memoryDTO
++		if err := client.PostJSON(ctx, "/api/memories", body, &memory); err != nil {
++			// One bad file must not abandon the rest: report it and continue,
++			// then fail the command at the end so the caller still notices.
++			failed++
++			results = append(results, memoryImportResult{Name: f.Name, Path: f.Path, Type: memoryType, Status: "failed", Detail: memoryNotFoundHint(err).Error()})
++			continue
++		}
++		imported++
++		results = append(results, memoryImportResult{Name: memory.Name, Path: f.Path, Type: memory.MemoryType, Status: "imported", Detail: memory.Description})
++	}
++
++	if output == "json" {
++		if err := cli.PrintJSON(os.Stdout, map[string]any{
++			"scope": scope.describe(), "results": results,
++			"imported": imported, "skipped": skipped, "failed": failed,
++		}); err != nil {
++			return err
++		}
++	} else {
++		headers := []string{"NAME", "TYPE", "STATUS", "DETAIL"}
++		rows := make([][]string, 0, len(results))
++		for _, r := range results {
++			rows = append(rows, []string{r.Name, r.Type, r.Status, r.Detail})
++		}
++		cli.PrintTable(os.Stdout, headers, rows)
++		if dryRun {
++			fmt.Fprintf(os.Stdout, "\nDry run into %s: %d importable, %d skipped.\n", scope.describe(), len(results)-skipped, skipped)
++		} else {
++			fmt.Fprintf(os.Stdout, "\nInto %s: %d imported, %d skipped, %d failed.\n", scope.describe(), imported, skipped, failed)
++		}
++	}
++	if failed > 0 {
++		return fmt.Errorf("%d memory file(s) failed to import", failed)
++	}
++	return nil
++}
+Index: multica/server/cmd/multica/cmd_memory_test.go
+===================================================================
+--- /dev/null
++++ multica/server/cmd/multica/cmd_memory_test.go
+@@ -0,0 +1,415 @@
++package main
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/spf13/cobra"
++)
++
++// newMemoryTestCmd builds a cobra command carrying the flags the memory
++// runners read, pointed at an httptest server. MULTICA_BACKEND_MODE is cleared
++// so the client does not inherit a real agent environment (where it would
++// rewrite /api to the Odoo prefix and miss the test handler).
++func newMemoryTestCmd(t *testing.T, serverURL string, flags map[string]string, bools map[string]bool) *cobra.Command {
++	t.Helper()
++	// Neutralize the ambient agent environment: without this the client would
++	// inherit Odoo mode (rewriting /api to the Odoo prefix, past the test
++	// handler) and the daemon-context guard would demand a mat_ token.
++	t.Setenv("MULTICA_BACKEND_MODE", "")
++	t.Setenv("MULTICA_AGENT_ID", "")
++	t.Setenv("MULTICA_TASK_ID", "")
++	t.Setenv("MULTICA_DAEMON_PORT", "")
++	t.Setenv("MULTICA_TOKEN", "mat_test")
++	cmd := &cobra.Command{Use: "memory-test"}
++	cmd.Flags().String("server-url", "", "")
++	cmd.Flags().String("workspace-id", "", "")
++	cmd.Flags().String("profile", "", "")
++	cmd.Flags().String("project", "", "")
++	cmd.Flags().String("output", "json", "")
++	cmd.Flags().String("type", "", "")
++	cmd.Flags().String("name", "", "")
++	cmd.Flags().String("query", "", "")
++	cmd.Flags().String("description", "", "")
++	cmd.Flags().String("content", "", "")
++	cmd.Flags().String("content-file", "", "")
++	cmd.Flags().Bool("global", false, "")
++	cmd.Flags().Bool("full", false, "")
++	cmd.Flags().Bool("all", false, "")
++	cmd.Flags().Bool("dry-run", false, "")
++	cmd.Flags().Bool("allow-external-file", false, "")
++	_ = cmd.Flags().Set("server-url", serverURL)
++	_ = cmd.Flags().Set("workspace-id", "ws-1")
++	for k, v := range flags {
++		if err := cmd.Flags().Set(k, v); err != nil {
++			panic(err)
++		}
++	}
++	for k, v := range bools {
++		if v {
++			if err := cmd.Flags().Set(k, "true"); err != nil {
++				panic(err)
++			}
++		}
++	}
++	return cmd
++}
++
++// chdirTemp moves the process into an isolated directory so tests never pick
++// up the real repo's .multica/project/resources.json.
++func chdirTemp(t *testing.T) string {
++	t.Helper()
++	dir := t.TempDir()
++	// t.TempDir() on macOS lives under a symlinked /var; resolve it so the
++	// workdir guard in readMemoryContentFlags compares like with like.
++	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
++		dir = resolved
++	}
++	t.Chdir(dir)
++	return dir
++}
++
++func writeProjectContextFile(t *testing.T, dir, projectID string) {
++	t.Helper()
++	ctxDir := filepath.Join(dir, ".multica", "project")
++	if err := os.MkdirAll(ctxDir, 0o755); err != nil {
++		t.Fatal(err)
++	}
++	body := `{"project_id": "` + projectID + `", "project_title": "T"}`
++	if err := os.WriteFile(filepath.Join(ctxDir, "resources.json"), []byte(body), 0o644); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestProjectIDFromWorkdirWalksUp(t *testing.T) {
++	dir := chdirTemp(t)
++	writeProjectContextFile(t, dir, "3")
++	sub := filepath.Join(dir, "a", "b")
++	if err := os.MkdirAll(sub, 0o755); err != nil {
++		t.Fatal(err)
++	}
++	t.Chdir(sub)
++	if got := projectIDFromWorkdir(); got != "3" {
++		t.Fatalf("projectIDFromWorkdir() = %q, want %q", got, "3")
++	}
++}
++
++func TestProjectIDFromWorkdirAbsent(t *testing.T) {
++	chdirTemp(t)
++	if got := projectIDFromWorkdir(); got != "" {
++		t.Fatalf("projectIDFromWorkdir() = %q, want empty", got)
++	}
++}
++
++func TestRunMemorySetUsesWorkdirProjectScope(t *testing.T) {
++	dir := chdirTemp(t)
++	writeProjectContextFile(t, dir, "7")
++
++	var body map[string]any
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodPost || r.URL.Path != "/api/memories" {
++			http.NotFound(w, r)
++			return
++		}
++		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
++			t.Fatalf("decode body: %v", err)
++		}
++		json.NewEncoder(w).Encode(memoryDTO{ID: 1, Name: "redis-session-required", MemoryType: "project", Scope: "project"})
++	}))
++	defer srv.Close()
++
++	cmd := newMemoryTestCmd(t, srv.URL, map[string]string{
++		"description": "Odoo 起不来先查 Redis",
++		"content":     "session 存 Redis，不是 filestore",
++		"type":        "project",
++	}, nil)
++	t.Setenv("MULTICA_TASK_ID", "343")
++	if err := runMemorySet(cmd, []string{"redis-session-required"}); err != nil {
++		t.Fatalf("runMemorySet: %v", err)
++	}
++	if body["project_id"] != "7" {
++		t.Fatalf("project_id = %v, want 7", body["project_id"])
++	}
++	if _, ok := body["global"]; ok {
++		t.Fatalf("global must not be set for a project memory: %v", body)
++	}
++	if body["source_task_id"] != "343" {
++		t.Fatalf("source_task_id = %v, want 343", body["source_task_id"])
++	}
++	if body["memory_type"] != "project" {
++		t.Fatalf("memory_type = %v, want project", body["memory_type"])
++	}
++}
++
++func TestRunMemorySetGlobalScope(t *testing.T) {
++	dir := chdirTemp(t)
++	// A project context on disk must NOT win over an explicit --global.
++	writeProjectContextFile(t, dir, "7")
++
++	var body map[string]any
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		json.NewDecoder(r.Body).Decode(&body)
++		json.NewEncoder(w).Encode(memoryDTO{ID: 2, Name: "communicate-in-chinese", MemoryType: "feedback", Scope: "global"})
++	}))
++	defer srv.Close()
++
++	cmd := newMemoryTestCmd(t, srv.URL, map[string]string{
++		"description": "所有沟通一律用中文",
++		"type":        "feedback",
++	}, map[string]bool{"global": true})
++	if err := runMemorySet(cmd, []string{"communicate-in-chinese"}); err != nil {
++		t.Fatalf("runMemorySet: %v", err)
++	}
++	if body["global"] != true {
++		t.Fatalf("global = %v, want true", body["global"])
++	}
++	if _, ok := body["project_id"]; ok {
++		t.Fatalf("project_id must not be set for a global memory: %v", body)
++	}
++}
++
++func TestRunMemorySetRequiresExplicitScopeWithoutContext(t *testing.T) {
++	chdirTemp(t) // no .multica/project/resources.json here
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		t.Fatalf("no request expected, got %s %s", r.Method, r.URL.Path)
++	}))
++	defer srv.Close()
++
++	cmd := newMemoryTestCmd(t, srv.URL, map[string]string{"description": "x", "type": "project"}, nil)
++	err := runMemorySet(cmd, []string{"some-fact"})
++	if err == nil || !strings.Contains(err.Error(), "no project in context") {
++		t.Fatalf("err = %v, want a 'no project in context' error", err)
++	}
++}
++
++func TestRunMemorySetRequiresDescription(t *testing.T) {
++	chdirTemp(t)
++	cmd := newMemoryTestCmd(t, "http://127.0.0.1:1", nil, nil)
++	err := runMemorySet(cmd, []string{"some-fact"})
++	if err == nil || !strings.Contains(err.Error(), "--description is required") {
++		t.Fatalf("err = %v, want a missing-description error", err)
++	}
++}
++
++func TestRunMemorySetRejectsOversizedBody(t *testing.T) {
++	dir := chdirTemp(t)
++	writeProjectContextFile(t, dir, "7")
++	cmd := newMemoryTestCmd(t, "http://127.0.0.1:1", map[string]string{
++		"description": "长正文",
++		"type":        "project",
++		"content":     strings.Repeat("长", memoryContentMaxRunes+1),
++	}, nil)
++	err := runMemorySet(cmd, []string{"too-long"})
++	if err == nil || !strings.Contains(err.Error(), "over the 4000 limit") {
++		t.Fatalf("err = %v, want an over-limit error", err)
++	}
++}
++
++func TestRunMemorySetContentFileOutsideWorkdirRejected(t *testing.T) {
++	dir := chdirTemp(t)
++	writeProjectContextFile(t, dir, "7")
++	outside := filepath.Join(t.TempDir(), "body.md")
++	if err := os.WriteFile(outside, []byte("hi"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	cmd := newMemoryTestCmd(t, "http://127.0.0.1:1", map[string]string{
++		"description":  "x",
++		"type":         "project",
++		"content-file": outside,
++	}, nil)
++	err := runMemorySet(cmd, []string{"outside-file"})
++	if err == nil || !strings.Contains(err.Error(), "outside the current working directory") {
++		t.Fatalf("err = %v, want a workdir containment error", err)
++	}
++}
++
++func TestFetchMemoryByNamePrefersProjectOverGlobal(t *testing.T) {
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Query().Get("name") != "same-slug" {
++			t.Fatalf("name param = %q", r.URL.Query().Get("name"))
++		}
++		json.NewEncoder(w).Encode(memoryListResponse{Memories: []memoryDTO{
++			{ID: 1, Name: "same-slug", Scope: "global", Content: "global body"},
++			{ID: 2, Name: "same-slug", Scope: "project", Content: "project body"},
++			{ID: 3, Name: "other", Scope: "project"},
++		}, Total: 3})
++	}))
++	defer srv.Close()
++
++	cmd := newMemoryTestCmd(t, srv.URL, nil, nil)
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		t.Fatal(err)
++	}
++	got, err := fetchMemoryByName(t.Context(), client, memoryScope{projectID: "7"}, "same-slug")
++	if err != nil {
++		t.Fatalf("fetchMemoryByName: %v", err)
++	}
++	if got.ID != 2 || got.Content != "project body" {
++		t.Fatalf("got %+v, want the project-scoped entry", got)
++	}
++}
++
++func TestRunMemoryDeleteResolvesNameThenArchives(t *testing.T) {
++	dir := chdirTemp(t)
++	writeProjectContextFile(t, dir, "7")
++	deleted := ""
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch {
++		case r.Method == http.MethodGet && r.URL.Path == "/api/memories":
++			json.NewEncoder(w).Encode(memoryListResponse{Memories: []memoryDTO{
++				{ID: 42, Name: "stale-fact", Scope: "project", Active: true},
++			}, Total: 1})
++		case r.Method == http.MethodDelete:
++			deleted = r.URL.Path
++			json.NewEncoder(w).Encode(memoryDTO{ID: 42, Name: "stale-fact", Scope: "project", Active: false})
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer srv.Close()
++
++	cmd := newMemoryTestCmd(t, srv.URL, nil, nil)
++	if err := runMemoryDelete(cmd, []string{"stale-fact"}); err != nil {
++		t.Fatalf("runMemoryDelete: %v", err)
++	}
++	if deleted != "/api/memories/42" {
++		t.Fatalf("deleted path = %q, want /api/memories/42", deleted)
++	}
++}
++
++func TestParseMemoryFileFrontmatter(t *testing.T) {
++	raw := []byte("---\nname: communicate-in-chinese\ndescription: 用户要求所有沟通一律用中文回复\nmetadata: \n  node_type: memory\n  type: feedback\n  originSessionId: abc\n---\n\n所有沟通一律用中文。\n\n**Why:** 用户明确要求。\n")
++	mf := parseMemoryFile("/x/communicate-in-chinese.md", raw)
++	if mf.Skip != "" {
++		t.Fatalf("unexpected skip: %s", mf.Skip)
++	}
++	if mf.Name != "communicate-in-chinese" || mf.Type != "feedback" {
++		t.Fatalf("got name=%q type=%q", mf.Name, mf.Type)
++	}
++	if mf.Description != "用户要求所有沟通一律用中文回复" {
++		t.Fatalf("description = %q", mf.Description)
++	}
++	if !strings.HasPrefix(mf.Content, "所有沟通一律用中文。") || !strings.Contains(mf.Content, "**Why:**") {
++		t.Fatalf("content = %q", mf.Content)
++	}
++}
++
++func TestParseMemoryFileSkips(t *testing.T) {
++	cases := map[string]struct{ raw, want string }{
++		"no frontmatter":  {"just text\n", "no YAML frontmatter"},
++		"no description":  {"---\nname: a-fact\nmetadata:\n  type: project\n---\nbody\n", "missing 'description'"},
++		"unknown type":    {"---\nname: a-fact\ndescription: d\nmetadata:\n  type: nonsense\n---\nbody\n", "unknown metadata.type"},
++		"body over limit": {"---\nname: a-fact\ndescription: d\n---\n" + strings.Repeat("长", memoryContentMaxRunes+1), "over the 4000 limit"},
++		"unterminated fm": {"---\nname: a-fact\n", "unterminated YAML frontmatter"},
++	}
++	for label, tc := range cases {
++		mf := parseMemoryFile("/x/a-fact.md", []byte(tc.raw))
++		if !strings.Contains(mf.Skip, tc.want) {
++			t.Fatalf("%s: skip = %q, want it to contain %q", label, mf.Skip, tc.want)
++		}
++	}
++}
++
++func TestParseMemoryFileDefaultsTypeAndName(t *testing.T) {
++	mf := parseMemoryFile("/x/from-filename.md", []byte("---\ndescription: d\n---\nbody\n"))
++	if mf.Skip != "" {
++		t.Fatalf("unexpected skip: %s", mf.Skip)
++	}
++	if mf.Name != "from-filename" {
++		t.Fatalf("name = %q, want the filename stem", mf.Name)
++	}
++	if mf.Type != "project" {
++		t.Fatalf("type = %q, want the project default", mf.Type)
++	}
++}
++
++func TestCollectMemoryFilesSkipsIndex(t *testing.T) {
++	dir := t.TempDir()
++	write := func(name, body string) {
++		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
++			t.Fatal(err)
++		}
++	}
++	write("MEMORY.md", "- [x](x.md) — index line\n")
++	write("b-fact.md", "---\nname: b-fact\ndescription: b\n---\nbody b\n")
++	write("a-fact.md", "---\nname: a-fact\ndescription: a\n---\nbody a\n")
++	write("notes.txt", "ignored")
++
++	files, err := collectMemoryFiles(dir)
++	if err != nil {
++		t.Fatalf("collectMemoryFiles: %v", err)
++	}
++	if len(files) != 2 {
++		t.Fatalf("got %d files, want 2: %+v", len(files), files)
++	}
++	if files[0].Name != "a-fact" || files[1].Name != "b-fact" {
++		t.Fatalf("files not sorted by name: %+v", files)
++	}
++}
++
++func TestRunMemoryImportDryRunWritesNothing(t *testing.T) {
++	dir := chdirTemp(t)
++	writeProjectContextFile(t, dir, "7")
++	memDir := filepath.Join(dir, "memories")
++	if err := os.MkdirAll(memDir, 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(memDir, "a-fact.md"),
++		[]byte("---\nname: a-fact\ndescription: a\nmetadata:\n  type: reference\n---\nbody\n"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		t.Fatalf("dry run must not call the API, got %s %s", r.Method, r.URL.Path)
++	}))
++	defer srv.Close()
++
++	cmd := newMemoryTestCmd(t, srv.URL, nil, map[string]bool{"dry-run": true})
++	if err := runMemoryImport(cmd, []string{memDir}); err != nil {
++		t.Fatalf("runMemoryImport: %v", err)
++	}
++}
++
++func TestRunMemoryImportUpsertsAndReportsSkips(t *testing.T) {
++	dir := chdirTemp(t)
++	writeProjectContextFile(t, dir, "7")
++	memDir := filepath.Join(dir, "memories")
++	if err := os.MkdirAll(memDir, 0o755); err != nil {
++		t.Fatal(err)
++	}
++	write := func(name, body string) {
++		if err := os.WriteFile(filepath.Join(memDir, name), []byte(body), 0o644); err != nil {
++			t.Fatal(err)
++		}
++	}
++	write("a-fact.md", "---\nname: a-fact\ndescription: a\nmetadata:\n  type: reference\n---\nbody a\n")
++	write("huge.md", "---\nname: huge\ndescription: h\n---\n"+strings.Repeat("长", memoryContentMaxRunes+1))
++
++	var posted []map[string]any
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		var body map[string]any
++		json.NewDecoder(r.Body).Decode(&body)
++		posted = append(posted, body)
++		json.NewEncoder(w).Encode(memoryDTO{ID: 1, Name: body["name"].(string), MemoryType: body["memory_type"].(string), Scope: "project"})
++	}))
++	defer srv.Close()
++
++	cmd := newMemoryTestCmd(t, srv.URL, nil, nil)
++	if err := runMemoryImport(cmd, []string{memDir}); err != nil {
++		t.Fatalf("runMemoryImport: %v", err)
++	}
++	if len(posted) != 1 {
++		t.Fatalf("posted %d memories, want 1 (the oversized one is skipped): %+v", len(posted), posted)
++	}
++	if posted[0]["name"] != "a-fact" || posted[0]["memory_type"] != "reference" {
++		t.Fatalf("posted = %+v", posted[0])
++	}
++	if posted[0]["project_id"] != "7" {
++		t.Fatalf("project_id = %v, want 7", posted[0]["project_id"])
++	}
++}
+Index: multica/server/cmd/multica/main.go
+===================================================================
+--- multica.orig/server/cmd/multica/main.go
++++ multica/server/cmd/multica/main.go
+@@ -90,6 +90,7 @@ func init() {
+ 	rootCmd.AddCommand(setupCmd)
+ 	rootCmd.AddCommand(attachmentCmd)
+ 	rootCmd.AddCommand(blogCmd)
++	rootCmd.AddCommand(memoryCmd)
+ 	rootCmd.AddCommand(configCmd)
+ 	rootCmd.AddCommand(updateCmd)
+ 	rootCmd.AddCommand(versionCmd)

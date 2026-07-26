@@ -1,0 +1,26 @@
+Index: multica/server/internal/daemon/daemon.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -2411,10 +2411,21 @@ func (d *Daemon) syncWorkspacesFromAPI(c
+ 			rt := d.runtimeIndex[ws.RuntimeID]
+ 			runtimeIDs := []string{ws.RuntimeID}
+ 			d.mu.Lock()
++			_, alreadyWatched := d.workspaces[id]
+ 			d.workspaces[id] = newWorkspaceState(id, runtimeIDs, "", nil, nil)
+ 			d.mu.Unlock()
+ 			d.logger.Info("watching workspace (Odoo mode)", "workspace_id", id, "name", name, "runtime_id", ws.RuntimeID, "provider", rt.Provider)
+ 			d.notifyRuntimeSetChanged()
++			// On the first watch of this workspace's runtime (daemon startup, or a
++			// freshly bound runtime), recover orphans the previous daemon process
++			// left in dispatched/running — mirroring the native register path below.
++			// Guarded by alreadyWatched so periodic re-watches never re-queue a task
++			// the daemon is actively executing (which would interrupt / double-run it).
++			if !alreadyWatched {
++				if err := d.client.RecoverOrphans(ctx, ws.RuntimeID); err != nil {
++					d.logger.Warn("recover-orphans (Odoo) failed", "runtime_id", ws.RuntimeID, "error", err)
++				}
++			}
+ 			registered++
+ 			continue
+ 		}

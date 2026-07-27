@@ -1,0 +1,562 @@
+Index: multica/server/internal/daemon/client.go
+===================================================================
+--- multica.orig/server/internal/daemon/client.go
++++ multica/server/internal/daemon/client.go
+@@ -624,6 +624,7 @@ type (
+ 	PendingModelList        = protocol.DaemonHeartbeatPendingModelList
+ 	PendingLocalSkills      = protocol.DaemonHeartbeatPendingLocalSkills
+ 	PendingLocalSkillImport = protocol.DaemonHeartbeatPendingLocalSkillImport
++	PendingMemoryScan       = protocol.DaemonHeartbeatPendingMemoryScan
+ )
+ 
+ func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*HeartbeatResponse, error) {
+@@ -657,6 +658,12 @@ func (c *Client) ReportLocalSkillImportR
+ 	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/local-skills/import/%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
+ }
+ 
++// ReportMemoryScanResult sends the runtime-local memory inventory back to the
++// server (Odoo backend only — native Multica has no such endpoint).
++func (c *Client) ReportMemoryScanResult(ctx context.Context, runtimeID, requestID string, result map[string]any) error {
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/memories/%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
++}
++
+ // WorkspaceInfo holds minimal workspace metadata returned by the API.
+ type WorkspaceInfo struct {
+ 	ID              string `json:"id"`
+Index: multica/server/internal/daemon/daemon.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -2677,6 +2677,11 @@ func (d *Daemon) handleHeartbeatActions(
+ 			go d.handleLocalSkillList(ctx, *rt, resp.PendingLocalSkills.ID)
+ 		}
+ 	}
++	if resp.PendingMemoryScan != nil {
++		if rt := d.findRuntime(runtimeID); rt != nil {
++			go d.handleMemoryScan(ctx, *rt, *resp.PendingMemoryScan)
++		}
++	}
+ 	// Prefer the batch field (new backend); fall back to singular (old backend).
+ 	if len(resp.PendingLocalSkillImports) > 0 {
+ 		if rt := d.findRuntime(runtimeID); rt != nil {
+@@ -2818,6 +2823,55 @@ func (d *Daemon) handleLocalSkillList(ct
+ 	})
+ }
+ 
++// handleMemoryScan inventories the runtime-local memory files for the local
++// directories the server named, and reports them back. Read-only: the platform
++// treats these files as the runtime's own, and only looks at them here.
++func (d *Daemon) handleMemoryScan(ctx context.Context, rt Runtime, pending PendingMemoryScan) {
++	d.logger.Info("runtime local memory scan requested", "runtime_id", rt.ID, "request_id", pending.ID, "provider", rt.Provider, "targets", len(pending.Targets))
++
++	targets := make([]LocalMemoryScanTarget, 0, len(pending.Targets))
++	for _, t := range pending.Targets {
++		targets = append(targets, LocalMemoryScanTarget{LocalDirectoryID: t.LocalDirectoryID, Path: t.Path})
++	}
++	home, err := os.UserHomeDir()
++	if err != nil {
++		d.reportMemoryScanResult(ctx, rt, pending.ID, map[string]any{
++			"status": "failed",
++			"error":  fmt.Sprintf("resolve home directory: %v", err),
++		})
++		return
++	}
++	results, supported, err := scanRuntimeLocalMemories(rt.Provider, home, targets)
++	if err != nil {
++		d.reportMemoryScanResult(ctx, rt, pending.ID, map[string]any{
++			"status": "failed",
++			"error":  err.Error(),
++		})
++		return
++	}
++	// An unsupported provider still reports "completed": the server needs to
++	// record "this runtime has no local memory store" (that flag drives
++	// whether the platform injects memories into the brief at all), which is a
++	// real answer, not a failure.
++	if results == nil {
++		results = []localMemoryScanResult{}
++	}
++	d.reportMemoryScanResult(ctx, rt, pending.ID, map[string]any{
++		"status":    "completed",
++		"supported": supported,
++		"provider":  rt.Provider,
++		"results":   results,
++	})
++}
++
++// reportMemoryScanResult delivers a memory inventory to the server with retry
++// on transient failures.
++func (d *Daemon) reportMemoryScanResult(ctx context.Context, rt Runtime, requestID string, payload map[string]any) {
++	d.reportRuntimeResultWithRetry(ctx, "memory_scan", rt.ID, requestID, func(ctx context.Context) error {
++		return d.client.ReportMemoryScanResult(ctx, rt.ID, requestID, payload)
++	})
++}
++
+ func (d *Daemon) handleLocalSkillImport(ctx context.Context, rt Runtime, pending PendingLocalSkillImport) {
+ 	d.logger.Info("runtime local skill import requested", "runtime_id", rt.ID, "request_id", pending.ID, "provider", rt.Provider, "skill_key", pending.SkillKey)
+ 
+Index: multica/server/internal/daemon/local_memory.go
+===================================================================
+--- /dev/null
++++ multica/server/internal/daemon/local_memory.go
+@@ -0,0 +1,222 @@
++package daemon
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"fmt"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++	"time"
++	"unicode/utf8"
++
++	"gopkg.in/yaml.v3"
++)
++
++// Runtime-local memories: the per-project memory files a runtime keeps on the
++// daemon host, outside anything the platform writes. Claude Code stores them
++// under ~/.claude/projects/<slug>/memory/, keyed by the working directory —
++// which for a local_directory task IS the project's local path, so the server
++// can ask "what memories exist for this local directory" and get a real answer.
++//
++// This file only READS. The scan feeds the Odoo-side inventory
++// (inair.multica.memory.instance); writing/deleting is a separate command.
++
++// memoryFileMaxBytes caps how much of a single memory file is read back to the
++// server. Memory files are prose; anything past this is a runaway log and the
++// content is truncated (the hash still covers the full file so drift is
++// detectable).
++const memoryFileMaxBytes = 64 * 1024
++
++// memoryContentReportMax caps the content actually shipped in the report, so a
++// directory full of large files cannot blow up a single HTTP body.
++const memoryContentReportMax = 20000
++
++// LocalMemoryScanTarget is one local directory to inspect, as sent by the
++// server. LocalDirectoryID is opaque to the daemon and echoed back so the
++// server can match results to its own records.
++type LocalMemoryScanTarget struct {
++	LocalDirectoryID string `json:"local_directory_id"`
++	Path             string `json:"path"`
++}
++
++// localMemoryEntry is one memory file found on disk.
++type localMemoryEntry struct {
++	Name        string `json:"name"`
++	Description string `json:"description,omitempty"`
++	MemoryType  string `json:"memory_type,omitempty"`
++	File        string `json:"file"`
++	Content     string `json:"content,omitempty"`
++	Truncated   bool   `json:"truncated,omitempty"`
++	SizeBytes   int64  `json:"size_bytes"`
++	ModifiedAt  string `json:"modified_at,omitempty"`
++	ContentHash string `json:"content_hash,omitempty"`
++}
++
++// localMemoryScanResult is the per-target result.
++type localMemoryScanResult struct {
++	LocalDirectoryID string             `json:"local_directory_id"`
++	Path             string             `json:"path"`
++	MemoryDir        string             `json:"memory_dir,omitempty"`
++	Exists           bool               `json:"exists"`
++	Memories         []localMemoryEntry `json:"memories"`
++	Error            string             `json:"error,omitempty"`
++}
++
++// localMemoryFrontmatter is the frontmatter Claude Code writes on each memory
++// file. Unknown keys are ignored.
++type localMemoryFrontmatter struct {
++	Name        string `yaml:"name"`
++	Description string `yaml:"description"`
++	Metadata    struct {
++		Type string `yaml:"type"`
++	} `yaml:"metadata"`
++}
++
++// providerSupportsLocalMemory reports whether this runtime provider keeps
++// per-project memory files the daemon knows how to locate. Only Claude Code
++// for now — codex/qwen/cursor have no equivalent per-project memory store, and
++// guessing a path for them would produce confidently wrong inventories.
++func providerSupportsLocalMemory(provider string) bool {
++	return strings.EqualFold(strings.TrimSpace(provider), "claude")
++}
++
++// claudeProjectSlug maps an absolute working directory to the directory name
++// Claude Code uses under ~/.claude/projects: every path separator becomes a
++// dash, so "/home/ferren/projects/odoo-proj" becomes
++// "-home-ferren-projects-odoo-proj" (leading dash included, from the leading
++// slash). The mapping is lossy in reverse (a path segment containing "-" is
++// indistinguishable) but we only ever need the forward direction.
++func claudeProjectSlug(path string) string {
++	if strings.TrimSpace(path) == "" {
++		return ""
++	}
++	// filepath.Clean("") is ".", which would silently become a slug — guard
++	// the blank case above rather than letting it through.
++	return strings.ReplaceAll(filepath.Clean(path), string(filepath.Separator), "-")
++}
++
++// claudeMemoryDir returns the per-project memory directory for a working
++// directory, or "" when the home directory cannot be resolved.
++func claudeMemoryDir(home, path string) string {
++	slug := claudeProjectSlug(path)
++	if home == "" || slug == "" {
++		return ""
++	}
++	return filepath.Join(home, ".claude", "projects", slug, "memory")
++}
++
++// parseLocalMemoryFile turns one *.md file into an entry. Files without
++// frontmatter still count — they exist on disk and the operator needs to see
++// them; only name/description/type stay empty.
++func parseLocalMemoryFile(dir, fileName string, info os.FileInfo) localMemoryEntry {
++	entry := localMemoryEntry{
++		Name:       strings.TrimSuffix(fileName, ".md"),
++		File:       fileName,
++		SizeBytes:  info.Size(),
++		ModifiedAt: info.ModTime().UTC().Format(time.RFC3339),
++	}
++	raw, err := os.ReadFile(filepath.Join(dir, fileName))
++	if err != nil {
++		return entry
++	}
++	sum := sha256.Sum256(raw)
++	entry.ContentHash = "sha256:" + hex.EncodeToString(sum[:])
++	if len(raw) > memoryFileMaxBytes {
++		raw = raw[:memoryFileMaxBytes]
++		entry.Truncated = true
++	}
++	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
++
++	body := text
++	if strings.HasPrefix(text, "---\n") {
++		rest := text[len("---\n"):]
++		if end := strings.Index(rest, "\n---"); end >= 0 {
++			var fm localMemoryFrontmatter
++			if yaml.Unmarshal([]byte(rest[:end+1]), &fm) == nil {
++				if name := strings.TrimSpace(fm.Name); name != "" {
++					entry.Name = name
++				}
++				entry.Description = strings.TrimSpace(fm.Description)
++				entry.MemoryType = strings.TrimSpace(fm.Metadata.Type)
++			}
++			body = strings.TrimPrefix(rest[end+len("\n---"):], "\n")
++		}
++	}
++	body = strings.TrimSpace(body)
++	if utf8.RuneCountInString(body) > memoryContentReportMax {
++		body = string([]rune(body)[:memoryContentReportMax])
++		entry.Truncated = true
++	}
++	entry.Content = body
++	return entry
++}
++
++// scanLocalMemoryDir lists the memory files in one directory. A missing
++// directory is not an error: "this project has no memories yet" is a valid,
++// useful answer for the inventory.
++func scanLocalMemoryDir(dir string) ([]localMemoryEntry, bool, error) {
++	entries, err := os.ReadDir(dir)
++	if err != nil {
++		if os.IsNotExist(err) {
++			return nil, false, nil
++		}
++		return nil, false, err
++	}
++	memories := make([]localMemoryEntry, 0, len(entries))
++	for _, e := range entries {
++		// MEMORY.md is the runtime's own index of the other files, not a
++		// memory; recreating it is the runtime's job, not the platform's.
++		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") || e.Name() == "MEMORY.md" {
++			continue
++		}
++		info, err := e.Info()
++		if err != nil {
++			continue
++		}
++		memories = append(memories, parseLocalMemoryFile(dir, e.Name(), info))
++	}
++	sort.Slice(memories, func(i, j int) bool { return memories[i].Name < memories[j].Name })
++	return memories, true, nil
++}
++
++// scanRuntimeLocalMemories inspects every requested local directory for the
++// given provider. The bool reports whether this provider has a known memory
++// layout at all — false means "we did not look", which the server must not
++// confuse with "there is nothing there".
++func scanRuntimeLocalMemories(provider, home string, targets []LocalMemoryScanTarget) ([]localMemoryScanResult, bool, error) {
++	if !providerSupportsLocalMemory(provider) {
++		return nil, false, nil
++	}
++	if home == "" {
++		return nil, true, fmt.Errorf("cannot resolve home directory for provider %q", provider)
++	}
++	results := make([]localMemoryScanResult, 0, len(targets))
++	for _, target := range targets {
++		path := strings.TrimSpace(target.Path)
++		result := localMemoryScanResult{
++			LocalDirectoryID: target.LocalDirectoryID,
++			Path:             path,
++			Memories:         []localMemoryEntry{},
++		}
++		if path == "" {
++			result.Error = "empty path"
++			results = append(results, result)
++			continue
++		}
++		dir := claudeMemoryDir(home, path)
++		result.MemoryDir = dir
++		memories, exists, err := scanLocalMemoryDir(dir)
++		if err != nil {
++			result.Error = err.Error()
++		} else {
++			result.Exists = exists
++			if memories != nil {
++				result.Memories = memories
++			}
++		}
++		results = append(results, result)
++	}
++	return results, true, nil
++}
+Index: multica/server/internal/daemon/local_memory_test.go
+===================================================================
+--- /dev/null
++++ multica/server/internal/daemon/local_memory_test.go
+@@ -0,0 +1,199 @@
++package daemon
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func writeMemoryFile(t *testing.T, dir, name, body string) {
++	t.Helper()
++	if err := os.MkdirAll(dir, 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestClaudeProjectSlug(t *testing.T) {
++	// The slug is the working directory with separators turned into dashes —
++	// the leading dash comes from the leading slash.
++	if got := claudeProjectSlug("/home/ferren/projects/odoo-proj"); got != "-home-ferren-projects-odoo-proj" {
++		t.Fatalf("slug = %q", got)
++	}
++	// Trailing separators are cleaned first so the same directory always maps
++	// to the same slug.
++	if got := claudeProjectSlug("/home/ferren/projects/odoo-proj/"); got != "-home-ferren-projects-odoo-proj" {
++		t.Fatalf("slug with trailing slash = %q", got)
++	}
++	if got := claudeProjectSlug(""); got != "" {
++		t.Fatalf("empty path slug = %q", got)
++	}
++}
++
++func TestClaudeMemoryDir(t *testing.T) {
++	got := claudeMemoryDir("/home/ferren", "/home/ferren/projects/odoo-proj")
++	want := "/home/ferren/.claude/projects/-home-ferren-projects-odoo-proj/memory"
++	if got != want {
++		t.Fatalf("memory dir = %q, want %q", got, want)
++	}
++	if got := claudeMemoryDir("", "/x"); got != "" {
++		t.Fatalf("no home should yield empty dir, got %q", got)
++	}
++}
++
++func TestProviderSupportsLocalMemory(t *testing.T) {
++	for _, p := range []string{"claude", "Claude", " claude "} {
++		if !providerSupportsLocalMemory(p) {
++			t.Fatalf("provider %q should be supported", p)
++		}
++	}
++	// Guessing a path for a runtime without a known memory layout would
++	// produce a confidently wrong inventory — those must report unsupported.
++	for _, p := range []string{"codex", "qwen", "opencode", ""} {
++		if providerSupportsLocalMemory(p) {
++			t.Fatalf("provider %q must not be supported", p)
++		}
++	}
++}
++
++func TestParseLocalMemoryFileFrontmatter(t *testing.T) {
++	dir := t.TempDir()
++	writeMemoryFile(t, dir, "communicate-in-chinese.md",
++		"---\nname: communicate-in-chinese\ndescription: 用户要求所有沟通一律用中文回复\nmetadata: \n  node_type: memory\n  type: feedback\n---\n\n所有沟通一律用中文。\n")
++	info, err := os.Stat(filepath.Join(dir, "communicate-in-chinese.md"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	entry := parseLocalMemoryFile(dir, "communicate-in-chinese.md", info)
++	if entry.Name != "communicate-in-chinese" || entry.MemoryType != "feedback" {
++		t.Fatalf("got name=%q type=%q", entry.Name, entry.MemoryType)
++	}
++	if entry.Description != "用户要求所有沟通一律用中文回复" {
++		t.Fatalf("description = %q", entry.Description)
++	}
++	if entry.Content != "所有沟通一律用中文。" {
++		t.Fatalf("content = %q", entry.Content)
++	}
++	if !strings.HasPrefix(entry.ContentHash, "sha256:") {
++		t.Fatalf("content hash = %q", entry.ContentHash)
++	}
++	if entry.SizeBytes != info.Size() || entry.ModifiedAt == "" {
++		t.Fatalf("size/mtime not reported: %+v", entry)
++	}
++}
++
++func TestParseLocalMemoryFileWithoutFrontmatter(t *testing.T) {
++	// A file with no frontmatter still exists on disk and the operator needs
++	// to see it; only the parsed fields stay empty.
++	dir := t.TempDir()
++	writeMemoryFile(t, dir, "loose-note.md", "just a note\n")
++	info, _ := os.Stat(filepath.Join(dir, "loose-note.md"))
++	entry := parseLocalMemoryFile(dir, "loose-note.md", info)
++	if entry.Name != "loose-note" {
++		t.Fatalf("name = %q, want the filename stem", entry.Name)
++	}
++	if entry.Description != "" || entry.MemoryType != "" {
++		t.Fatalf("unparsed file should not invent metadata: %+v", entry)
++	}
++	if entry.Content != "just a note" {
++		t.Fatalf("content = %q", entry.Content)
++	}
++}
++
++func TestParseLocalMemoryFileTruncatesLongBody(t *testing.T) {
++	dir := t.TempDir()
++	long := strings.Repeat("长", memoryContentReportMax+500)
++	writeMemoryFile(t, dir, "huge.md", "---\nname: huge\ndescription: d\n---\n"+long)
++	info, _ := os.Stat(filepath.Join(dir, "huge.md"))
++	entry := parseLocalMemoryFile(dir, "huge.md", info)
++	if !entry.Truncated {
++		t.Fatal("oversized body must be flagged truncated")
++	}
++	if n := len([]rune(entry.Content)); n > memoryContentReportMax {
++		t.Fatalf("content kept %d runes, over the %d cap", n, memoryContentReportMax)
++	}
++	// The hash covers the whole file even when the content is cut, so drift
++	// against the library is still detectable.
++	if entry.ContentHash == "" {
++		t.Fatal("hash must cover the full file")
++	}
++}
++
++func TestScanLocalMemoryDirSkipsIndexAndSorts(t *testing.T) {
++	dir := t.TempDir()
++	writeMemoryFile(t, dir, "MEMORY.md", "- [x](x.md) — index\n")
++	writeMemoryFile(t, dir, "b-fact.md", "---\nname: b-fact\ndescription: b\n---\nbody b\n")
++	writeMemoryFile(t, dir, "a-fact.md", "---\nname: a-fact\ndescription: a\n---\nbody a\n")
++	writeMemoryFile(t, dir, "notes.txt", "ignored")
++
++	memories, exists, err := scanLocalMemoryDir(dir)
++	if err != nil || !exists {
++		t.Fatalf("scan: err=%v exists=%v", err, exists)
++	}
++	if len(memories) != 2 {
++		t.Fatalf("got %d memories, want 2: %+v", len(memories), memories)
++	}
++	if memories[0].Name != "a-fact" || memories[1].Name != "b-fact" {
++		t.Fatalf("memories not sorted by name: %+v", memories)
++	}
++}
++
++func TestScanLocalMemoryDirMissingIsNotAnError(t *testing.T) {
++	// "this project has no memories yet" is a valid inventory answer.
++	memories, exists, err := scanLocalMemoryDir(filepath.Join(t.TempDir(), "nope"))
++	if err != nil {
++		t.Fatalf("missing dir should not error: %v", err)
++	}
++	if exists || len(memories) != 0 {
++		t.Fatalf("exists=%v memories=%+v", exists, memories)
++	}
++}
++
++func TestScanRuntimeLocalMemoriesUnsupportedProvider(t *testing.T) {
++	results, supported, err := scanRuntimeLocalMemories("codex", "/home/x", []LocalMemoryScanTarget{{Path: "/srv/app"}})
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	if supported {
++		t.Fatal("codex must report unsupported")
++	}
++	if results != nil {
++		t.Fatalf("unsupported provider must not report results: %+v", results)
++	}
++}
++
++func TestScanRuntimeLocalMemoriesPerTarget(t *testing.T) {
++	home := t.TempDir()
++	projectPath := "/srv/app"
++	memDir := claudeMemoryDir(home, projectPath)
++	writeMemoryFile(t, memDir, "a-fact.md", "---\nname: a-fact\ndescription: a\nmetadata:\n  type: project\n---\nbody a\n")
++
++	results, supported, err := scanRuntimeLocalMemories("claude", home, []LocalMemoryScanTarget{
++		{LocalDirectoryID: "14", Path: projectPath},
++		{LocalDirectoryID: "15", Path: "/srv/never-used"},
++		{LocalDirectoryID: "16", Path: "  "},
++	})
++	if err != nil || !supported {
++		t.Fatalf("scan: err=%v supported=%v", err, supported)
++	}
++	if len(results) != 3 {
++		t.Fatalf("got %d results, want one per target", len(results))
++	}
++	if results[0].LocalDirectoryID != "14" || !results[0].Exists || len(results[0].Memories) != 1 {
++		t.Fatalf("first target: %+v", results[0])
++	}
++	if results[0].Memories[0].Name != "a-fact" || results[0].Memories[0].MemoryType != "project" {
++		t.Fatalf("entry: %+v", results[0].Memories[0])
++	}
++	// A directory that never ran Claude Code reports exists=false with no
++	// memories — distinct from "scan failed".
++	if results[1].Exists || len(results[1].Memories) != 0 || results[1].Error != "" {
++		t.Fatalf("second target: %+v", results[1])
++	}
++	if results[2].Error == "" {
++		t.Fatalf("blank path should be reported as an error: %+v", results[2])
++	}
++}
+Index: multica/server/pkg/protocol/messages.go
+===================================================================
+--- multica.orig/server/pkg/protocol/messages.go
++++ multica/server/pkg/protocol/messages.go
+@@ -277,6 +277,10 @@ type DaemonHeartbeatAckPayload struct {
+ 	// that don't know this field silently ignore it (standard JSON behavior)
+ 	// and fall back to the singular PendingLocalSkillImport above.
+ 	PendingLocalSkillImports []DaemonHeartbeatPendingLocalSkillImport `json:"pending_local_skill_imports,omitempty"`
++	// PendingMemoryScan asks the daemon to inventory the runtime-local memory
++	// files for a set of local directories (Odoo backend only). Daemons that
++	// predate it ignore the field, so the server just never gets a report.
++	PendingMemoryScan *DaemonHeartbeatPendingMemoryScan `json:"pending_memory_scan,omitempty"`
+ }
+ 
+ // HeartbeatStatusRuntimeGone is the ack Status used when the runtime row no
+@@ -308,3 +312,18 @@ type DaemonHeartbeatPendingLocalSkillImp
+ 	ID       string `json:"id"`
+ 	SkillKey string `json:"skill_key"`
+ }
++
++// DaemonHeartbeatPendingMemoryScan describes a request to inventory the
++// runtime-local memory files for a set of local directories. Targets carry the
++// server-side record id so the report can be matched back without the daemon
++// knowing anything about the server's data model.
++type DaemonHeartbeatPendingMemoryScan struct {
++	ID      string                          `json:"id"`
++	Targets []DaemonHeartbeatMemoryScanPath `json:"targets"`
++}
++
++// DaemonHeartbeatMemoryScanPath is one local directory to inspect.
++type DaemonHeartbeatMemoryScanPath struct {
++	LocalDirectoryID string `json:"local_directory_id"`
++	Path             string `json:"path"`
++}

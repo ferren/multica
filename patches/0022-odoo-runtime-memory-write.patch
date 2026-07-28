@@ -1,0 +1,748 @@
+Index: multica/server/internal/daemon/client.go
+===================================================================
+--- multica.orig/server/internal/daemon/client.go
++++ multica/server/internal/daemon/client.go
+@@ -625,6 +625,7 @@ type (
+ 	PendingLocalSkills      = protocol.DaemonHeartbeatPendingLocalSkills
+ 	PendingLocalSkillImport = protocol.DaemonHeartbeatPendingLocalSkillImport
+ 	PendingMemoryScan       = protocol.DaemonHeartbeatPendingMemoryScan
++	PendingMemoryWrite      = protocol.DaemonHeartbeatPendingMemoryWrite
+ )
+ 
+ func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*HeartbeatResponse, error) {
+@@ -664,6 +665,13 @@ func (c *Client) ReportMemoryScanResult(
+ 	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/memories/%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
+ }
+ 
++// ReportMemoryWriteResult sends the outcome of a runtime-local memory
++// write/delete batch back to the server (Odoo backend only — native Multica
++// has no such endpoint).
++func (c *Client) ReportMemoryWriteResult(ctx context.Context, runtimeID, requestID string, result map[string]any) error {
++	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/memories/write/%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
++}
++
+ // WorkspaceInfo holds minimal workspace metadata returned by the API.
+ type WorkspaceInfo struct {
+ 	ID              string `json:"id"`
+Index: multica/server/internal/daemon/daemon.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -2682,6 +2682,11 @@ func (d *Daemon) handleHeartbeatActions(
+ 			go d.handleMemoryScan(ctx, *rt, *resp.PendingMemoryScan)
+ 		}
+ 	}
++	if resp.PendingMemoryWrite != nil {
++		if rt := d.findRuntime(runtimeID); rt != nil {
++			go d.handleMemoryWrite(ctx, *rt, *resp.PendingMemoryWrite)
++		}
++	}
+ 	// Prefer the batch field (new backend); fall back to singular (old backend).
+ 	if len(resp.PendingLocalSkillImports) > 0 {
+ 		if rt := d.findRuntime(runtimeID); rt != nil {
+@@ -2872,6 +2877,61 @@ func (d *Daemon) reportMemoryScanResult(
+ 	})
+ }
+ 
++// handleMemoryWrite pushes memories from the Odoo library down into the
++// runtime-local memory directories the server named, and reports what
++// actually happened per file. The write counterpart of handleMemoryScan.
++func (d *Daemon) handleMemoryWrite(ctx context.Context, rt Runtime, pending PendingMemoryWrite) {
++	d.logger.Info("runtime local memory write requested", "runtime_id", rt.ID, "request_id", pending.ID, "provider", rt.Provider, "targets", len(pending.Targets))
++
++	targets := make([]LocalMemoryWriteTarget, 0, len(pending.Targets))
++	for _, t := range pending.Targets {
++		writes := make([]LocalMemoryWriteItem, 0, len(t.Writes))
++		for _, w := range t.Writes {
++			writes = append(writes, LocalMemoryWriteItem{
++				Name: w.Name, File: w.File, Description: w.Description,
++				MemoryType: w.MemoryType, Content: w.Content,
++			})
++		}
++		targets = append(targets, LocalMemoryWriteTarget{
++			LocalDirectoryID: t.LocalDirectoryID,
++			Path:             t.Path,
++			Writes:           writes,
++			Deletes:          t.Deletes,
++		})
++	}
++	home, err := os.UserHomeDir()
++	if err != nil {
++		d.reportMemoryWriteResult(ctx, rt, pending.ID, map[string]any{
++			"status": "failed",
++			"error":  fmt.Sprintf("resolve home directory: %v", err),
++		})
++		return
++	}
++	results, _, err := writeRuntimeLocalMemories(rt.Provider, home, targets)
++	if err != nil {
++		d.reportMemoryWriteResult(ctx, rt, pending.ID, map[string]any{
++			"status": "failed",
++			"error":  err.Error(),
++		})
++		return
++	}
++	if results == nil {
++		results = []localMemoryWriteResult{}
++	}
++	d.reportMemoryWriteResult(ctx, rt, pending.ID, map[string]any{
++		"status":  "completed",
++		"results": results,
++	})
++}
++
++// reportMemoryWriteResult delivers a memory write/delete outcome to the
++// server with retry on transient failures.
++func (d *Daemon) reportMemoryWriteResult(ctx context.Context, rt Runtime, requestID string, payload map[string]any) {
++	d.reportRuntimeResultWithRetry(ctx, "memory_write", rt.ID, requestID, func(ctx context.Context) error {
++		return d.client.ReportMemoryWriteResult(ctx, rt.ID, requestID, payload)
++	})
++}
++
+ func (d *Daemon) handleLocalSkillImport(ctx context.Context, rt Runtime, pending PendingLocalSkillImport) {
+ 	d.logger.Info("runtime local skill import requested", "runtime_id", rt.ID, "request_id", pending.ID, "provider", rt.Provider, "skill_key", pending.SkillKey)
+ 
+Index: multica/server/internal/daemon/local_memory.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_memory.go
++++ multica/server/internal/daemon/local_memory.go
+@@ -20,8 +20,14 @@ import (
+ // which for a local_directory task IS the project's local path, so the server
+ // can ask "what memories exist for this local directory" and get a real answer.
+ //
+-// This file only READS. The scan feeds the Odoo-side inventory
+-// (inair.multica.memory.instance); writing/deleting is a separate command.
++// This file both READS (scan, feeding the Odoo-side inventory
++// inair.multica.memory.instance) and WRITES (dispatch: push a memory from the
++// Odoo library down into a runtime's memory directory). Every file this code
++// writes carries a metadata.managed_by: multica marker in its frontmatter —
++// that marker is the only thing that makes a file eligible for the delete
++// side of dispatch. A file without it is the runtime's or the user's own and
++// is never touched, only reported as skipped.
++const memoryManagedByMultica = "multica"
+ 
+ // memoryFileMaxBytes caps how much of a single memory file is read back to the
+ // server. Memory files are prose; anything past this is a runaway log and the
+@@ -65,15 +71,35 @@ type localMemoryScanResult struct {
+ }
+ 
+ // localMemoryFrontmatter is the frontmatter Claude Code writes on each memory
+-// file. Unknown keys are ignored.
++// file. Unknown keys are ignored. ManagedBy is only ever set by this daemon
++// (see memoryManagedByMultica) — Claude Code itself never writes it.
+ type localMemoryFrontmatter struct {
+ 	Name        string `yaml:"name"`
+ 	Description string `yaml:"description"`
+ 	Metadata    struct {
+-		Type string `yaml:"type"`
++		Type      string `yaml:"type"`
++		ManagedBy string `yaml:"managed_by"`
+ 	} `yaml:"metadata"`
+ }
+ 
++// splitFrontmatter separates a memory file's YAML frontmatter from its body.
++// ok is false when the file has no "---" delimited frontmatter block at all
++// (still a valid memory file — see parseLocalMemoryFile).
++func splitFrontmatter(text string) (fm localMemoryFrontmatter, body string, ok bool) {
++	if !strings.HasPrefix(text, "---\n") {
++		return fm, text, false
++	}
++	rest := text[len("---\n"):]
++	end := strings.Index(rest, "\n---")
++	if end < 0 {
++		return fm, text, false
++	}
++	if yaml.Unmarshal([]byte(rest[:end+1]), &fm) != nil {
++		return localMemoryFrontmatter{}, text, false
++	}
++	return fm, strings.TrimPrefix(rest[end+len("\n---"):], "\n"), true
++}
++
+ // providerSupportsLocalMemory reports whether this runtime provider keeps
+ // per-project memory files the daemon knows how to locate. Only Claude Code
+ // for now — codex/qwen/cursor have no equivalent per-project memory store, and
+@@ -129,20 +155,13 @@ func parseLocalMemoryFile(dir, fileName
+ 	}
+ 	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+ 
+-	body := text
+-	if strings.HasPrefix(text, "---\n") {
+-		rest := text[len("---\n"):]
+-		if end := strings.Index(rest, "\n---"); end >= 0 {
+-			var fm localMemoryFrontmatter
+-			if yaml.Unmarshal([]byte(rest[:end+1]), &fm) == nil {
+-				if name := strings.TrimSpace(fm.Name); name != "" {
+-					entry.Name = name
+-				}
+-				entry.Description = strings.TrimSpace(fm.Description)
+-				entry.MemoryType = strings.TrimSpace(fm.Metadata.Type)
+-			}
+-			body = strings.TrimPrefix(rest[end+len("\n---"):], "\n")
++	fm, body, hasFrontmatter := splitFrontmatter(text)
++	if hasFrontmatter {
++		if name := strings.TrimSpace(fm.Name); name != "" {
++			entry.Name = name
+ 		}
++		entry.Description = strings.TrimSpace(fm.Description)
++		entry.MemoryType = strings.TrimSpace(fm.Metadata.Type)
+ 	}
+ 	body = strings.TrimSpace(body)
+ 	if utf8.RuneCountInString(body) > memoryContentReportMax {
+@@ -220,3 +239,243 @@ func scanRuntimeLocalMemories(provider,
+ 	}
+ 	return results, true, nil
+ }
++
++// ------------------------------------------------------------------
++// Write side: push memories from the Odoo library down into a runtime's
++// memory directory, and delete platform-managed ones the library no longer
++// wants there.
++// ------------------------------------------------------------------
++
++// LocalMemoryWriteTarget is one local directory's write/delete batch, as sent
++// by the server. LocalDirectoryID is opaque to the daemon and echoed back.
++type LocalMemoryWriteTarget struct {
++	LocalDirectoryID string
++	Path             string
++	Writes           []LocalMemoryWriteItem
++	Deletes          []string
++}
++
++// LocalMemoryWriteItem is one memory file to write. Content is the body only
++// (no frontmatter) — renderMemoryFile generates the frontmatter.
++type LocalMemoryWriteItem struct {
++	Name        string
++	File        string
++	Description string
++	MemoryType  string
++	Content     string
++}
++
++// localMemorySkip is one delete or write the daemon declined to perform, with
++// the reason, so the server-side report can explain it rather than silently
++// leaving the desired state unmet.
++type localMemorySkip struct {
++	File   string `json:"file"`
++	Reason string `json:"reason"`
++}
++
++// localMemoryWriteResult is the per-target write/delete outcome.
++type localMemoryWriteResult struct {
++	LocalDirectoryID string            `json:"local_directory_id"`
++	Written          []string          `json:"written"`
++	Deleted          []string          `json:"deleted"`
++	Skipped          []localMemorySkip `json:"skipped"`
++	Error            string            `json:"error,omitempty"`
++}
++
++// localIndexEntry is one row of the MEMORY.md index.
++type localIndexEntry struct {
++	Name        string
++	File        string
++	Description string
++}
++
++// renderMemoryFile builds the on-disk bytes for a platform-managed memory
++// file: YAML frontmatter (name/description/metadata.type) plus the
++// metadata.managed_by: multica marker that makes the file eligible for
++// deletion by a later dispatch, then a blank line, then the body.
++func renderMemoryFile(name, description, memoryType, content string) ([]byte, error) {
++	var fm localMemoryFrontmatter
++	fm.Name = name
++	fm.Description = description
++	fm.Metadata.Type = memoryType
++	fm.Metadata.ManagedBy = memoryManagedByMultica
++	header, err := yaml.Marshal(fm)
++	if err != nil {
++		return nil, err
++	}
++	var buf strings.Builder
++	buf.WriteString("---\n")
++	buf.Write(header)
++	buf.WriteString("---\n\n")
++	buf.WriteString(strings.TrimSpace(content))
++	buf.WriteString("\n")
++	return []byte(buf.String()), nil
++}
++
++// fileManagedByMultica reports whether an existing memory file carries the
++// managed_by: multica marker. Any read/parse failure is treated as "no" —
++// deletion must fail closed, since the alternative is silently removing a
++// file the platform never wrote.
++func fileManagedByMultica(path string) bool {
++	raw, err := os.ReadFile(path)
++	if err != nil {
++		return false
++	}
++	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
++	fm, _, ok := splitFrontmatter(text)
++	if !ok {
++		return false
++	}
++	return strings.EqualFold(strings.TrimSpace(fm.Metadata.ManagedBy), memoryManagedByMultica)
++}
++
++// upsertMemoryIndex keeps MEMORY.md's one-line-per-memory index in sync with
++// what was just written/deleted, preserving every other line byte for byte —
++// MEMORY.md is also hand-edited by the runtime and by users, and this must
++// never clobber those lines. A line is matched by its link target
++// "](<file>)" rather than by position, so re-running the same write is a
++// no-op edit rather than a duplicate append.
++func upsertMemoryIndex(dir string, writes []localIndexEntry, deletes []string) error {
++	if len(writes) == 0 && len(deletes) == 0 {
++		return nil
++	}
++	path := filepath.Join(dir, "MEMORY.md")
++	raw, err := os.ReadFile(path)
++	if err != nil && !os.IsNotExist(err) {
++		return err
++	}
++	var lines []string
++	if len(raw) > 0 {
++		lines = strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
++	}
++	indexOf := func(file string) int {
++		marker := "](" + file + ")"
++		for i, l := range lines {
++			if strings.Contains(l, marker) {
++				return i
++			}
++		}
++		return -1
++	}
++	for _, e := range writes {
++		line := fmt.Sprintf("- [%s](%s) — %s", e.Name, e.File, e.Description)
++		if i := indexOf(e.File); i >= 0 {
++			lines[i] = line
++		} else {
++			lines = append(lines, line)
++		}
++	}
++	for _, file := range deletes {
++		if i := indexOf(file); i >= 0 {
++			lines = append(lines[:i], lines[i+1:]...)
++		}
++	}
++	content := strings.Join(lines, "\n")
++	if content != "" {
++		content += "\n"
++	}
++	return os.WriteFile(path, []byte(content), 0o644)
++}
++
++// writeLocalMemoryTarget applies one directory's writes and deletes. It never
++// returns an error for individual file failures — those become skip entries
++// or an empty result set so the caller (and the server) can see exactly what
++// happened per file rather than losing partial progress to a single error.
++func writeLocalMemoryTarget(dir string, target LocalMemoryWriteTarget) localMemoryWriteResult {
++	result := localMemoryWriteResult{
++		LocalDirectoryID: target.LocalDirectoryID,
++		Written:          []string{},
++		Deleted:          []string{},
++		Skipped:          []localMemorySkip{},
++	}
++	if err := os.MkdirAll(dir, 0o755); err != nil {
++		result.Error = fmt.Sprintf("create memory dir: %v", err)
++		return result
++	}
++
++	var indexWrites []localIndexEntry
++	var indexDeletes []string
++
++	for _, item := range target.Writes {
++		raw, err := renderMemoryFile(item.Name, item.Description, item.MemoryType, item.Content)
++		if err != nil {
++			result.Skipped = append(result.Skipped, localMemorySkip{File: item.File, Reason: err.Error()})
++			continue
++		}
++		if err := os.WriteFile(filepath.Join(dir, item.File), raw, 0o644); err != nil {
++			result.Skipped = append(result.Skipped, localMemorySkip{File: item.File, Reason: err.Error()})
++			continue
++		}
++		result.Written = append(result.Written, item.File)
++		indexWrites = append(indexWrites, localIndexEntry{Name: item.Name, File: item.File, Description: item.Description})
++	}
++
++	for _, file := range target.Deletes {
++		path := filepath.Join(dir, file)
++		switch info, statErr := os.Stat(path); {
++		case os.IsNotExist(statErr):
++			// Already gone (e.g. a previous delete landed but the report was
++			// lost) — this is success, not a skip, so the desired state still
++			// converges.
++			result.Deleted = append(result.Deleted, file)
++			indexDeletes = append(indexDeletes, file)
++		case statErr != nil:
++			result.Skipped = append(result.Skipped, localMemorySkip{File: file, Reason: statErr.Error()})
++		case info.IsDir():
++			result.Skipped = append(result.Skipped, localMemorySkip{File: file, Reason: "is a directory"})
++		case !fileManagedByMultica(path):
++			result.Skipped = append(result.Skipped, localMemorySkip{File: file, Reason: "not managed by multica"})
++		default:
++			if err := os.Remove(path); err != nil {
++				result.Skipped = append(result.Skipped, localMemorySkip{File: file, Reason: err.Error()})
++				continue
++			}
++			result.Deleted = append(result.Deleted, file)
++			indexDeletes = append(indexDeletes, file)
++		}
++	}
++
++	if err := upsertMemoryIndex(dir, indexWrites, indexDeletes); err != nil {
++		// The memory files themselves already landed/left; only the index
++		// update failed. Surface it without discarding the write/delete
++		// results — a stale index is a smaller problem than reporting a real
++		// write as failed.
++		result.Error = fmt.Sprintf("update MEMORY.md: %v", err)
++	}
++	return result
++}
++
++// writeRuntimeLocalMemories applies every requested target for the given
++// provider. The bool reports whether this provider has a known memory layout
++// at all, same convention as scanRuntimeLocalMemories.
++func writeRuntimeLocalMemories(provider, home string, targets []LocalMemoryWriteTarget) ([]localMemoryWriteResult, bool, error) {
++	if !providerSupportsLocalMemory(provider) {
++		return nil, false, nil
++	}
++	if home == "" {
++		return nil, true, fmt.Errorf("cannot resolve home directory for provider %q", provider)
++	}
++	results := make([]localMemoryWriteResult, 0, len(targets))
++	for _, target := range targets {
++		path := strings.TrimSpace(target.Path)
++		if path == "" {
++			results = append(results, localMemoryWriteResult{
++				LocalDirectoryID: target.LocalDirectoryID,
++				Written:          []string{}, Deleted: []string{}, Skipped: []localMemorySkip{},
++				Error: "empty path",
++			})
++			continue
++		}
++		dir := claudeMemoryDir(home, path)
++		if dir == "" {
++			results = append(results, localMemoryWriteResult{
++				LocalDirectoryID: target.LocalDirectoryID,
++				Written:          []string{}, Deleted: []string{}, Skipped: []localMemorySkip{},
++				Error: "cannot resolve memory directory",
++			})
++			continue
++		}
++		results = append(results, writeLocalMemoryTarget(dir, target))
++	}
++	return results, true, nil
++}
+Index: multica/server/internal/daemon/local_memory_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_memory_test.go
++++ multica/server/internal/daemon/local_memory_test.go
+@@ -165,6 +165,258 @@ func TestScanRuntimeLocalMemoriesUnsuppo
+ 	}
+ }
+ 
++func TestRenderMemoryFileHasManagedByMarker(t *testing.T) {
++	raw, err := renderMemoryFile("redis-session-required", "一句话摘要", "project", "正文内容")
++	if err != nil {
++		t.Fatal(err)
++	}
++	text := string(raw)
++	if !strings.HasPrefix(text, "---\n") {
++		t.Fatalf("missing frontmatter delimiter: %q", text)
++	}
++	fm, body, ok := splitFrontmatter(text)
++	if !ok {
++		t.Fatalf("rendered file should round-trip through splitFrontmatter: %q", text)
++	}
++	if fm.Name != "redis-session-required" || fm.Description != "一句话摘要" {
++		t.Fatalf("frontmatter = %+v", fm)
++	}
++	if fm.Metadata.Type != "project" {
++		t.Fatalf("metadata.type = %q", fm.Metadata.Type)
++	}
++	if fm.Metadata.ManagedBy != memoryManagedByMultica {
++		t.Fatalf("metadata.managed_by = %q, want %q", fm.Metadata.ManagedBy, memoryManagedByMultica)
++	}
++	if strings.TrimSpace(body) != "正文内容" {
++		t.Fatalf("body = %q", body)
++	}
++}
++
++func TestFileManagedByMultica(t *testing.T) {
++	dir := t.TempDir()
++	writeMemoryFile(t, dir, "managed.md",
++		"---\nname: managed\ndescription: d\nmetadata:\n  type: project\n  managed_by: multica\n---\n\nbody\n")
++	writeMemoryFile(t, dir, "unmanaged.md",
++		"---\nname: unmanaged\ndescription: d\nmetadata:\n  type: project\n---\n\nbody\n")
++	writeMemoryFile(t, dir, "no-frontmatter.md", "just text\n")
++
++	if !fileManagedByMultica(filepath.Join(dir, "managed.md")) {
++		t.Fatal("file with managed_by: multica should be recognized")
++	}
++	if fileManagedByMultica(filepath.Join(dir, "unmanaged.md")) {
++		t.Fatal("file without managed_by must not be treated as platform-managed")
++	}
++	if fileManagedByMultica(filepath.Join(dir, "no-frontmatter.md")) {
++		t.Fatal("file with no frontmatter must not be treated as platform-managed")
++	}
++	if fileManagedByMultica(filepath.Join(dir, "missing.md")) {
++		t.Fatal("nonexistent file must not be treated as platform-managed")
++	}
++}
++
++func TestUpsertMemoryIndexAppendsAndPreservesExisting(t *testing.T) {
++	dir := t.TempDir()
++	writeMemoryFile(t, dir, "MEMORY.md",
++		"- [apifox-cli-over-mcp](apifox-cli-over-mcp.md) — 读 Multica Apifox 用 apifox CLI\n"+
++			"- [communicate-in-chinese](communicate-in-chinese.md) — 所有沟通一律用中文回复\n")
++
++	if err := upsertMemoryIndex(dir, []localIndexEntry{
++		{Name: "redis-session-required", File: "redis-session-required.md", Description: "一句话摘要"},
++	}, nil); err != nil {
++		t.Fatal(err)
++	}
++	raw, err := os.ReadFile(filepath.Join(dir, "MEMORY.md"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	text := string(raw)
++	for _, want := range []string{
++		"- [apifox-cli-over-mcp](apifox-cli-over-mcp.md) — 读 Multica Apifox 用 apifox CLI",
++		"- [communicate-in-chinese](communicate-in-chinese.md) — 所有沟通一律用中文回复",
++		"- [redis-session-required](redis-session-required.md) — 一句话摘要",
++	} {
++		if !strings.Contains(text, want) {
++			t.Fatalf("MEMORY.md missing line %q, got:\n%s", want, text)
++		}
++	}
++	if strings.Count(text, "redis-session-required.md") != 1 {
++		t.Fatalf("expected exactly one entry for the new file, got:\n%s", text)
++	}
++}
++
++func TestUpsertMemoryIndexUpdatesExistingLineInPlace(t *testing.T) {
++	dir := t.TempDir()
++	writeMemoryFile(t, dir, "MEMORY.md",
++		"- [old-name](redis-session-required.md) — 旧摘要\n"+
++			"- [other](other.md) — 不该动\n")
++
++	if err := upsertMemoryIndex(dir, []localIndexEntry{
++		{Name: "redis-session-required", File: "redis-session-required.md", Description: "新摘要"},
++	}, nil); err != nil {
++		t.Fatal(err)
++	}
++	raw, _ := os.ReadFile(filepath.Join(dir, "MEMORY.md"))
++	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
++	if len(lines) != 2 {
++		t.Fatalf("expected the line to be replaced in place, not appended: %+v", lines)
++	}
++	if !strings.Contains(lines[0], "新摘要") {
++		t.Fatalf("first line should be updated: %q", lines[0])
++	}
++	if lines[1] != "- [other](other.md) — 不该动" {
++		t.Fatalf("unrelated line must be untouched: %q", lines[1])
++	}
++}
++
++func TestUpsertMemoryIndexRemovesDeletedLine(t *testing.T) {
++	dir := t.TempDir()
++	writeMemoryFile(t, dir, "MEMORY.md",
++		"- [keep](keep.md) — 保留\n- [gone](gone.md) — 该删\n")
++
++	if err := upsertMemoryIndex(dir, nil, []string{"gone.md"}); err != nil {
++		t.Fatal(err)
++	}
++	raw, _ := os.ReadFile(filepath.Join(dir, "MEMORY.md"))
++	text := string(raw)
++	if strings.Contains(text, "gone.md") {
++		t.Fatalf("deleted entry should be removed: %q", text)
++	}
++	if !strings.Contains(text, "keep.md") {
++		t.Fatalf("kept entry must survive: %q", text)
++	}
++}
++
++func TestWriteLocalMemoryTargetWritesFileAndIndex(t *testing.T) {
++	dir := filepath.Join(t.TempDir(), "memory")
++	result := writeLocalMemoryTarget(dir, LocalMemoryWriteTarget{
++		LocalDirectoryID: "14",
++		Writes: []LocalMemoryWriteItem{
++			{Name: "redis-session-required", File: "redis-session-required.md",
++				Description: "一句话摘要", MemoryType: "project", Content: "正文"},
++		},
++	})
++	if result.Error != "" {
++		t.Fatalf("unexpected error: %s", result.Error)
++	}
++	if len(result.Written) != 1 || result.Written[0] != "redis-session-required.md" {
++		t.Fatalf("written = %+v", result.Written)
++	}
++	if !fileManagedByMultica(filepath.Join(dir, "redis-session-required.md")) {
++		t.Fatal("written file must carry the managed_by marker")
++	}
++	index, err := os.ReadFile(filepath.Join(dir, "MEMORY.md"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(string(index), "redis-session-required.md") {
++		t.Fatalf("MEMORY.md should index the new file: %q", string(index))
++	}
++}
++
++func TestWriteLocalMemoryTargetDeletesManagedFile(t *testing.T) {
++	dir := t.TempDir()
++	raw, _ := renderMemoryFile("stale-fact", "d", "project", "c")
++	if err := os.WriteFile(filepath.Join(dir, "stale-fact.md"), raw, 0o644); err != nil {
++		t.Fatal(err)
++	}
++	writeMemoryFile(t, dir, "MEMORY.md", "- [stale-fact](stale-fact.md) — d\n")
++
++	result := writeLocalMemoryTarget(dir, LocalMemoryWriteTarget{
++		LocalDirectoryID: "14", Deletes: []string{"stale-fact.md"},
++	})
++	if len(result.Deleted) != 1 || result.Deleted[0] != "stale-fact.md" {
++		t.Fatalf("deleted = %+v, skipped = %+v", result.Deleted, result.Skipped)
++	}
++	if _, err := os.Stat(filepath.Join(dir, "stale-fact.md")); !os.IsNotExist(err) {
++		t.Fatal("managed file should have been removed")
++	}
++	index, _ := os.ReadFile(filepath.Join(dir, "MEMORY.md"))
++	if strings.Contains(string(index), "stale-fact.md") {
++		t.Fatalf("MEMORY.md entry should be removed too: %q", string(index))
++	}
++}
++
++func TestWriteLocalMemoryTargetSkipsUnmanagedFile(t *testing.T) {
++	dir := t.TempDir()
++	// A file the user or the runtime wrote by hand — no managed_by marker.
++	writeMemoryFile(t, dir, "users-own-note.md",
++		"---\nname: users-own-note\ndescription: d\n---\n\nbody\n")
++	writeMemoryFile(t, dir, "MEMORY.md", "- [users-own-note](users-own-note.md) — d\n")
++
++	result := writeLocalMemoryTarget(dir, LocalMemoryWriteTarget{
++		LocalDirectoryID: "14", Deletes: []string{"users-own-note.md"},
++	})
++	if len(result.Deleted) != 0 {
++		t.Fatalf("unmanaged file must not be deleted: %+v", result.Deleted)
++	}
++	if len(result.Skipped) != 1 || result.Skipped[0].File != "users-own-note.md" {
++		t.Fatalf("skipped = %+v", result.Skipped)
++	}
++	if _, err := os.Stat(filepath.Join(dir, "users-own-note.md")); err != nil {
++		t.Fatal("unmanaged file must survive untouched")
++	}
++	index, _ := os.ReadFile(filepath.Join(dir, "MEMORY.md"))
++	if !strings.Contains(string(index), "users-own-note.md") {
++		t.Fatal("MEMORY.md entry for a skipped file must not be removed")
++	}
++}
++
++func TestWriteLocalMemoryTargetDeleteAlreadyGoneIsSuccess(t *testing.T) {
++	dir := t.TempDir()
++	result := writeLocalMemoryTarget(dir, LocalMemoryWriteTarget{
++		LocalDirectoryID: "14", Deletes: []string{"never-existed.md"},
++	})
++	if len(result.Deleted) != 1 || result.Deleted[0] != "never-existed.md" {
++		t.Fatalf("a file that's already gone should be reported deleted so present converges to false: %+v", result)
++	}
++	if len(result.Skipped) != 0 {
++		t.Fatalf("skipped = %+v", result.Skipped)
++	}
++}
++
++func TestWriteRuntimeLocalMemoriesUnsupportedProvider(t *testing.T) {
++	results, supported, err := writeRuntimeLocalMemories("codex", "/home/x", []LocalMemoryWriteTarget{{Path: "/srv/app"}})
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	if supported {
++		t.Fatal("codex must report unsupported")
++	}
++	if results != nil {
++		t.Fatalf("unsupported provider must not report results: %+v", results)
++	}
++}
++
++func TestWriteRuntimeLocalMemoriesEndToEnd(t *testing.T) {
++	home := t.TempDir()
++	projectPath := "/srv/app"
++	results, supported, err := writeRuntimeLocalMemories("claude", home, []LocalMemoryWriteTarget{
++		{
++			LocalDirectoryID: "14", Path: projectPath,
++			Writes: []LocalMemoryWriteItem{
++				{Name: "a-fact", File: "a-fact.md", Description: "d", MemoryType: "project", Content: "c"},
++			},
++		},
++		{LocalDirectoryID: "15", Path: "  "},
++	})
++	if err != nil || !supported {
++		t.Fatalf("write: err=%v supported=%v", err, supported)
++	}
++	if len(results) != 2 {
++		t.Fatalf("got %d results, want one per target", len(results))
++	}
++	if results[0].Error != "" || len(results[0].Written) != 1 {
++		t.Fatalf("first target: %+v", results[0])
++	}
++	memDir := claudeMemoryDir(home, projectPath)
++	if _, err := os.Stat(filepath.Join(memDir, "a-fact.md")); err != nil {
++		t.Fatalf("file should exist under the claude memory dir: %v", err)
++	}
++	if results[1].Error == "" {
++		t.Fatalf("blank path should be reported as an error: %+v", results[1])
++	}
++}
++
+ func TestScanRuntimeLocalMemoriesPerTarget(t *testing.T) {
+ 	home := t.TempDir()
+ 	projectPath := "/srv/app"
+Index: multica/server/pkg/protocol/messages.go
+===================================================================
+--- multica.orig/server/pkg/protocol/messages.go
++++ multica/server/pkg/protocol/messages.go
+@@ -281,6 +281,11 @@ type DaemonHeartbeatAckPayload struct {
+ 	// files for a set of local directories (Odoo backend only). Daemons that
+ 	// predate it ignore the field, so the server just never gets a report.
+ 	PendingMemoryScan *DaemonHeartbeatPendingMemoryScan `json:"pending_memory_scan,omitempty"`
++	// PendingMemoryWrite asks the daemon to write/delete runtime-local memory
++	// files for a set of local directories (Odoo backend only), the write
++	// counterpart of PendingMemoryScan. Daemons that predate it ignore the
++	// field, so the server-side desired state never converges for them.
++	PendingMemoryWrite *DaemonHeartbeatPendingMemoryWrite `json:"pending_memory_write,omitempty"`
+ }
+ 
+ // HeartbeatStatusRuntimeGone is the ack Status used when the runtime row no
+@@ -327,3 +332,34 @@ type DaemonHeartbeatMemoryScanPath struc
+ 	LocalDirectoryID string `json:"local_directory_id"`
+ 	Path             string `json:"path"`
+ }
++
++// DaemonHeartbeatPendingMemoryWrite describes a request to write/delete
++// runtime-local memory files across a set of local directories. ID is scoped
++// to the runtime (not unique per delivery) — the underlying operation is
++// idempotent, so the same ID being redelivered on consecutive heartbeats
++// before the daemon catches up is harmless.
++type DaemonHeartbeatPendingMemoryWrite struct {
++	ID      string                             `json:"id"`
++	Targets []DaemonHeartbeatMemoryWriteTarget `json:"targets"`
++}
++
++// DaemonHeartbeatMemoryWriteTarget is one local directory's write/delete
++// batch. LocalDirectoryID is opaque to the daemon and echoed back in the
++// report so the server can match results to its own records.
++type DaemonHeartbeatMemoryWriteTarget struct {
++	LocalDirectoryID string                           `json:"local_directory_id"`
++	Path             string                           `json:"path"`
++	Writes           []DaemonHeartbeatMemoryWriteItem `json:"writes,omitempty"`
++	Deletes          []string                         `json:"deletes,omitempty"`
++}
++
++// DaemonHeartbeatMemoryWriteItem is one memory file to write. Content is the
++// body only (no frontmatter) — the daemon generates the frontmatter itself so
++// every platform-managed file stays in the exact shape Claude Code expects.
++type DaemonHeartbeatMemoryWriteItem struct {
++	Name        string `json:"name"`
++	File        string `json:"file"`
++	Description string `json:"description,omitempty"`
++	MemoryType  string `json:"memory_type,omitempty"`
++	Content     string `json:"content"`
++}

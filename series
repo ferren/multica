@@ -20,3 +20,4 @@
 0020-odoo-classify-session-limit-as-quota.patch
 0021-odoo-runtime-memory-scan.patch
 0022-odoo-runtime-memory-write.patch
+0023-odoo-project-local-skills.patch

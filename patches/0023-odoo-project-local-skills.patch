@@ -1,0 +1,544 @@
+Index: multica/server/internal/daemon/daemon.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -2674,7 +2674,7 @@ func (d *Daemon) handleHeartbeatActions(
+ 	}
+ 	if resp.PendingLocalSkills != nil {
+ 		if rt := d.findRuntime(runtimeID); rt != nil {
+-			go d.handleLocalSkillList(ctx, *rt, resp.PendingLocalSkills.ID)
++			go d.handleLocalSkillList(ctx, *rt, resp.PendingLocalSkills.ID, resp.PendingLocalSkills.ProjectDirs)
+ 		}
+ 	}
+ 	if resp.PendingMemoryScan != nil {
+@@ -2796,10 +2796,10 @@ func (d *Daemon) handleModelList(ctx con
+ 	})
+ }
+ 
+-func (d *Daemon) handleLocalSkillList(ctx context.Context, rt Runtime, requestID string) {
++func (d *Daemon) handleLocalSkillList(ctx context.Context, rt Runtime, requestID string, projectDirs []string) {
+ 	d.logger.Info("runtime local skills requested", "runtime_id", rt.ID, "request_id", requestID, "provider", rt.Provider)
+ 
+-	skills, supported, err := listRuntimeLocalSkills(rt.Provider)
++	skills, supported, err := listRuntimeLocalSkills(rt.Provider, projectDirs)
+ 	if err != nil {
+ 		d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
+ 			"status": "failed",
+@@ -2875,7 +2875,7 @@ func (d *Daemon) reportMemoryScanResult(
+ func (d *Daemon) handleLocalSkillImport(ctx context.Context, rt Runtime, pending PendingLocalSkillImport) {
+ 	d.logger.Info("runtime local skill import requested", "runtime_id", rt.ID, "request_id", pending.ID, "provider", rt.Provider, "skill_key", pending.SkillKey)
+ 
+-	skill, supported, err := loadRuntimeLocalSkillBundle(rt.Provider, pending.SkillKey)
++	skill, supported, err := loadRuntimeLocalSkillBundle(rt.Provider, pending.SkillKey, pending.ProjectDirs)
+ 	if err != nil {
+ 		d.reportLocalSkillImportResult(ctx, rt, pending.ID, map[string]any{
+ 			"status": "failed",
+Index: multica/server/internal/daemon/local_skills.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_skills.go
++++ multica/server/internal/daemon/local_skills.go
+@@ -70,6 +70,12 @@ const (
+ 	// localSkillRootProvider marks a runtime's own skill directory (e.g.
+ 	// ~/.claude/skills). These take priority over the universal root.
+ 	localSkillRootProvider = "provider"
++	// localSkillRootProject marks a skill discovered from a project-level
++	// .<provider>/skills/ directory (e.g. <project>/.claude/skills). These
++	// sit between provider-level and universal roots in priority so a user's
++	// same-key skill overrides the project default, but project skills are
++	// still visible alongside cross-tool universal skills.
++	localSkillRootProject = "project"
+ 	// localSkillRootUniversal marks the cross-tool ~/.agents/skills root,
+ 	// a convention shared by Codex, Gemini CLI, Augment and others as a
+ 	// universal home-level skill store. It is always searched last so a
+@@ -82,17 +88,21 @@ const (
+ 	localSkillRootPlugin = "plugin"
+ )
+ 
+-// localSkillRootsForProvider returns the ordered user-level skill roots
+-// scanned for each runtime/provider. The slice is in priority order:
++// localSkillRootsForProvider returns the ordered user-level and project-level
++// skill roots scanned for each runtime/provider. The slice is in priority order:
+ //
+-//  1. the runtime's provider-specific root (backward-compatible with the
+-//     single-root behavior that predates ~/.agents/skills support), then
+-//  2. the cross-tool universal root ~/.agents/skills.
++//  1. the runtime's provider-specific user root (backward-compatible with the
++//     single-root behavior that predates ~/.agents/skills support),
++//  2. project-level roots for each project directory in projectDirs (when
++//     provided — a user's same-key skill still takes priority over the
++//     project default, but project skills surface alongside universal skills),
++//  3. the cross-tool universal root ~/.agents/skills,
++//  4. enabled plugin roots (Claude only).
+ //
+ // Listing and import both walk the roots in this order and the first match of
+-// a given skill key wins, so adding the universal root never changes what an
+-// existing provider-root skill resolves to — it only surfaces additional,
+-// non-conflicting skills.
++// a given skill key wins, so adding the universal or project roots never
++// changes what an existing provider-root skill resolves to — it only surfaces
++// additional, non-conflicting skills.
+ //
+ // Keep the provider roots in sync with upstream docs / conventions:
+ //   - GitHub Copilot: https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills
+@@ -118,7 +128,7 @@ const (
+ // Longer-term this mapping would be better colocated with the provider
+ // definitions under server/pkg/agent so adding a new runtime can't silently
+ // miss the local-skills surface.
+-func localSkillRootsForProvider(provider string) ([]localSkillRoot, bool, error) {
++func localSkillRootsForProvider(provider string, projectDirs []string) ([]localSkillRoot, bool, error) {
+ 	home, err := os.UserHomeDir()
+ 	if err != nil {
+ 		return nil, false, fmt.Errorf("resolve user home: %w", err)
+@@ -195,8 +205,27 @@ func localSkillRootsForProvider(provider
+ 
+ 	roots := []localSkillRoot{
+ 		{path: providerRoot, kind: localSkillRootProvider},
+-		{path: filepath.Join(home, ".agents", "skills"), kind: localSkillRootUniversal},
+ 	}
++	// Project-level roots: scan per-project .<provider>/skills/ directories
++	// for each local_directory the server included in the heartbeat ack.
++	// Placed after the provider user root but before the universal root so
++	// that a user's same-key skill still takes priority.
++	if rel, ok := providerProjectSkillRelPath(provider); ok {
++		for _, dir := range projectDirs {
++			dir = filepath.Clean(dir)
++			if dir == "" {
++				continue
++			}
++			roots = append(roots, localSkillRoot{
++				path: filepath.Join(dir, filepath.FromSlash(rel)),
++				kind: localSkillRootProject,
++			})
++		}
++	}
++	roots = append(roots, localSkillRoot{
++		path: filepath.Join(home, ".agents", "skills"),
++		kind: localSkillRootUniversal,
++	})
+ 	if provider == "claude" {
+ 		for _, plugin := range listEnabledClaudePlugins(home) {
+ 			manifest, _ := readClaudePluginManifest(plugin.InstallPath)
+@@ -217,6 +246,55 @@ func localSkillRootsForProvider(provider
+ 	return roots, true, nil
+ }
+ 
++// providerProjectSkillRelPath returns the relative path from a project
++// root to the provider's project-local skills directory. Returns false for
++// providers with no known project-level skills convention.
++//
++// Project-level directories mirror the user-level layout but are rooted in
++// each project's workdir rather than $HOME. For providers whose user-level
++// path depends on an environment variable (codex, grok, qwen), the project
++// convention is the default dot-directory regardless of the env var.
++func providerProjectSkillRelPath(provider string) (string, bool) {
++	switch provider {
++	case "claude":
++		return ".claude/skills", true
++	case "codebuddy":
++		return ".codebuddy/skills", true
++	case "codex":
++		return ".codex/skills", true
++	case "copilot":
++		return ".copilot/skills", true
++	case "opencode":
++		return ".opencode/skills", true
++	case "deveco":
++		return ".deveco/skills", true
++	case "openclaw":
++		return ".openclaw/skills", true
++	case "pi":
++		return ".pi/agent/skills", true
++	case "cursor":
++		return ".cursor/skills", true
++	case "hermes":
++		return ".hermes/skills", true
++	case "kimi":
++		return ".kimi/skills", true
++	case "kiro":
++		return ".kiro/skills", true
++	case "qoder":
++		return ".qoder/skills", true
++	case "traecli":
++		return ".traecli/skills", true
++	case "antigravity":
++		return ".gemini/antigravity-cli/skills", true
++	case "grok":
++		return ".grok/skills", true
++	case "qwen":
++		return ".qwen/skills", true
++	default:
++		return "", false
++	}
++}
++
+ func isIgnoredLocalSkillEntry(name string) bool {
+ 	if name == "" {
+ 		return true
+@@ -353,8 +431,8 @@ func collectLocalSkillFiles(skillDir str
+ 	return files, nil
+ }
+ 
+-func listRuntimeLocalSkills(provider string) ([]runtimeLocalSkillSummary, bool, error) {
+-	roots, supported, err := localSkillRootsForProvider(provider)
++func listRuntimeLocalSkills(provider string, projectDirs []string) ([]runtimeLocalSkillSummary, bool, error) {
++	roots, supported, err := localSkillRootsForProvider(provider, projectDirs)
+ 	if err != nil || !supported {
+ 		return nil, supported, err
+ 	}
+@@ -510,8 +588,8 @@ func enumerateLocalSkills(
+ 	}
+ }
+ 
+-func loadRuntimeLocalSkillBundle(provider, skillKey string) (*runtimeLocalSkillBundle, bool, error) {
+-	roots, supported, err := localSkillRootsForProvider(provider)
++func loadRuntimeLocalSkillBundle(provider, skillKey string, projectDirs []string) (*runtimeLocalSkillBundle, bool, error) {
++	roots, supported, err := localSkillRootsForProvider(provider, projectDirs)
+ 	if err != nil || !supported {
+ 		return nil, supported, err
+ 	}
+Index: multica/server/internal/daemon/local_skills_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_skills_test.go
++++ multica/server/internal/daemon/local_skills_test.go
+@@ -64,7 +64,7 @@ func TestListRuntimeLocalSkills_Claude(t
+ 		".secret":            "ignored",
+ 	})
+ 
+-	skills, supported, err := listRuntimeLocalSkills("claude")
++	skills, supported, err := listRuntimeLocalSkills("claude", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -120,7 +120,7 @@ func TestListRuntimeLocalSkills_Codebudd
+ 		"SKILL.md": "---\nname: Claude Review\ndescription: Should not appear for codebuddy\n---\n# Claude Review\n",
+ 	})
+ 
+-	skills, supported, err := listRuntimeLocalSkills("codebuddy")
++	skills, supported, err := listRuntimeLocalSkills("codebuddy", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -158,7 +158,7 @@ func TestRuntimeLocalSkills_CodebuddyExc
+ 		"SKILL.md": "---\nname: Claude Plugin Skill\n---\n",
+ 	})
+ 
+-	skills, supported, err := listRuntimeLocalSkills("codebuddy")
++	skills, supported, err := listRuntimeLocalSkills("codebuddy", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -169,7 +169,7 @@ func TestRuntimeLocalSkills_CodebuddyExc
+ 		t.Fatalf("CodeBuddy must not list Claude plugin skills, got %#v", skills)
+ 	}
+ 
+-	bundle, supported, err := loadRuntimeLocalSkillBundle("codebuddy", "paper-desktop:design-to-code")
++	bundle, supported, err := loadRuntimeLocalSkillBundle("codebuddy", "paper-desktop:design-to-code", nil)
+ 	if !supported {
+ 		t.Fatal("codebuddy should be supported for import")
+ 	}
+@@ -189,7 +189,7 @@ func TestListRuntimeLocalSkills_ClaudeEn
+ 		"SKILL.md": "---\nname: Design to code\ndescription: Turn a design into code\n---\n# Design\n",
+ 	})
+ 
+-	skills, supported, err := listRuntimeLocalSkills("claude")
++	skills, supported, err := listRuntimeLocalSkills("claude", nil)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -204,7 +204,7 @@ func TestListRuntimeLocalSkills_ClaudeEn
+ 		t.Fatalf("plugin skill origin = %#v", got)
+ 	}
+ 
+-	bundle, supported, err := loadRuntimeLocalSkillBundle("claude", got.Key)
++	bundle, supported, err := loadRuntimeLocalSkillBundle("claude", got.Key, nil)
+ 	if err != nil || !supported {
+ 		t.Fatalf("load plugin bundle: supported=%v err=%v", supported, err)
+ 	}
+@@ -221,7 +221,7 @@ func TestListRuntimeLocalSkills_ClaudeDi
+ 		"SKILL.md": "---\nname: Design to code\n---\n",
+ 	})
+ 
+-	skills, supported, err := listRuntimeLocalSkills("claude")
++	skills, supported, err := listRuntimeLocalSkills("claude", nil)
+ 	if err != nil || !supported {
+ 		t.Fatalf("supported=%v err=%v", supported, err)
+ 	}
+@@ -238,7 +238,7 @@ func TestListRuntimeLocalSkills_Kiro(t *
+ 		"SKILL.md": "---\nname: Kiro Review\ndescription: Review code with Kiro\n---\n# Kiro Review\n",
+ 	})
+ 
+-	skills, supported, err := listRuntimeLocalSkills("kiro")
++	skills, supported, err := listRuntimeLocalSkills("kiro", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -314,7 +314,7 @@ func TestLocalSkills_DiscoversACPProvide
+ 				"notes.md": "notes",
+ 			})
+ 
+-			skills, supported, err := listRuntimeLocalSkills(tc.provider)
++			skills, supported, err := listRuntimeLocalSkills(tc.provider, nil)
+ 			if err != nil {
+ 				t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 			}
+@@ -337,7 +337,7 @@ func TestLocalSkills_DiscoversACPProvide
+ 				t.Fatalf("source_path = %q, want %q", skills[0].SourcePath, tc.wantPath)
+ 			}
+ 
+-			bundle, supported, err := loadRuntimeLocalSkillBundle(tc.provider, "review-helper")
++			bundle, supported, err := loadRuntimeLocalSkillBundle(tc.provider, "review-helper", nil)
+ 			if err != nil {
+ 				t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
+ 			}
+@@ -369,7 +369,7 @@ func TestListRuntimeLocalSkills_GrokUses
+ 		"SKILL.md": "---\nname: Wrong Home\n---\n# Wrong\n",
+ 	})
+ 
+-	skills, supported, err := listRuntimeLocalSkills("grok")
++	skills, supported, err := listRuntimeLocalSkills("grok", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -383,7 +383,7 @@ func TestListRuntimeLocalSkills_GrokUses
+ 		t.Fatalf("source_path = %q, want custom GROK_HOME path", skills[0].SourcePath)
+ 	}
+ 
+-	bundle, supported, err := loadRuntimeLocalSkillBundle("grok", "review-helper")
++	bundle, supported, err := loadRuntimeLocalSkillBundle("grok", "review-helper", nil)
+ 	if err != nil {
+ 		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
+ 	}
+@@ -404,7 +404,7 @@ func TestListRuntimeLocalSkills_QwenUses
+ 		"SKILL.md": "---\nname: Wrong Home\n---\n# Wrong\n",
+ 	})
+ 
+-	skills, supported, err := listRuntimeLocalSkills("qwen")
++	skills, supported, err := listRuntimeLocalSkills("qwen", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -418,7 +418,7 @@ func TestListRuntimeLocalSkills_QwenUses
+ 		t.Fatalf("source_path = %q, want custom QWEN_HOME path", skills[0].SourcePath)
+ 	}
+ 
+-	bundle, supported, err := loadRuntimeLocalSkillBundle("qwen", "review-helper")
++	bundle, supported, err := loadRuntimeLocalSkillBundle("qwen", "review-helper", nil)
+ 	if err != nil {
+ 		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
+ 	}
+@@ -458,7 +458,7 @@ func TestListRuntimeLocalSkills_FollowsS
+ 		"SKILL.md": "---\nname: Review Helper\n---\n",
+ 	})
+ 
+-	skills, supported, err := listRuntimeLocalSkills("claude")
++	skills, supported, err := listRuntimeLocalSkills("claude", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -500,7 +500,7 @@ func TestListRuntimeLocalSkills_CodexUse
+ 		"SKILL.md": "# Wrong Home\n",
+ 	})
+ 
+-	skills, supported, err := listRuntimeLocalSkills("codex")
++	skills, supported, err := listRuntimeLocalSkills("codex", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -546,7 +546,7 @@ func TestListRuntimeLocalSkills_Descends
+ 		"SKILL.md": "---\nname: Release Reporter\n---\n",
+ 	})
+ 
+-	skills, supported, err := listRuntimeLocalSkills("opencode")
++	skills, supported, err := listRuntimeLocalSkills("opencode", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -577,7 +577,7 @@ func TestLoadRuntimeLocalSkillBundle_Ope
+ 		"examples/sample.md": "sample body",
+ 	})
+ 
+-	bundle, supported, err := loadRuntimeLocalSkillBundle("opencode", "release/reporter")
++	bundle, supported, err := loadRuntimeLocalSkillBundle("opencode", "release/reporter", nil)
+ 	if err != nil {
+ 		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
+ 	}
+@@ -612,7 +612,7 @@ func TestListRuntimeLocalSkills_OpenClaw
+ 		"SKILL.md": "# Planner\n",
+ 	})
+ 
+-	skills, supported, err := listRuntimeLocalSkills("openclaw")
++	skills, supported, err := listRuntimeLocalSkills("openclaw", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -638,7 +638,7 @@ func TestLoadRuntimeLocalSkillBundle_Cur
+ 		".hidden/skip.txt": "ignore",
+ 	})
+ 
+-	bundle, supported, err := loadRuntimeLocalSkillBundle("cursor", "docs-helper")
++	bundle, supported, err := loadRuntimeLocalSkillBundle("cursor", "docs-helper", nil)
+ 	if err != nil {
+ 		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
+ 	}
+@@ -671,7 +671,7 @@ func TestListRuntimeLocalSkills_Discover
+ 		"docs/info.md": "info",
+ 	})
+ 
+-	skills, supported, err := listRuntimeLocalSkills("claude")
++	skills, supported, err := listRuntimeLocalSkills("claude", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -712,7 +712,7 @@ func TestLoadRuntimeLocalSkillBundle_Imp
+ 		"scripts/run.sh":  "echo hi",
+ 	})
+ 
+-	bundle, supported, err := loadRuntimeLocalSkillBundle("claude", "shared-skill")
++	bundle, supported, err := loadRuntimeLocalSkillBundle("claude", "shared-skill", nil)
+ 	if err != nil {
+ 		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
+ 	}
+@@ -746,7 +746,7 @@ func TestLocalSkills_ProviderRootWinsOnK
+ 		"SKILL.md": "---\nname: Universal Copy\n---\n# universal\n",
+ 	})
+ 
+-	skills, _, err := listRuntimeLocalSkills("claude")
++	skills, _, err := listRuntimeLocalSkills("claude", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -764,7 +764,7 @@ func TestLocalSkills_ProviderRootWinsOnK
+ 	}
+ 
+ 	// Load must resolve to the provider copy too, matching the list.
+-	bundle, _, err := loadRuntimeLocalSkillBundle("claude", "dup")
++	bundle, _, err := loadRuntimeLocalSkillBundle("claude", "dup", nil)
+ 	if err != nil {
+ 		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
+ 	}
+@@ -788,7 +788,7 @@ func TestListRuntimeLocalSkills_MergesBo
+ 		"SKILL.md": "---\nname: Universal Only\n---\n",
+ 	})
+ 
+-	skills, _, err := listRuntimeLocalSkills("claude")
++	skills, _, err := listRuntimeLocalSkills("claude", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -823,7 +823,7 @@ func TestListRuntimeLocalSkills_MissingU
+ 	})
+ 	// No ~/.agents/skills created.
+ 
+-	skills, supported, err := listRuntimeLocalSkills("claude")
++	skills, supported, err := listRuntimeLocalSkills("claude", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -840,7 +840,7 @@ func TestListRuntimeLocalSkills_BothRoot
+ 	home := t.TempDir()
+ 	t.Setenv("HOME", home)
+ 
+-	skills, supported, err := listRuntimeLocalSkills("claude")
++	skills, supported, err := listRuntimeLocalSkills("claude", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -861,7 +861,7 @@ func TestListRuntimeLocalSkills_NestedSk
+ 		"SKILL.md": "---\nname: Release Reporter\n---\n",
+ 	})
+ 
+-	skills, _, err := listRuntimeLocalSkills("opencode")
++	skills, _, err := listRuntimeLocalSkills("opencode", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -872,7 +872,7 @@ func TestListRuntimeLocalSkills_NestedSk
+ 		t.Fatalf("root = %q, want %q", skills[0].Root, localSkillRootUniversal)
+ 	}
+ 
+-	bundle, _, err := loadRuntimeLocalSkillBundle("opencode", "release/reporter")
++	bundle, _, err := loadRuntimeLocalSkillBundle("opencode", "release/reporter", nil)
+ 	if err != nil {
+ 		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
+ 	}
+@@ -895,7 +895,7 @@ func TestLoadRuntimeLocalSkillBundle_Fal
+ 		"SKILL.md": "---\nname: Only Universal\n---\n# only universal\n",
+ 	})
+ 
+-	bundle, _, err := loadRuntimeLocalSkillBundle("claude", "only-universal")
++	bundle, _, err := loadRuntimeLocalSkillBundle("claude", "only-universal", nil)
+ 	if err != nil {
+ 		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
+ 	}
+@@ -925,7 +925,7 @@ func TestLoadRuntimeLocalSkillBundle_Doe
+ 		"SKILL.md": "---\nname: Universal Clash\n---\n",
+ 	})
+ 
+-	bundle, _, err := loadRuntimeLocalSkillBundle("claude", "clash")
++	bundle, _, err := loadRuntimeLocalSkillBundle("claude", "clash", nil)
+ 	if err == nil {
+ 		t.Fatalf("expected an error, got bundle %+v", bundle)
+ 	}
+@@ -954,7 +954,7 @@ func TestListRuntimeLocalSkills_PerRootV
+ 		t.Fatalf("symlink: %v", err)
+ 	}
+ 
+-	skills, _, err := listRuntimeLocalSkills("claude")
++	skills, _, err := listRuntimeLocalSkills("claude", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -1000,7 +1000,7 @@ func TestLoadRuntimeLocalSkillBundle_Pro
+ 	})
+ 
+ 	// list must surface exactly the universal skill at key "shadowed".
+-	skills, _, err := listRuntimeLocalSkills("claude")
++	skills, _, err := listRuntimeLocalSkills("claude", nil)
+ 	if err != nil {
+ 		t.Fatalf("listRuntimeLocalSkills: %v", err)
+ 	}
+@@ -1016,7 +1016,7 @@ func TestLoadRuntimeLocalSkillBundle_Pro
+ 
+ 	// load must resolve to the SAME universal skill list showed — not error on
+ 	// the invalid provider dir.
+-	bundle, _, err := loadRuntimeLocalSkillBundle("claude", "shadowed")
++	bundle, _, err := loadRuntimeLocalSkillBundle("claude", "shadowed", nil)
+ 	if err != nil {
+ 		t.Fatalf("loadRuntimeLocalSkillBundle: %v (load disagreed with list)", err)
+ 	}
+@@ -1047,7 +1047,7 @@ func TestLoadRuntimeLocalSkillBundle_Pro
+ 		"SKILL.md": "---\nname: Filish\n---\n# Filish\n",
+ 	})
+ 
+-	bundle, _, err := loadRuntimeLocalSkillBundle("claude", "filish")
++	bundle, _, err := loadRuntimeLocalSkillBundle("claude", "filish", nil)
+ 	if err != nil {
+ 		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
+ 	}
+Index: multica/server/pkg/protocol/messages.go
+===================================================================
+--- multica.orig/server/pkg/protocol/messages.go
++++ multica/server/pkg/protocol/messages.go
+@@ -304,6 +304,11 @@ type DaemonHeartbeatPendingModelList str
+ // local-skill inventory.
+ type DaemonHeartbeatPendingLocalSkills struct {
+ 	ID string `json:"id"`
++	// ProjectDirs lists absolute paths of project directories (from
++	// local_directory resources) whose project-level .<provider>/skills/
++	// directories the daemon should also scan. May be empty or omitted by
++	// older backends that predate project-level skill discovery.
++	ProjectDirs []string `json:"project_dirs,omitempty"`
+ }
+ 
+ // DaemonHeartbeatPendingLocalSkillImport describes a request to import a
+@@ -311,6 +316,10 @@ type DaemonHeartbeatPendingLocalSkills s
+ type DaemonHeartbeatPendingLocalSkillImport struct {
+ 	ID       string `json:"id"`
+ 	SkillKey string `json:"skill_key"`
++	// ProjectDirs lists absolute paths of project directories whose
++	// project-level skills the daemon should also scan when resolving
++	// SkillKey. May be empty or omitted by older backends.
++	ProjectDirs []string `json:"project_dirs,omitempty"`
+ }
+ 
+ // DaemonHeartbeatPendingMemoryScan describes a request to inventory the

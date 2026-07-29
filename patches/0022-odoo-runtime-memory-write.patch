@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/client.go
 ===================================================================
 --- multica.orig/server/internal/daemon/client.go
 +++ multica/server/internal/daemon/client.go
-@@ -625,6 +625,7 @@ type (
+@@ -631,6 +631,7 @@ type (
  	PendingLocalSkills      = protocol.DaemonHeartbeatPendingLocalSkills
  	PendingLocalSkillImport = protocol.DaemonHeartbeatPendingLocalSkillImport
  	PendingMemoryScan       = protocol.DaemonHeartbeatPendingMemoryScan
@@ -10,7 +10,7 @@ Index: multica/server/internal/daemon/client.go
  )
  
  func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*HeartbeatResponse, error) {
-@@ -664,6 +665,13 @@ func (c *Client) ReportMemoryScanResult(
+@@ -670,6 +671,13 @@ func (c *Client) ReportMemoryScanResult(
  	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/memories/%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
  }
  
@@ -28,7 +28,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -2682,6 +2682,11 @@ func (d *Daemon) handleHeartbeatActions(
+@@ -2854,6 +2854,11 @@ func (d *Daemon) handleHeartbeatActions(
  			go d.handleMemoryScan(ctx, *rt, *resp.PendingMemoryScan)
  		}
  	}
@@ -40,7 +40,7 @@ Index: multica/server/internal/daemon/daemon.go
  	// Prefer the batch field (new backend); fall back to singular (old backend).
  	if len(resp.PendingLocalSkillImports) > 0 {
  		if rt := d.findRuntime(runtimeID); rt != nil {
-@@ -2872,6 +2877,61 @@ func (d *Daemon) reportMemoryScanResult(
+@@ -3044,6 +3049,61 @@ func (d *Daemon) reportMemoryScanResult(
  	})
  }
  

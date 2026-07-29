@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -2674,7 +2674,7 @@ func (d *Daemon) handleHeartbeatActions(
+@@ -2846,7 +2846,7 @@ func (d *Daemon) handleHeartbeatActions(
  	}
  	if resp.PendingLocalSkills != nil {
  		if rt := d.findRuntime(runtimeID); rt != nil {
@@ -11,7 +11,7 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  	}
  	if resp.PendingMemoryScan != nil {
-@@ -2801,10 +2801,10 @@ func (d *Daemon) handleModelList(ctx con
+@@ -2973,10 +2973,10 @@ func (d *Daemon) handleModelList(ctx con
  	})
  }
  
@@ -24,7 +24,7 @@ Index: multica/server/internal/daemon/daemon.go
  	if err != nil {
  		d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
  			"status": "failed",
-@@ -2935,7 +2935,7 @@ func (d *Daemon) reportMemoryWriteResult
+@@ -3107,7 +3107,7 @@ func (d *Daemon) reportMemoryWriteResult
  func (d *Daemon) handleLocalSkillImport(ctx context.Context, rt Runtime, pending PendingLocalSkillImport) {
  	d.logger.Info("runtime local skill import requested", "runtime_id", rt.ID, "request_id", pending.ID, "provider", rt.Provider, "skill_key", pending.SkillKey)
  

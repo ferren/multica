@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -3848,6 +3848,21 @@ func (d *Daemon) reportTaskResult(ctx co
+@@ -4030,6 +4030,21 @@ func (d *Daemon) reportTaskResult(ctx co
  			taskLog.Error("fail task fallback also failed", "error", failErr)
  		}
  	default:
@@ -28,7 +28,7 @@ Index: multica/server/internal/daemon/daemon_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon_test.go
 +++ multica/server/internal/daemon/daemon_test.go
-@@ -3074,6 +3074,38 @@ func TestReportTaskResult_CancelledParen
+@@ -3466,6 +3466,38 @@ func TestReportTaskResult_CancelledParen
  	}
  }
  

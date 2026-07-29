@@ -989,7 +989,7 @@ Index: multica/server/internal/daemon/daemon.go
 +			registered++
 +			continue
 +		}
- 		resp, profileSig, err := d.registerRuntimesForWorkspace(ctx, id)
+ 		resp, profileSig, err := d.registerRuntimesForWorkspaceBatch(ctx, id, probeBuiltins())
  		if err != nil {
  			d.logger.Error("failed to register runtimes", "workspace_id", id, "name", name, "error", err)
 @@ -2394,13 +2574,14 @@ func (d *Daemon) handleHeartbeatActions(

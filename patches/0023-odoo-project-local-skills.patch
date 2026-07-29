@@ -11,7 +11,7 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  	}
  	if resp.PendingMemoryScan != nil {
-@@ -2796,10 +2796,10 @@ func (d *Daemon) handleModelList(ctx con
+@@ -2801,10 +2801,10 @@ func (d *Daemon) handleModelList(ctx con
  	})
  }
  
@@ -24,7 +24,7 @@ Index: multica/server/internal/daemon/daemon.go
  	if err != nil {
  		d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
  			"status": "failed",
-@@ -2875,7 +2875,7 @@ func (d *Daemon) reportMemoryScanResult(
+@@ -2935,7 +2935,7 @@ func (d *Daemon) reportMemoryWriteResult
  func (d *Daemon) handleLocalSkillImport(ctx context.Context, rt Runtime, pending PendingLocalSkillImport) {
  	d.logger.Info("runtime local skill import requested", "runtime_id", rt.ID, "request_id", pending.ID, "provider", rt.Provider, "skill_key", pending.SkillKey)
  
@@ -519,7 +519,7 @@ Index: multica/server/pkg/protocol/messages.go
 ===================================================================
 --- multica.orig/server/pkg/protocol/messages.go
 +++ multica/server/pkg/protocol/messages.go
-@@ -304,6 +304,11 @@ type DaemonHeartbeatPendingModelList str
+@@ -309,6 +309,11 @@ type DaemonHeartbeatPendingModelList str
  // local-skill inventory.
  type DaemonHeartbeatPendingLocalSkills struct {
  	ID string `json:"id"`
@@ -531,7 +531,7 @@ Index: multica/server/pkg/protocol/messages.go
  }
  
  // DaemonHeartbeatPendingLocalSkillImport describes a request to import a
-@@ -311,6 +316,10 @@ type DaemonHeartbeatPendingLocalSkills s
+@@ -316,6 +321,10 @@ type DaemonHeartbeatPendingLocalSkills s
  type DaemonHeartbeatPendingLocalSkillImport struct {
  	ID       string `json:"id"`
  	SkillKey string `json:"skill_key"`

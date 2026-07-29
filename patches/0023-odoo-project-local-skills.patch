@@ -11,20 +11,31 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  	}
  	if resp.PendingMemoryScan != nil {
-@@ -2973,10 +2973,10 @@ func (d *Daemon) handleModelList(ctx con
+@@ -2973,11 +2973,12 @@ func (d *Daemon) handleModelList(ctx con
  	})
  }
  
 -func (d *Daemon) handleLocalSkillList(ctx context.Context, rt Runtime, requestID string) {
+-	d.logger.Info("runtime local skills requested", "runtime_id", rt.ID, "request_id", requestID, "provider", rt.Provider)
 +func (d *Daemon) handleLocalSkillList(ctx context.Context, rt Runtime, requestID string, projectDirs []string) {
- 	d.logger.Info("runtime local skills requested", "runtime_id", rt.ID, "request_id", requestID, "provider", rt.Provider)
++	d.logger.Info("runtime local skills requested", "runtime_id", rt.ID, "request_id", requestID, "provider", rt.Provider, "project_dirs", len(projectDirs))
  
 -	skills, supported, err := listRuntimeLocalSkills(rt.Provider)
 +	skills, supported, err := listRuntimeLocalSkills(rt.Provider, projectDirs)
  	if err != nil {
++		d.logger.Error("runtime local skills scan failed", "runtime_id", rt.ID, "request_id", requestID, "error", err)
  		d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
  			"status": "failed",
-@@ -3107,7 +3107,7 @@ func (d *Daemon) reportMemoryWriteResult
+ 			"error":  err.Error(),
+@@ -2991,6 +2992,7 @@ func (d *Daemon) handleLocalSkillList(ct
+ 		mcpSupported = false
+ 	}
+ 
++	d.logger.Info("runtime local skills reporting", "runtime_id", rt.ID, "request_id", requestID, "count", len(skills), "supported", supported)
+ 	d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
+ 		"status":        "completed",
+ 		"skills":        skills,
+@@ -3107,7 +3109,7 @@ func (d *Daemon) reportMemoryWriteResult
  func (d *Daemon) handleLocalSkillImport(ctx context.Context, rt Runtime, pending PendingLocalSkillImport) {
  	d.logger.Info("runtime local skill import requested", "runtime_id", rt.ID, "request_id", pending.ID, "provider", rt.Provider, "skill_key", pending.SkillKey)
  
@@ -185,7 +196,30 @@ Index: multica/server/internal/daemon/local_skills.go
  	if err != nil || !supported {
  		return nil, supported, err
  	}
-@@ -510,8 +588,8 @@ func enumerateLocalSkills(
+@@ -486,11 +564,21 @@ func enumerateLocalSkills(
+ 				continue
+ 			}
+ 
++			// source_path is matched against local_directory.local_path on the
++			// Odoo side for project-level skills (root="project"). Odoo stores
++			// local_path as an absolute path, so project-level source_path must
++			// also be absolute — a ~-relative path from relativizeHomePath would
++			// never prefix-match an absolute local_path.
++			sourcePath := relativizeHomePath(path)
++			if root.kind == localSkillRootProject {
++				sourcePath = filepath.ToSlash(path)
++			}
++
+ 			*skills = append(*skills, runtimeLocalSkillSummary{
+ 				Key:         key,
+ 				Name:        skillName,
+ 				Description: description,
+-				SourcePath:  relativizeHomePath(path),
++				SourcePath:  sourcePath,
+ 				Provider:    provider,
+ 				Root:        root.kind,
+ 				Plugin:      root.plugin,
+@@ -510,8 +598,8 @@ func enumerateLocalSkills(
  	}
  }
  

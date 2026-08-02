@@ -7,7 +7,6 @@
 0007-odoo-cli-galaxy-auth.patch
 0008-squad-child-issue-assignee-rule.patch
 0009-odoo-blog-cli.patch
-0010-odoo-blog-skill.patch
 0011-odoo-local-directory-workspaces-root-guard.patch
 0012-odoo-enable-gc.patch
 0013-odoo-claim-preinject-context.patch

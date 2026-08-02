@@ -23,7 +23,7 @@ Index: multica/server/internal/daemon/config.go
 ===================================================================
 --- multica.orig/server/internal/daemon/config.go
 +++ multica/server/internal/daemon/config.go
-@@ -119,6 +119,8 @@ type Config struct {
+@@ -118,6 +118,8 @@ type Config struct {
  	QwenArgs                       []string
  	BackendMode                    string // "multica" (default) or "odoo"
  	DBName                         string // Odoo database name (only used in odoo backend mode)
@@ -32,7 +32,7 @@ Index: multica/server/internal/daemon/config.go
  
  	// ProfileCommandOverrides maps a custom runtime profile_id -> the absolute
  	// executable path to use for that profile on THIS machine (MUL-3284).
-@@ -195,10 +197,12 @@ func LoadConfig(overrides Overrides) (Co
+@@ -194,10 +196,12 @@ func LoadConfig(overrides Overrides) (Co
  	// purely from env-var configuration. We log a warning and proceed with
  	// no overrides.
  	var profileCommandOverrides map[string]string
@@ -46,7 +46,7 @@ Index: multica/server/internal/daemon/config.go
  		if oc := openclawOverrideFrom(cliCfg); oc != nil {
  			applyOpenclawOverride(oc)
  		}
-@@ -507,11 +511,17 @@ func LoadConfig(overrides Overrides) (Co
+@@ -375,11 +379,17 @@ func LoadConfig(overrides Overrides) (Co
  		return Config{}, err
  	}
  
@@ -69,7 +69,7 @@ Index: multica/server/internal/daemon/config.go
  
  	// Health port: override > default
  	healthPort := DefaultHealthPort
-@@ -618,6 +628,8 @@ func LoadConfig(overrides Overrides) (Co
+@@ -486,6 +496,8 @@ func LoadConfig(overrides Overrides) (Co
  		QwenArgs:                       qwenArgs,
  		BackendMode:                    backendMode,
  		DBName:                         dbName,
@@ -82,7 +82,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -1181,10 +1181,10 @@ func (d *Daemon) resolveAuth() error {
+@@ -1330,10 +1330,10 @@ func (d *Daemon) resolveAuth() error {
  // resolveOdooAuth calls /openapi/token with MULTICA_APP_ID + MULTICA_APP_SECRET
  // to obtain access_token and api_key for Odoo OpenAPI auth.
  func (d *Daemon) resolveOdooAuth() error {
@@ -96,7 +96,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
  	defer cancel()
-@@ -1192,7 +1192,7 @@ func (d *Daemon) resolveOdooAuth() error
+@@ -1341,7 +1341,7 @@ func (d *Daemon) resolveOdooAuth() error
  		return fmt.Errorf("fetch odoo token: %w", err)
  	}
  	accessToken, _ := d.client.OdooCredentials()
@@ -105,7 +105,7 @@ Index: multica/server/internal/daemon/daemon.go
  	_ = accessToken
  
  	// Set up on-error callback to refresh token on 401
-@@ -1265,31 +1265,57 @@ func (d *Daemon) connectDaemon(ctx conte
+@@ -1414,31 +1414,57 @@ func (d *Daemon) connectDaemon(ctx conte
  	return nil
  }
  
@@ -203,7 +203,7 @@ Index: multica/server/internal/daemon/daemon_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon_test.go
 +++ multica/server/internal/daemon/daemon_test.go
-@@ -44,6 +44,89 @@ func createDaemonTestRepo(t *testing.T)
+@@ -45,6 +45,89 @@ func createDaemonTestRepo(t *testing.T)
  	return dir
  }
  

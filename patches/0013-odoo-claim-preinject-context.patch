@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -4688,6 +4688,9 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -5072,6 +5072,9 @@ func (d *Daemon) runTask(ctx context.Con
  		CommentReplyTargets: commentReplyThreads(task),
  		NewCommentCount:     task.NewCommentCount,
  		NewCommentsSince:    task.NewCommentsSince,
@@ -12,7 +12,7 @@ Index: multica/server/internal/daemon/daemon.go
  		PriorSessionResumed: task.PriorSessionID != "",
  		// MUL-5305: the server sets this when a more recent Codex session was
  		// withheld (rollout missing) and PriorSessionID is an older fallback (or
-@@ -6192,6 +6195,29 @@ func convertProjectResourcesForEnv(resou
+@@ -6625,6 +6628,29 @@ func convertProjectResourcesForEnv(resou
  		}
  	}
  	return result
@@ -46,7 +46,7 @@ Index: multica/server/internal/daemon/execenv/context.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/context.go
 +++ multica/server/internal/daemon/execenv/context.go
-@@ -695,7 +695,13 @@ func renderIssueContext(provider string,
+@@ -1006,7 +1006,13 @@ func renderIssueContext(provider string,
  	}
  
  	b.WriteString("## Quick Start\n\n")
@@ -59,8 +59,8 @@ Index: multica/server/internal/daemon/execenv/context.go
 +	b.WriteString("Your runtime brief's `## Issue Context` section already carries the issue body, metadata, and recent comments when the backend pre-injected them — read that first.\n\n")
 +	fmt.Fprintf(&b, "Run `multica issue get %s --output json` only when you need the authoritative full record.\n\n", ctx.IssueID)
  
- 	skills := modelVisibleSkills(ctx.AgentSkills)
- 	if len(skills) > 0 {
+ 	return b.String()
+ }
 Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
@@ -108,77 +108,10 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv_test.go
 +++ multica/server/internal/daemon/execenv/execenv_test.go
-@@ -4800,10 +4800,16 @@ func TestInjectRuntimeConfigBriefOmitsRe
+@@ -4872,6 +4872,158 @@ func TestSanitizeEmailForBrief(t *testin
  	}
  }
  
--// TestInjectRuntimeConfigAssignmentTriggerMentionsRecent pins that the
--// assignment-triggered Workflow keeps comment catch-up mandatory while bounding
--// the mandatory first read to the recent active-thread window. Older context
--// stays reachable through explicit pagination.
-+// TestInjectRuntimeConfigAssignmentTriggerMentionsRecent pins that an
-+// assignment-triggered brief still tells the agent how to acquire comment
-+// context — now via the `## Issue Context` section (方案B, TASK-1-17-1):
-+// pre-injected recent comments when the backend provides them, and an explicit
-+// `multica issue comment list --recent 10` fallback when it does not. The old
-+// numbered "catch up on comments — this is mandatory, not optional" serial
-+// workflow step was removed because the serial framing cancelled
-+// pre-injection's turn-0 gain; pagination flags stay documented in Available
-+// Commands (the global discovery point) instead of being repeated in the
-+// workflow.
- func TestInjectRuntimeConfigAssignmentTriggerMentionsRecent(t *testing.T) {
- 	t.Parallel()
- 
-@@ -4817,25 +4823,26 @@ func TestInjectRuntimeConfigAssignmentTr
- 	}
- 	s := string(data)
- 
--	// Mandatory comment catch-up must stay, but the required first read is
--	// bounded to recent active threads instead of the full flat timeline.
-+	// Empty-injection (old backend / bare issue) → the Issue Context fallback
-+	// must still point the agent at the recent-comment CLI, bounded to the
-+	// recent active window rather than a full flat dump.
- 	for _, want := range []string{
-+		"## Issue Context",
- 		"multica issue comment list issue-1 --recent 10 --output json",
--		"this is mandatory, not optional",
--		"Skipping this step is the most common cause",
- 	} {
- 		if !strings.Contains(s, want) {
--			t.Errorf("assignment Workflow regressed mandatory recent-first catch-up, missing %q\n---\n%s", want, s)
-+			t.Errorf("assignment brief missing %q\n---\n%s", want, s)
- 		}
- 	}
--	// Older context must remain reachable through pagination.
-+	// Pagination flags remain documented in Available Commands even though the
-+	// workflow no longer repeats them.
- 	for _, want := range []string{
--		"Next thread cursor:",
-+		"Next thread cursor",
- 		"--before",
- 		"--before-id",
- 	} {
- 		if !strings.Contains(s, want) {
--			t.Errorf("assignment Workflow missing older-history pagination guidance %q\n---\n%s", want, s)
-+			t.Errorf("assignment brief missing pagination guidance %q\n---\n%s", want, s)
- 		}
- 	}
- 	for _, banned := range []string{
-@@ -4856,6 +4863,167 @@ func TestInjectRuntimeConfigAssignmentTr
- 			t.Errorf("assignment Workflow regressed to replacement-style --recent phrasing %q\n---\n%s", banned, s)
- 		}
- 	}
-+	// The removed mandatory-serial catch-up phrasing must not regress.
-+	for _, banned := range []string{
-+		"this is mandatory, not optional",
-+		"Skipping this step is the most common cause",
-+	} {
-+		if strings.Contains(s, banned) {
-+			t.Errorf("assignment Workflow regressed to mandatory-serial catch-up phrasing %q\n---\n%s", banned, s)
-+		}
-+	}
-+}
-+
 +// readFilename is a small helper for brief-render tests that write into a
 +// temp dir under both CLAUDE.md and AGENTS.md depending on provider/kind.
 +func readFilename(t *testing.T, dir, name string) string {
@@ -263,7 +196,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
 +			"No context was pre-injected by this backend",
 +			"multica issue get issue-bare --output json",
 +			"multica issue metadata list issue-bare --output json",
-+			"multica issue comment list issue-bare --recent 10 --output json",
++			"multica issue comment list issue-bare --roots-only --summary --output json",
 +		} {
 +			if !strings.Contains(s, want) {
 +				t.Errorf("bare assignment brief missing fallback %q\n---\n%s", want, s)
@@ -329,14 +262,16 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
 +			})
 +		}
 +	})
- }
- 
- // TestInjectRuntimeConfigIssueMetadataSectionScope locks in MUL-2017:
++}
++
+ // The brief carries the static catch-up read and the CLI flag discovery
+ // point; the per-run thread routing lives in the per-turn prompt (MUL-5377).
+ func TestInjectRuntimeConfigBriefKeepsStaticCatchUpRead(t *testing.T) {
 Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config_sections.go
 +++ multica/server/internal/daemon/execenv/runtime_config_sections.go
-@@ -442,6 +442,97 @@ func writeWorkflowAutopilot(b *strings.B
+@@ -455,6 +455,97 @@ func writeWorkflowAutopilot(b *strings.B
  	b.WriteString("- Do not run `multica issue get`, `multica issue comment add`, or `multica issue status` for this run unless the autopilot instructions explicitly tell you to create or update an issue\n\n")
  }
  
@@ -400,7 +335,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 +	fmt.Fprintf(b, "No context was pre-injected by this backend. Fetch it directly:\n")
 +	fmt.Fprintf(b, "- `multica issue get %s --output json` for the issue body\n", ctx.IssueID)
 +	fmt.Fprintf(b, "- `multica issue metadata list %s --output json` — best-effort, empty `{}` and CLI failures are normal. See the `## Issue Metadata` section above for what to look for.\n", ctx.IssueID)
-+	fmt.Fprintf(b, "- `multica issue comment list %s --recent 10 --output json` for the recent discussion; page older threads with `--thread`/`--tail`/`--since` (resolved threads come back folded — `--full` to expand).\n\n", ctx.IssueID)
++	fmt.Fprintf(b, "- `multica issue comment list %s --roots-only --summary --output json` to scan every thread cheaply, then `multica issue comment list %s --thread <thread-id> --tail 30 --output json` to expand the threads that matter (resolved threads come back folded — `--full` to expand).\n\n", ctx.IssueID, ctx.IssueID)
 +}
 +
 +// writeRecentCommentBlock renders one pre-injected comment as a labelled
@@ -434,20 +369,20 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
  // writeWorkflowIssue emits the single issue workflow used by BOTH
  // assignment-triggered and comment-triggered runs.
  //
-@@ -476,9 +567,9 @@ func writeWorkflowIssue(b *strings.Build
+@@ -505,9 +596,9 @@ func writeWorkflowIssue(b *strings.Build
  	b.WriteString("Steps 1–6 below are the same in both modes. The mode blocks after them differ, and they differ on issue status in particular — **apply exactly one mode block, the one the user message named. Never apply both.** If neither line is present, treat the turn as Reply mode and do not change the issue status.\n\n")
  
  	b.WriteString("**Steps 1–6 — both modes**\n\n")
 -	fmt.Fprintf(b, "1. Run `multica issue get %s --output json` to understand the issue context\n", ctx.IssueID)
 -	fmt.Fprintf(b, "2. Run `multica issue metadata list %s --output json` to see what prior agents pinned — best-effort, empty `{}` and CLI failures are normal. See the `## Issue Metadata` section above for what to look for.\n", ctx.IssueID)
--	fmt.Fprintf(b, "3. Run `multica issue comment list %s --recent 10 --output json` to catch up on recent active comment threads — this is mandatory, not optional. Earlier comments often carry context the issue body lacks (e.g. which repo to work in, the prior agent's findings, the reason the issue was reassigned to you). Skipping this step is the most common cause of agents acting on stale or incomplete instructions. Resolved threads come back folded — `--full` to expand. If the recent window shows that older context is needed, page older threads with the stderr `Next thread cursor:` values and the matching `--before` / `--before-id` flags until you have enough history. In Reply mode the per-turn user message also tells you which thread to start from.\n", ctx.IssueID)
+-	fmt.Fprintf(b, "3. Catch up on the comment history — this is mandatory, not optional, but read it in two bounded steps instead of one bulk pull. First scan every thread cheaply: `multica issue comment list %s --roots-only --summary --output json`, which tells you what discussion exists without paying for its contents. Then expand only the threads that matter: `multica issue comment list %s --thread <thread-id> --tail 30 --output json`. Earlier comments often carry context the issue body lacks (e.g. which repo to work in, the prior agent's findings, the reason the issue was reassigned to you). Skipping this step is the most common cause of agents acting on stale or incomplete instructions — so always run the scan, even when the trigger looks self-contained. In Reply mode the per-turn user message names the thread to expand first; the scan is how you decide whether any OTHER thread is also relevant. If these two reads genuinely are not enough, the rest of the read surface and its pagination cursors are documented once in `## Available Commands` above.\n", ctx.IssueID, ctx.IssueID)
 +	fmt.Fprintf(b, "1. Read the `## Issue Context` section above for the issue body (pre-injected by the backend when available); if it says nothing was pre-injected, run `multica issue get %s --output json` instead.\n", ctx.IssueID)
 +	fmt.Fprintf(b, "2. Read the `## Issue Context` section above for pinned metadata (pre-injected); if it says nothing was pre-injected, run `multica issue metadata list %s --output json` — best-effort, empty `{}` and CLI failures are normal. See the `## Issue Metadata` section above for what to look for.\n", ctx.IssueID)
-+	fmt.Fprintf(b, "3. Read the `## Issue Context` section above for recently active comment threads (pre-injected); if it says nothing was pre-injected, run `multica issue comment list %s --recent 10 --output json` for the recent discussion — earlier comments often carry context the issue body lacks (e.g. which repo to work in, the prior agent's findings, the reason the issue was reassigned to you). In Reply mode the per-turn user message also tells you which thread to start from.\n", ctx.IssueID)
++	fmt.Fprintf(b, "3. Catch up on the comment history — this is mandatory, not optional. If the `## Issue Context` section above pre-injected recently active comments, treat those as covering the threads they list. Either way, still scan for threads that fall outside that capped window: `multica issue comment list %s --roots-only --summary --output json`, which tells you what discussion exists without paying for its contents. Then expand only the threads that matter: `multica issue comment list %s --thread <thread-id> --tail 30 --output json`. Earlier comments often carry context the issue body lacks (e.g. which repo to work in, the prior agent's findings, the reason the issue was reassigned to you). Skipping this step is the most common cause of agents acting on stale or incomplete instructions — so always run the scan, even when the trigger looks self-contained. In Reply mode the per-turn user message names the thread to expand first; the scan is how you decide whether any OTHER thread is also relevant. If these two reads genuinely are not enough, the rest of the read surface and its pagination cursors are documented once in `## Available Commands` above.\n", ctx.IssueID, ctx.IssueID)
  	b.WriteString("4. Complete the task within your Agent Identity boundaries. Do not investigate, implement, create issues, update issues, or delegate if your Agent Identity forbids that action; if your role is delegation-only, perform the allowed delegation work and stop once that outcome is delivered.\n")
  	if ctx.IsSquadLeader {
  		fmt.Fprintf(b, "5. **Post your final results as a comment** (unless your outcome is `no_action` — in that case, calling `multica squad activity %s no_action --reason \"...\"` alone is sufficient; you MUST exit without posting any comment. DO NOT post a comment announcing no_action or saying you are exiting silently): post it with `multica issue comment add %s` using the platform-correct non-inline mode from ## Comment Formatting (never inline `--content`). Your results are only visible to the user if posted via this CLI call; text in your terminal or run logs is NOT delivered.\n", ctx.IssueID, ctx.IssueID)
-@@ -714,6 +805,15 @@ func buildMetaSkillContentSlim(provider
+@@ -753,6 +844,15 @@ func buildMetaSkillContentSlim(provider
  		writeInstructionPrecedence(&b)
  	}
  

@@ -20,10 +20,10 @@ Index: multica/server/internal/cli/client.go
  	}
  	return c
  }
-@@ -181,7 +185,20 @@ func (c *APIClient) url(path string) str
- }
+@@ -197,7 +201,20 @@ const clientCapabilities = "stable_attac
  
  func (c *APIClient) setHeaders(req *http.Request) {
+ 	req.Header.Set("X-Client-Capabilities", clientCapabilities)
 -	if c.Token != "" {
 +	if c.OdooBackend {
 +		// Odoo's auth='openapi' (_auth_method_openapi) requires these two
@@ -46,7 +46,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -5001,16 +5001,18 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -5385,16 +5385,18 @@ func (d *Daemon) runTask(ctx context.Con
  	// as the runtime owner's member actor and can retrigger the same agent.
  	var agentToken string
  	if d.cfg.BackendMode == "odoo" {
@@ -75,7 +75,7 @@ Index: multica/server/internal/daemon/daemon.go
  	} else {
  		tok, err := taskScopedAuthToken(task)
  		if err != nil {
-@@ -5039,6 +5041,12 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -5423,6 +5425,12 @@ func (d *Daemon) runTask(ctx context.Con
  		// Signals the agent CLI to skip the task-scoped mat_ token requirement
  		// (Odoo auths via Galaxy headers, see newAPIClient / runtime brief).
  		agentEnv["MULTICA_BACKEND_MODE"] = "odoo"

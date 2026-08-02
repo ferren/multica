@@ -5,7 +5,7 @@ Index: multica/server/internal/service/builtin_skills/multica-publishing-blog/SK
 @@ -0,0 +1,104 @@
 +---
 +name: multica-publishing-blog
-+description: "Use when the user asks to turn content into a published technical document or blog post — e.g. 'write this up as a technical doc', 'publish this to the blog', 'post this as an article', '把这个写成技术文档/发到博客'. Backed by the `multica blog` CLI talking to the inair_website_blog API (Odoo, auth='openapi'). Publishes Markdown as a DRAFT into the agent-dedicated blog by default; a human reviews and publishes it. Covers publish / list / get / update, the draft-by-default contract, the agent-dedicated blog, zero-config X-GALAXY auth, and how a missing install or missing permission surfaces. Do NOT pass --publish unless the user explicitly asks to publish now. Traced to server/cmd/multica/cmd_blog.go and inair_website_blog/controllers/blog_api.py."
++description: "Use when the user asks to turn content into a published doc or blog post — e.g. 'write this up as a doc', 'publish this to the blog', '把这个发到博客'. Backed by the `multica blog` CLI (Odoo inair_website_blog API). Publishes as a DRAFT by default; do NOT pass --publish unless asked."
 +user-invocable: false
 +allowed-tools: Bash(multica *)
 +---

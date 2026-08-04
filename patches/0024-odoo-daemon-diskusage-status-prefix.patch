@@ -1,0 +1,19 @@
+Index: multica/server/cmd/multica/cmd_daemon.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_daemon.go
++++ multica/server/cmd/multica/cmd_daemon.go
+@@ -1457,6 +1457,14 @@ func newParentStatusFetcher(cmd *cobra.C
+ 
+ 	client := daemon.NewClient(baseURL)
+ 	client.SetToken(cfg.Token)
++	// Odoo mode serves daemon endpoints under /multica, not native's /api
++	// (see daemon.NewDaemon's own client setup); this ad hoc client is built
++	// straight from CLI config instead of daemon.Config, so it needs the same
++	// rewrite applied explicitly or every gc-check call 404s and the STATUS
++	// column silently stays blank.
++	if strings.EqualFold(cfg.BackendMode, "odoo") {
++		client.SetPathPrefix("/multica")
++	}
+ 	return func(ctx context.Context, workspaceID string, issueIDs []string) (map[string]string, error) {
+ 		results, err := client.GetIssueGCChecks(ctx, workspaceID, issueIDs)
+ 		if err != nil {

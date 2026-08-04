@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -5072,6 +5072,9 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -5112,6 +5112,9 @@ func (d *Daemon) runTask(ctx context.Con
  		CommentReplyTargets: commentReplyThreads(task),
  		NewCommentCount:     task.NewCommentCount,
  		NewCommentsSince:    task.NewCommentsSince,
@@ -12,7 +12,7 @@ Index: multica/server/internal/daemon/daemon.go
  		PriorSessionResumed: task.PriorSessionID != "",
  		// MUL-5305: the server sets this when a more recent Codex session was
  		// withheld (rollout missing) and PriorSessionID is an older fallback (or
-@@ -6625,6 +6628,29 @@ func convertProjectResourcesForEnv(resou
+@@ -6665,6 +6668,29 @@ func convertProjectResourcesForEnv(resou
  		}
  	}
  	return result
@@ -108,7 +108,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv_test.go
 +++ multica/server/internal/daemon/execenv/execenv_test.go
-@@ -4872,6 +4872,158 @@ func TestSanitizeEmailForBrief(t *testin
+@@ -5351,6 +5351,158 @@ func TestSanitizeEmailForBrief(t *testin
  	}
  }
  
@@ -271,7 +271,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config_sections.go
 +++ multica/server/internal/daemon/execenv/runtime_config_sections.go
-@@ -455,6 +455,97 @@ func writeWorkflowAutopilot(b *strings.B
+@@ -475,6 +475,97 @@ func writeWorkflowAutopilot(b *strings.B
  	b.WriteString("- Do not run `multica issue get`, `multica issue comment add`, or `multica issue status` for this run unless the autopilot instructions explicitly tell you to create or update an issue\n\n")
  }
  
@@ -369,20 +369,20 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
  // writeWorkflowIssue emits the single issue workflow used by BOTH
  // assignment-triggered and comment-triggered runs.
  //
-@@ -505,9 +596,9 @@ func writeWorkflowIssue(b *strings.Build
+@@ -525,9 +616,9 @@ func writeWorkflowIssue(b *strings.Build
  	b.WriteString("Steps 1–6 below are the same in both modes. The mode blocks after them differ, and they differ on issue status in particular — **apply exactly one mode block, the one the user message named. Never apply both.** If neither line is present, treat the turn as Reply mode and do not change the issue status.\n\n")
  
  	b.WriteString("**Steps 1–6 — both modes**\n\n")
 -	fmt.Fprintf(b, "1. Run `multica issue get %s --output json` to understand the issue context\n", ctx.IssueID)
--	fmt.Fprintf(b, "2. Run `multica issue metadata list %s --output json` to see what prior agents pinned — best-effort, empty `{}` and CLI failures are normal. See the `## Issue Metadata` section above for what to look for.\n", ctx.IssueID)
--	fmt.Fprintf(b, "3. Catch up on the comment history — this is mandatory, not optional, but read it in two bounded steps instead of one bulk pull. First scan every thread cheaply: `multica issue comment list %s --roots-only --summary --output json`, which tells you what discussion exists without paying for its contents. Then expand only the threads that matter: `multica issue comment list %s --thread <thread-id> --tail 30 --output json`. Earlier comments often carry context the issue body lacks (e.g. which repo to work in, the prior agent's findings, the reason the issue was reassigned to you). Skipping this step is the most common cause of agents acting on stale or incomplete instructions — so always run the scan, even when the trigger looks self-contained. In Reply mode the per-turn user message names the thread to expand first; the scan is how you decide whether any OTHER thread is also relevant. If these two reads genuinely are not enough, the rest of the read surface and its pagination cursors are documented once in `## Available Commands` above.\n", ctx.IssueID, ctx.IssueID)
+-	fmt.Fprintf(b, "2. Run `multica issue metadata list %s --output json` to see what prior agents pinned — best-effort, empty `{}` and CLI failures are normal. What to look for: `## Issue Metadata`.\n", ctx.IssueID)
+-	fmt.Fprintf(b, "3. Catch up on the comment history — this is mandatory, not optional — in two bounded reads, never one bulk pull. Scan every thread cheaply with `multica issue comment list %s --roots-only --summary --output json`, then expand only the threads that matter with `multica issue comment list %s --thread <thread-id> --tail 30 --output json`. Earlier comments often carry context the issue body lacks (e.g. which repo to work in, the prior agent's findings, the reason the issue was reassigned to you). Skipping this step is the most common cause of agents acting on stale or incomplete instructions — so always run the scan, even when the trigger looks self-contained. In Reply mode the per-turn user message names the thread to expand first; the scan is how you decide whether any OTHER thread is also relevant. Flag semantics and pagination: `## Available Commands`.\n", ctx.IssueID, ctx.IssueID)
 +	fmt.Fprintf(b, "1. Read the `## Issue Context` section above for the issue body (pre-injected by the backend when available); if it says nothing was pre-injected, run `multica issue get %s --output json` instead.\n", ctx.IssueID)
-+	fmt.Fprintf(b, "2. Read the `## Issue Context` section above for pinned metadata (pre-injected); if it says nothing was pre-injected, run `multica issue metadata list %s --output json` — best-effort, empty `{}` and CLI failures are normal. See the `## Issue Metadata` section above for what to look for.\n", ctx.IssueID)
-+	fmt.Fprintf(b, "3. Catch up on the comment history — this is mandatory, not optional. If the `## Issue Context` section above pre-injected recently active comments, treat those as covering the threads they list. Either way, still scan for threads that fall outside that capped window: `multica issue comment list %s --roots-only --summary --output json`, which tells you what discussion exists without paying for its contents. Then expand only the threads that matter: `multica issue comment list %s --thread <thread-id> --tail 30 --output json`. Earlier comments often carry context the issue body lacks (e.g. which repo to work in, the prior agent's findings, the reason the issue was reassigned to you). Skipping this step is the most common cause of agents acting on stale or incomplete instructions — so always run the scan, even when the trigger looks self-contained. In Reply mode the per-turn user message names the thread to expand first; the scan is how you decide whether any OTHER thread is also relevant. If these two reads genuinely are not enough, the rest of the read surface and its pagination cursors are documented once in `## Available Commands` above.\n", ctx.IssueID, ctx.IssueID)
- 	b.WriteString("4. Complete the task within your Agent Identity boundaries. Do not investigate, implement, create issues, update issues, or delegate if your Agent Identity forbids that action; if your role is delegation-only, perform the allowed delegation work and stop once that outcome is delivered.\n")
++	fmt.Fprintf(b, "2. Read the `## Issue Context` section above for pinned metadata (pre-injected); if it says nothing was pre-injected, run `multica issue metadata list %s --output json` — best-effort, empty `{}` and CLI failures are normal. What to look for: `## Issue Metadata`.\n", ctx.IssueID)
++	fmt.Fprintf(b, "3. Catch up on the comment history — this is mandatory, not optional. If the `## Issue Context` section above pre-injected recently active comments, treat those as covering the threads they list. Either way, still scan for threads that fall outside that capped window — in two bounded reads, never one bulk pull. Scan every thread cheaply with `multica issue comment list %s --roots-only --summary --output json`, then expand only the threads that matter with `multica issue comment list %s --thread <thread-id> --tail 30 --output json`. Earlier comments often carry context the issue body lacks (e.g. which repo to work in, the prior agent's findings, the reason the issue was reassigned to you). Skipping this step is the most common cause of agents acting on stale or incomplete instructions — so always run the scan, even when the trigger looks self-contained. In Reply mode the per-turn user message names the thread to expand first; the scan is how you decide whether any OTHER thread is also relevant. Flag semantics and pagination: `## Available Commands`.\n", ctx.IssueID, ctx.IssueID)
+ 	b.WriteString("4. Complete the task within your Agent Identity boundaries (`## Instruction Precedence` lists the actions Agent Identity can forbid). If your role is delegation-only, perform the allowed delegation work and stop once that outcome is delivered.\n")
  	if ctx.IsSquadLeader {
  		fmt.Fprintf(b, "5. **Post your final results as a comment** (unless your outcome is `no_action` — in that case, calling `multica squad activity %s no_action --reason \"...\"` alone is sufficient; you MUST exit without posting any comment. DO NOT post a comment announcing no_action or saying you are exiting silently): post it with `multica issue comment add %s` using the platform-correct non-inline mode from ## Comment Formatting (never inline `--content`). Your results are only visible to the user if posted via this CLI call; text in your terminal or run logs is NOT delivered.\n", ctx.IssueID, ctx.IssueID)
-@@ -753,6 +844,15 @@ func buildMetaSkillContentSlim(provider
+@@ -773,6 +864,15 @@ func buildMetaSkillContentSlim(provider
  		writeInstructionPrecedence(&b)
  	}
  

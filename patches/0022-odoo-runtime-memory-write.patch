@@ -28,7 +28,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -3063,6 +3063,11 @@ func (d *Daemon) handleHeartbeatActions(
+@@ -3103,6 +3103,11 @@ func (d *Daemon) handleHeartbeatActions(
  			go d.handleMemoryScan(ctx, *rt, *resp.PendingMemoryScan)
  		}
  	}
@@ -40,7 +40,7 @@ Index: multica/server/internal/daemon/daemon.go
  	// Prefer the batch field (new backend); fall back to singular (old backend).
  	if len(resp.PendingLocalSkillImports) > 0 {
  		if rt := d.findRuntime(runtimeID); rt != nil {
-@@ -3354,6 +3359,61 @@ func (d *Daemon) reportMemoryScanResult(
+@@ -3394,6 +3399,61 @@ func (d *Daemon) reportMemoryScanResult(
  	})
  }
  

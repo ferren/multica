@@ -1,0 +1,217 @@
+Index: multica/server/internal/daemon/daemon.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -7010,6 +7010,7 @@ func convertSkillsForEnv(skills []SkillD
+ 			Name:        s.Name,
+ 			Description: s.Description,
+ 			Content:     s.Content,
++			SourcePath:  s.SourcePath,
+ 		}
+ 		for _, f := range s.Files {
+ 			result[i].Files = append(result[i].Files, execenv.SkillFileContextForEnv{
+Index: multica/server/internal/daemon/execenv/context.go
+===================================================================
+--- multica.orig/server/internal/daemon/execenv/context.go
++++ multica/server/internal/daemon/execenv/context.go
+@@ -4,6 +4,7 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"log/slog"
+ 	"os"
+ 	"path/filepath"
+ 	"regexp"
+@@ -179,7 +180,13 @@ func writeContextFiles(workDir, provider
+ 			}
+ 			// Codex skills are written to codex-home in Prepare; skip here.
+ 			if provider != "codex" {
+-				if err := writeSkillFiles(skillsDir, ctx.AgentSkills, manifest); err != nil {
++				// Drop skills whose source_path points at an existing local
++				// skill directory the provider already discovers (Odoo sets
++				// source_path for skills imported from this runtime's local
++				// roots). Writing them again into the workdir would duplicate
++				// the user's own copy. See skipLocallyPresentSkills.
++				materialized := skipLocallyPresentSkills(ctx.AgentSkills)
++				if err := writeSkillFiles(skillsDir, materialized, manifest); err != nil {
+ 					return fmt.Errorf("write skill files: %w", err)
+ 				}
+ 			}
+@@ -914,6 +921,63 @@ func sanitizeSkillName(name string) stri
+ // overwrite user bytes (the bug PR #3444 review caught) or skip the
+ // skill entirely (which would silently drop a Multica skill the agent
+ // expects to see).
++// skipLocallyPresentSkills returns skills minus those whose SourcePath resolves
++// to an existing directory on this machine.
++//
++// The Odoo backend attaches SourcePath (the home-relative path the daemon
++// reported when it first scanned the skill from a local root) to skills that
++// were imported from this runtime's own ~/.claude/skills (or equivalent). When
++// such a skill is shipped back on claim, materializing it into the workdir's
++// skills directory would duplicate the user's local copy — and the provider
++// (Claude Code discovers both ~/.claude/skills and the workdir) already finds
++// the local one. Skipping the rewrite avoids the duplicate and the wasted IO.
++//
++// A skill is only skipped when its SourcePath is non-empty AND resolves to an
++// existing directory; anything else (empty path, deleted local copy, IO error)
++// falls through to normal materialization so the agent never loses a skill.
++func skipLocallyPresentSkills(skills []SkillContextForEnv) []SkillContextForEnv {
++	if len(skills) == 0 {
++		return skills
++	}
++	kept := make([]SkillContextForEnv, 0, len(skills))
++	skipped := 0
++	for _, s := range skills {
++		if s.SourcePath != "" && dirExists(expandHome(s.SourcePath)) {
++			skipped++
++			continue
++		}
++		kept = append(kept, s)
++	}
++	if skipped > 0 {
++		slog.Debug("skipped locally-present skills during materialization",
++			"skipped", skipped, "kept", len(kept))
++	}
++	return kept
++}
++
++// expandHome expands a leading ~ or ~/ to the user's home directory, mirroring
++// the inverse of daemon.relativizeHomePath (which is how source_path was
++// produced). Non-tilde paths are returned unchanged.
++func expandHome(p string) string {
++	if p == "~" {
++		if home, err := os.UserHomeDir(); err == nil {
++			return home
++		}
++		return p
++	}
++	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, "~\\") {
++		if home, err := os.UserHomeDir(); err == nil {
++			return filepath.Join(home, p[2:])
++		}
++	}
++	return p
++}
++
++func dirExists(p string) bool {
++	info, err := os.Stat(p)
++	return err == nil && info.IsDir()
++}
++
+ func writeSkillFiles(skillsDir string, skills []SkillContextForEnv, manifest *sidecarManifest) error {
+ 	if err := recordMkdirAll(skillsDir, 0o755, manifest); err != nil {
+ 		return fmt.Errorf("create skills dir: %w", err)
+Index: multica/server/internal/daemon/execenv/execenv.go
+===================================================================
+--- multica.orig/server/internal/daemon/execenv/execenv.go
++++ multica/server/internal/daemon/execenv/execenv.go
+@@ -208,6 +208,11 @@ type SkillContextForEnv struct {
+ 	Description string
+ 	Content     string
+ 	Files       []SkillFileContextForEnv
++	// SourcePath, when non-empty and pointing at an existing local skill
++	// directory, lets materialization skip writing this skill (see
++	// skipLocallyPresentSkills): the provider already discovers the user's own
++	// copy at this path, so writing it again into the workdir would duplicate.
++	SourcePath string
+ }
+ 
+ // SkillFileContextForEnv represents a supporting file within a skill.
+Index: multica/server/internal/daemon/types.go
+===================================================================
+--- multica.orig/server/internal/daemon/types.go
++++ multica/server/internal/daemon/types.go
+@@ -222,6 +222,13 @@ type SkillData struct {
+ 	SizeBytes   int64           `json:"size_bytes,omitempty"`
+ 	Content     string          `json:"content"`
+ 	Files       []SkillFileData `json:"files,omitempty"`
++	// SourcePath is the absolute (home-relative ~/-quoted) directory on this
++	// daemon where the skill's content already lives as a user-discovered local
++	// skill — set by the Odoo backend for skills imported from this runtime's
++	// local roots. When it resolves to an existing directory, materialization
++	// skips rewriting the skill into the workdir (the provider already discovers
++	// the local copy), avoiding a duplicate. Native Multica never sets it.
++	SourcePath string `json:"source_path,omitempty"`
+ }
+ 
+ // SkillFileData represents a supporting file within a skill.
+Index: multica/server/internal/daemon/execenv/source_path_test.go
+===================================================================
+--- /dev/null
++++ multica/server/internal/daemon/execenv/source_path_test.go
+@@ -0,0 +1,75 @@
++package execenv
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestSkipLocallyPresentSkills(t *testing.T) {
++	// Create a real directory to stand in for the user's local skill, plus a
++	// tmp home so the ~ expansion is deterministic.
++	tmp := t.TempDir()
++	localSkill := filepath.Join(tmp, "my-skill")
++	if err := os.MkdirAll(localSkill, 0o750); err != nil {
++		t.Fatal(err)
++	}
++	rel, err := filepath.Rel(tmp, localSkill)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("HOME", tmp)
++	sourcePath := filepath.ToSlash(filepath.Join("~", rel))
++
++	skills := []SkillContextForEnv{
++		{Name: "present", SourcePath: sourcePath},                 // exists → skip
++		{Name: "absent", SourcePath: "~/does-not-exist/skill"},    // missing → keep
++		{Name: "nopath", SourcePath: ""},                          // no source_path → keep
++		{Name: "rel-notilde", SourcePath: "some/relative/path"},   // non-existent → keep
++	}
++
++	got := skipLocallyPresentSkills(skills)
++	if len(got) != 3 {
++		t.Fatalf("expected 3 kept, got %d: %+v", len(got), got)
++	}
++	for _, s := range got {
++		if s.Name == "present" {
++			t.Fatalf("locally-present skill %q was not skipped", s.Name)
++		}
++	}
++}
++
++func TestSkipLocallyPresentSkills_FilesAreKept(t *testing.T) {
++	// A skill whose source_path points at a *file* (not a dir) must NOT be
++	// skipped — dirExists is directory-specific, so the agent still gets it.
++	tmp := t.TempDir()
++	filePath := filepath.Join(tmp, "not-a-dir")
++	if err := os.WriteFile(filePath, []byte("x"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("HOME", tmp)
++
++	skills := []SkillContextForEnv{
++		{Name: "file", SourcePath: "~/not-a-dir"},
++		{Name: "plain", SourcePath: ""},
++	}
++	got := skipLocallyPresentSkills(skills)
++	if len(got) != 2 {
++		t.Fatalf("file-pathed skill should be kept; got %d kept", len(got))
++	}
++}
++
++func TestExpandHome(t *testing.T) {
++	tmp := t.TempDir()
++	t.Setenv("HOME", tmp)
++	for _, tc := range []struct{ in, want string }{
++		{"~", tmp},
++		{"~/foo/bar", filepath.Join(tmp, "foo", "bar")},
++		{"/abs/path", "/abs/path"},
++		{"relative/path", "relative/path"},
++	} {
++		if got := expandHome(tc.in); got != tc.want {
++			t.Errorf("expandHome(%q) = %q, want %q", tc.in, got, tc.want)
++		}
++	}
++}

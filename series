@@ -21,3 +21,4 @@
 0022-odoo-runtime-memory-write.patch
 0023-odoo-project-local-skills.patch
 0024-odoo-daemon-diskusage-status-prefix.patch
+0025-odoo-skill-source-path.patch

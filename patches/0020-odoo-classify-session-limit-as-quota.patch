@@ -2,7 +2,7 @@ Index: multica/server/pkg/taskfailure/classify.go
 ===================================================================
 --- multica.orig/server/pkg/taskfailure/classify.go
 +++ multica/server/pkg/taskfailure/classify.go
-@@ -132,6 +132,13 @@ func Classify(rawError string) Reason {
+@@ -133,6 +133,13 @@ func Classify(rawError string) Reason {
  			// would not match the curly form either, so this is a small
  			// in-flight improvement on top of the SQL classifier.
  			"you\u2019ve hit your limit",
@@ -20,7 +20,7 @@ Index: multica/server/pkg/taskfailure/classify_test.go
 ===================================================================
 --- multica.orig/server/pkg/taskfailure/classify_test.go
 +++ multica/server/pkg/taskfailure/classify_test.go
-@@ -70,6 +70,7 @@ func TestClassifyRules(t *testing.T) {
+@@ -75,6 +75,7 @@ func TestClassifyRules(t *testing.T) {
  		{"usage limit", "Account exceeded the daily usage limit", ReasonAgentProviderQuotaLimit},
  		{"hit your limit ascii", "you've hit your limit; upgrade to continue", ReasonAgentProviderQuotaLimit},
  		{"hit your limit curly", "you\u2019ve hit your limit", ReasonAgentProviderQuotaLimit},

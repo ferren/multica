@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/client.go
 ===================================================================
 --- multica.orig/server/internal/daemon/client.go
 +++ multica/server/internal/daemon/client.go
-@@ -637,6 +637,7 @@ type (
+@@ -644,6 +644,7 @@ type (
  	PendingLocalSkills      = protocol.DaemonHeartbeatPendingLocalSkills
  	PendingLocalSkillImport = protocol.DaemonHeartbeatPendingLocalSkillImport
  	PendingMemoryScan       = protocol.DaemonHeartbeatPendingMemoryScan
@@ -10,7 +10,7 @@ Index: multica/server/internal/daemon/client.go
  )
  
  func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*HeartbeatResponse, error) {
-@@ -676,6 +677,13 @@ func (c *Client) ReportMemoryScanResult(
+@@ -683,6 +684,13 @@ func (c *Client) ReportMemoryScanResult(
  	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/memories/%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
  }
  

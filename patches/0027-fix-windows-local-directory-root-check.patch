@@ -1,0 +1,61 @@
+Index: multica/server/internal/daemon/local_directory.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_directory.go
++++ multica/server/internal/daemon/local_directory.go
+@@ -250,14 +250,17 @@ func isSameOrUnderPath(target, base stri
+ 	if base == "" {
+ 		return false
+ 	}
+-	if target == base {
+-		return true
+-	}
+ 	rel, err := filepath.Rel(base, target)
+ 	if err != nil {
+ 		return false
+ 	}
+-	return rel != "." && rel != ".." && !strings.HasPrefix(rel, "../")
++	return isSameOrUnderRelativePath(rel, filepath.Separator)
++}
++
++// isSameOrUnderRelativePath classifies a filepath.Rel result without assuming
++// a POSIX separator. On Windows, sibling paths start with `..\`, not `../`.
++func isSameOrUnderRelativePath(rel string, separator rune) bool {
++	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(separator)))
+ }
+ 
+ // isBlacklistedLocalPath rejects paths that map to the whole machine or an
+Index: multica/server/internal/daemon/local_directory_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_directory_test.go
++++ multica/server/internal/daemon/local_directory_test.go
+@@ -428,6 +428,30 @@ func TestIsSameOrUnderPath(t *testing.T)
+ 	}
+ }
+ 
++func TestIsSameOrUnderRelativePath(t *testing.T) {
++	cases := []struct {
++		name      string
++		rel       string
++		separator rune
++		want      bool
++	}{
++		{"equal", ".", '/', true},
++		{"POSIX nested", "project/child", '/', true},
++		{"POSIX direct parent", "..", '/', false},
++		{"POSIX sibling", "../project", '/', false},
++		{"Windows nested", `project\child`, '\\', true},
++		{"Windows direct parent", "..", '\\', false},
++		{"Windows sibling", `..\Projects\QCC\syner-es-8`, '\\', false},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			if got := isSameOrUnderRelativePath(tc.rel, tc.separator); got != tc.want {
++				t.Errorf("isSameOrUnderRelativePath(%q, %q) = %v, want %v", tc.rel, tc.separator, got, tc.want)
++			}
++		})
++	}
++}
++
+ // TestIsDriveRoot covers the Windows drive-root generalisation. Static
+ // enumeration in the old blacklist (C..F) missed mounts at G:\ and up; the
+ // new check goes through filepath.VolumeName so any drive letter (and UNC

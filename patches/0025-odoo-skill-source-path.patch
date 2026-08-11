@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -7888,6 +7888,7 @@ func convertSkillsForEnv(skills []SkillD
+@@ -7926,6 +7926,7 @@ func convertSkillsForEnv(skills []SkillD
  			Name:        s.Name,
  			Description: s.Description,
  			Content:     s.Content,
@@ -22,7 +22,7 @@ Index: multica/server/internal/daemon/execenv/context.go
  	"os"
  	"path/filepath"
  	"regexp"
-@@ -181,7 +182,13 @@ func writeContextFiles(workDir, provider
+@@ -182,7 +183,13 @@ func writeContextFiles(workDir, provider
  			}
  			// Codex skills are written to codex-home in Prepare; skip here.
  			if provider != "codex" {
@@ -37,7 +37,7 @@ Index: multica/server/internal/daemon/execenv/context.go
  					return fmt.Errorf("write skill files: %w", err)
  				}
  			}
-@@ -924,6 +931,63 @@ func sanitizeSkillName(name string) stri
+@@ -930,6 +937,63 @@ func sanitizeSkillName(name string) stri
  // overwrite user bytes (the bug PR #3444 review caught) or skip the
  // skill entirely (which would silently drop a Multica skill the agent
  // expects to see).
@@ -105,7 +105,7 @@ Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
 +++ multica/server/internal/daemon/execenv/execenv.go
-@@ -208,6 +208,11 @@ type SkillContextForEnv struct {
+@@ -213,6 +213,11 @@ type SkillContextForEnv struct {
  	Description string
  	Content     string
  	Files       []SkillFileContextForEnv

@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -5938,6 +5938,9 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -5967,6 +5967,9 @@ func (d *Daemon) runTask(ctx context.Con
  		CommentReplyTargets: commentReplyThreads(task),
  		NewCommentCount:     task.NewCommentCount,
  		NewCommentsSince:    task.NewCommentsSince,
@@ -12,7 +12,7 @@ Index: multica/server/internal/daemon/daemon.go
  		PriorSessionResumed: task.PriorSessionID != "",
  		// MUL-5305: the server sets this when a more recent Codex session was
  		// withheld (rollout missing) and PriorSessionID is an older fallback (or
-@@ -7543,6 +7546,29 @@ func convertProjectResourcesForEnv(resou
+@@ -7579,6 +7582,29 @@ func convertProjectResourcesForEnv(resou
  		}
  	}
  	return result
@@ -46,7 +46,7 @@ Index: multica/server/internal/daemon/execenv/context.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/context.go
 +++ multica/server/internal/daemon/execenv/context.go
-@@ -1016,7 +1016,13 @@ func renderIssueContext(provider string,
+@@ -1022,7 +1022,13 @@ func renderIssueContext(provider string,
  	}
  
  	b.WriteString("## Quick Start\n\n")
@@ -65,7 +65,7 @@ Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
 +++ multica/server/internal/daemon/execenv/execenv.go
-@@ -106,6 +106,15 @@ type TaskContextForEnv struct {
+@@ -111,6 +111,15 @@ type TaskContextForEnv struct {
  	CommentReplyTargets []ThreadReplyTarget
  	NewCommentCount     int    // issue-wide comments since this agent's last run (excludes its own and the injected trigger)
  	NewCommentsSince    string // RFC3339 anchor (last run's started_at) the count is measured from; empty on cold start
@@ -81,7 +81,7 @@ Index: multica/server/internal/daemon/execenv/execenv.go
  	PriorSessionResumed bool   // true when the daemon will resume an existing provider session for this task
  	// PriorSessionResumeUnavailable is true when this task carried a prior
  	// session the daemon expected to resume but could NOT (the reused workdir was
-@@ -177,6 +186,22 @@ type TaskContextForEnv struct {
+@@ -182,6 +191,22 @@ type TaskContextForEnv struct {
  	InitiatorEmail string
  }
  
@@ -108,7 +108,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv_test.go
 +++ multica/server/internal/daemon/execenv/execenv_test.go
-@@ -5406,6 +5406,158 @@ func TestSanitizeEmailForBrief(t *testin
+@@ -5424,6 +5424,158 @@ func TestSanitizeEmailForBrief(t *testin
  	}
  }
  

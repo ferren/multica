@@ -22,3 +22,4 @@
 0023-odoo-project-local-skills.patch
 0024-odoo-daemon-diskusage-status-prefix.patch
 0025-odoo-skill-source-path.patch
+0026-odoo-upstream-runtime-compat.patch

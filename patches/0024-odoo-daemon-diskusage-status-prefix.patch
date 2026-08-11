@@ -2,7 +2,7 @@ Index: multica/server/cmd/multica/cmd_daemon.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_daemon.go
 +++ multica/server/cmd/multica/cmd_daemon.go
-@@ -1475,6 +1475,14 @@ func newParentStatusFetcher(cmd *cobra.C
+@@ -1563,6 +1563,14 @@ func newParentStatusFetcher(cmd *cobra.C
  
  	client := daemon.NewClient(baseURL)
  	client.SetToken(cfg.Token)

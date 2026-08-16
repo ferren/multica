@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -3842,7 +3842,7 @@ func (d *Daemon) handleHeartbeatActions(
+@@ -4178,7 +4178,7 @@ func (d *Daemon) handleHeartbeatActions(
  	}
  	if resp.PendingLocalSkills != nil {
  		if rt := d.findRuntime(runtimeID); rt != nil {
@@ -11,7 +11,7 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  	}
  	if resp.PendingMemoryScan != nil {
-@@ -4085,11 +4085,12 @@ func (d *Daemon) handleModelList(ctx con
+@@ -4421,11 +4421,12 @@ func (d *Daemon) handleModelList(ctx con
  	})
  }
  
@@ -27,7 +27,7 @@ Index: multica/server/internal/daemon/daemon.go
  		d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
  			"status": "failed",
  			"error":  err.Error(),
-@@ -4103,6 +4104,7 @@ func (d *Daemon) handleLocalSkillList(ct
+@@ -4439,6 +4440,7 @@ func (d *Daemon) handleLocalSkillList(ct
  		mcpSupported = false
  	}
  
@@ -35,7 +35,7 @@ Index: multica/server/internal/daemon/daemon.go
  	d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
  		"status":        "completed",
  		"skills":        skills,
-@@ -4219,7 +4221,7 @@ func (d *Daemon) reportMemoryWriteResult
+@@ -4555,7 +4557,7 @@ func (d *Daemon) reportMemoryWriteResult
  func (d *Daemon) handleLocalSkillImport(ctx context.Context, rt Runtime, pending PendingLocalSkillImport) {
  	d.logger.Info("runtime local skill import requested", "runtime_id", rt.ID, "request_id", pending.ID, "provider", rt.Provider, "skill_key", pending.SkillKey)
  
@@ -100,7 +100,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	home, err := os.UserHomeDir()
  	if err != nil {
  		return nil, false, fmt.Errorf("resolve user home: %w", err)
-@@ -232,8 +242,27 @@ func localSkillRootsForProvider(provider
+@@ -238,8 +248,27 @@ func localSkillRootsForProvider(provider
  
  	roots := []localSkillRoot{
  		{path: providerRoot, kind: localSkillRootProvider},
@@ -129,7 +129,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	if provider == "claude" {
  		for _, plugin := range listEnabledClaudePlugins(home) {
  			manifest, _ := readClaudePluginManifest(plugin.InstallPath)
-@@ -254,6 +283,55 @@ func localSkillRootsForProvider(provider
+@@ -260,6 +289,55 @@ func localSkillRootsForProvider(provider
  	return roots, true, nil
  }
  
@@ -185,7 +185,7 @@ Index: multica/server/internal/daemon/local_skills.go
  func isIgnoredLocalSkillEntry(name string) bool {
  	if name == "" {
  		return true
-@@ -390,8 +468,8 @@ func collectLocalSkillFiles(skillDir str
+@@ -396,8 +474,8 @@ func collectLocalSkillFiles(skillDir str
  	return files, nil
  }
  
@@ -196,7 +196,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	if err != nil || !supported {
  		return nil, supported, err
  	}
-@@ -523,11 +601,21 @@ func enumerateLocalSkills(
+@@ -529,11 +607,21 @@ func enumerateLocalSkills(
  				continue
  			}
  
@@ -219,7 +219,7 @@ Index: multica/server/internal/daemon/local_skills.go
  				Provider:    provider,
  				Root:        root.kind,
  				Plugin:      root.plugin,
-@@ -547,8 +635,8 @@ func enumerateLocalSkills(
+@@ -553,8 +641,8 @@ func enumerateLocalSkills(
  	}
  }
  
@@ -306,7 +306,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -329,7 +329,7 @@ func TestLocalSkills_DiscoversACPProvide
+@@ -338,7 +338,7 @@ func TestLocalSkills_DiscoversACPProvide
  				"notes.md": "notes",
  			})
  
@@ -315,7 +315,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  			if err != nil {
  				t.Fatalf("listRuntimeLocalSkills: %v", err)
  			}
-@@ -352,7 +352,7 @@ func TestLocalSkills_DiscoversACPProvide
+@@ -361,7 +361,7 @@ func TestLocalSkills_DiscoversACPProvide
  				t.Fatalf("source_path = %q, want %q", skills[0].SourcePath, tc.wantPath)
  			}
  
@@ -324,7 +324,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  			if err != nil {
  				t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
  			}
-@@ -384,7 +384,7 @@ func TestListRuntimeLocalSkills_GrokUses
+@@ -393,7 +393,7 @@ func TestListRuntimeLocalSkills_GrokUses
  		"SKILL.md": "---\nname: Wrong Home\n---\n# Wrong\n",
  	})
  
@@ -333,7 +333,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -398,7 +398,7 @@ func TestListRuntimeLocalSkills_GrokUses
+@@ -407,7 +407,7 @@ func TestListRuntimeLocalSkills_GrokUses
  		t.Fatalf("source_path = %q, want custom GROK_HOME path", skills[0].SourcePath)
  	}
  
@@ -342,7 +342,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
  	}
-@@ -419,7 +419,7 @@ func TestListRuntimeLocalSkills_QwenUses
+@@ -428,7 +428,7 @@ func TestListRuntimeLocalSkills_QwenUses
  		"SKILL.md": "---\nname: Wrong Home\n---\n# Wrong\n",
  	})
  
@@ -351,7 +351,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -433,7 +433,7 @@ func TestListRuntimeLocalSkills_QwenUses
+@@ -442,7 +442,7 @@ func TestListRuntimeLocalSkills_QwenUses
  		t.Fatalf("source_path = %q, want custom QWEN_HOME path", skills[0].SourcePath)
  	}
  
@@ -360,7 +360,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
  	}
-@@ -473,7 +473,7 @@ func TestListRuntimeLocalSkills_FollowsS
+@@ -482,7 +482,7 @@ func TestListRuntimeLocalSkills_FollowsS
  		"SKILL.md": "---\nname: Review Helper\n---\n",
  	})
  
@@ -369,7 +369,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -515,7 +515,7 @@ func TestListRuntimeLocalSkills_CodexUse
+@@ -524,7 +524,7 @@ func TestListRuntimeLocalSkills_CodexUse
  		"SKILL.md": "# Wrong Home\n",
  	})
  
@@ -378,7 +378,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -561,7 +561,7 @@ func TestListRuntimeLocalSkills_Descends
+@@ -570,7 +570,7 @@ func TestListRuntimeLocalSkills_Descends
  		"SKILL.md": "---\nname: Release Reporter\n---\n",
  	})
  
@@ -387,7 +387,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -592,7 +592,7 @@ func TestLoadRuntimeLocalSkillBundle_Ope
+@@ -601,7 +601,7 @@ func TestLoadRuntimeLocalSkillBundle_Ope
  		"examples/sample.md": "sample body",
  	})
  
@@ -396,7 +396,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
  	}
-@@ -627,7 +627,7 @@ func TestListRuntimeLocalSkills_OpenClaw
+@@ -636,7 +636,7 @@ func TestListRuntimeLocalSkills_OpenClaw
  		"SKILL.md": "# Planner\n",
  	})
  
@@ -405,7 +405,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -653,7 +653,7 @@ func TestLoadRuntimeLocalSkillBundle_Cur
+@@ -662,7 +662,7 @@ func TestLoadRuntimeLocalSkillBundle_Cur
  		".hidden/skip.txt": "ignore",
  	})
  
@@ -414,7 +414,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
  	}
-@@ -686,7 +686,7 @@ func TestListRuntimeLocalSkills_Discover
+@@ -695,7 +695,7 @@ func TestListRuntimeLocalSkills_Discover
  		"docs/info.md": "info",
  	})
  
@@ -423,7 +423,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -727,7 +727,7 @@ func TestLoadRuntimeLocalSkillBundle_Imp
+@@ -736,7 +736,7 @@ func TestLoadRuntimeLocalSkillBundle_Imp
  		"scripts/run.sh":  "echo hi",
  	})
  
@@ -432,7 +432,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
  	}
-@@ -761,7 +761,7 @@ func TestLocalSkills_ProviderRootWinsOnK
+@@ -770,7 +770,7 @@ func TestLocalSkills_ProviderRootWinsOnK
  		"SKILL.md": "---\nname: Universal Copy\n---\n# universal\n",
  	})
  
@@ -441,7 +441,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -779,7 +779,7 @@ func TestLocalSkills_ProviderRootWinsOnK
+@@ -788,7 +788,7 @@ func TestLocalSkills_ProviderRootWinsOnK
  	}
  
  	// Load must resolve to the provider copy too, matching the list.
@@ -450,7 +450,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
  	}
-@@ -803,7 +803,7 @@ func TestListRuntimeLocalSkills_MergesBo
+@@ -812,7 +812,7 @@ func TestListRuntimeLocalSkills_MergesBo
  		"SKILL.md": "---\nname: Universal Only\n---\n",
  	})
  
@@ -459,7 +459,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -838,7 +838,7 @@ func TestListRuntimeLocalSkills_MissingU
+@@ -847,7 +847,7 @@ func TestListRuntimeLocalSkills_MissingU
  	})
  	// No ~/.agents/skills created.
  
@@ -468,7 +468,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -855,7 +855,7 @@ func TestListRuntimeLocalSkills_BothRoot
+@@ -864,7 +864,7 @@ func TestListRuntimeLocalSkills_BothRoot
  	home := t.TempDir()
  	t.Setenv("HOME", home)
  
@@ -477,7 +477,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -876,7 +876,7 @@ func TestListRuntimeLocalSkills_NestedSk
+@@ -885,7 +885,7 @@ func TestListRuntimeLocalSkills_NestedSk
  		"SKILL.md": "---\nname: Release Reporter\n---\n",
  	})
  
@@ -486,7 +486,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -887,7 +887,7 @@ func TestListRuntimeLocalSkills_NestedSk
+@@ -896,7 +896,7 @@ func TestListRuntimeLocalSkills_NestedSk
  		t.Fatalf("root = %q, want %q", skills[0].Root, localSkillRootUniversal)
  	}
  
@@ -495,7 +495,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
  	}
-@@ -910,7 +910,7 @@ func TestLoadRuntimeLocalSkillBundle_Fal
+@@ -919,7 +919,7 @@ func TestLoadRuntimeLocalSkillBundle_Fal
  		"SKILL.md": "---\nname: Only Universal\n---\n# only universal\n",
  	})
  
@@ -504,7 +504,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
  	}
-@@ -940,7 +940,7 @@ func TestLoadRuntimeLocalSkillBundle_Doe
+@@ -949,7 +949,7 @@ func TestLoadRuntimeLocalSkillBundle_Doe
  		"SKILL.md": "---\nname: Universal Clash\n---\n",
  	})
  
@@ -513,7 +513,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err == nil {
  		t.Fatalf("expected an error, got bundle %+v", bundle)
  	}
-@@ -969,7 +969,7 @@ func TestListRuntimeLocalSkills_PerRootV
+@@ -978,7 +978,7 @@ func TestListRuntimeLocalSkills_PerRootV
  		t.Fatalf("symlink: %v", err)
  	}
  
@@ -522,7 +522,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -1015,7 +1015,7 @@ func TestLoadRuntimeLocalSkillBundle_Pro
+@@ -1024,7 +1024,7 @@ func TestLoadRuntimeLocalSkillBundle_Pro
  	})
  
  	// list must surface exactly the universal skill at key "shadowed".
@@ -531,7 +531,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("listRuntimeLocalSkills: %v", err)
  	}
-@@ -1031,7 +1031,7 @@ func TestLoadRuntimeLocalSkillBundle_Pro
+@@ -1040,7 +1040,7 @@ func TestLoadRuntimeLocalSkillBundle_Pro
  
  	// load must resolve to the SAME universal skill list showed — not error on
  	// the invalid provider dir.
@@ -540,7 +540,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	if err != nil {
  		t.Fatalf("loadRuntimeLocalSkillBundle: %v (load disagreed with list)", err)
  	}
-@@ -1062,7 +1062,7 @@ func TestLoadRuntimeLocalSkillBundle_Pro
+@@ -1071,7 +1071,7 @@ func TestLoadRuntimeLocalSkillBundle_Pro
  		"SKILL.md": "---\nname: Filish\n---\n# Filish\n",
  	})
  
@@ -553,7 +553,7 @@ Index: multica/server/pkg/protocol/messages.go
 ===================================================================
 --- multica.orig/server/pkg/protocol/messages.go
 +++ multica/server/pkg/protocol/messages.go
-@@ -369,6 +369,11 @@ type DaemonHeartbeatPendingModelList str
+@@ -385,6 +385,11 @@ type DaemonHeartbeatPendingModelList str
  // local-skill inventory.
  type DaemonHeartbeatPendingLocalSkills struct {
  	ID string `json:"id"`
@@ -565,7 +565,7 @@ Index: multica/server/pkg/protocol/messages.go
  }
  
  // DaemonHeartbeatPendingLocalSkillImport describes a request to import a
-@@ -376,6 +381,10 @@ type DaemonHeartbeatPendingLocalSkills s
+@@ -392,6 +397,10 @@ type DaemonHeartbeatPendingLocalSkills s
  type DaemonHeartbeatPendingLocalSkillImport struct {
  	ID       string `json:"id"`
  	SkillKey string `json:"skill_key"`

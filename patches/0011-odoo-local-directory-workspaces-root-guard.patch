@@ -2,10 +2,10 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -5105,7 +5105,7 @@ func (d *Daemon) acquireLocalDirectoryLo
- 		return nil, false
+@@ -5503,7 +5503,7 @@ func (d *Daemon) acquireLocalDirectoryLo
+ 		}
+ 		return nil, true
  	}
- 	taskLog = taskLog.With("local_directory", assignment.AbsPath)
 -	if err := validateLocalPath(assignment.AbsPath); err != nil {
 +	if err := validateLocalPath(assignment.AbsPath, d.cfg.WorkspacesRoot); err != nil {
  		taskLog.Error("local_directory: path validation failed", "error", err)
@@ -15,7 +15,7 @@ Index: multica/server/internal/daemon/local_directory.go
 ===================================================================
 --- multica.orig/server/internal/daemon/local_directory.go
 +++ multica/server/internal/daemon/local_directory.go
-@@ -154,13 +154,19 @@ func resolveRealPath(absPath string) (st
+@@ -198,13 +198,19 @@ func resolveRealPath(absPath string) (st
  //     this a symlink like /Users/me/proj/home -> /Users/me would slip the
  //     literal-equality check above while still routing every daemon write
  //     into $HOME;
@@ -36,7 +36,7 @@ Index: multica/server/internal/daemon/local_directory.go
  	if absPath == "" {
  		return errors.New("local_directory: local_path is empty")
  	}
-@@ -206,12 +212,54 @@ func validateLocalPath(absPath string) e
+@@ -250,12 +256,54 @@ func validateLocalPath(absPath string) e
  		}
  		return fmt.Errorf("local_directory: %s (canonical path %q)", reason, absPath)
  	}

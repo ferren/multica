@@ -24,3 +24,4 @@
 0025-odoo-skill-source-path.patch
 0026-odoo-upstream-runtime-compat.patch
 0027-fix-windows-local-directory-root-check.patch
+0028-odoo-native-only-cli-guards.patch

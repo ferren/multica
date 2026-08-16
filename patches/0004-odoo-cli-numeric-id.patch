@@ -74,7 +74,7 @@ Index: multica/server/cmd/multica/cmd_issue.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_issue.go
 +++ multica/server/cmd/multica/cmd_issue.go
-@@ -2683,7 +2683,7 @@ func resolveAssigneeByID(ctx context.Con
+@@ -2701,7 +2701,7 @@ func resolveAssigneeByID(ctx context.Con
  		return "", "", fmt.Errorf("workspace ID is required to resolve assignees; use --workspace-id or set MULTICA_WORKSPACE_ID")
  	}
  	input := strings.TrimSpace(id)
@@ -87,7 +87,7 @@ Index: multica/server/cmd/multica/cmd_workspace.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_workspace.go
 +++ multica/server/cmd/multica/cmd_workspace.go
-@@ -387,7 +387,7 @@ func runWorkspaceSwitch(cmd *cobra.Comma
+@@ -465,7 +465,7 @@ func runWorkspaceSwitch(cmd *cobra.Comma
  func resolveWorkspaceArg(cmd *cobra.Command, args []string) (string, error) {
  	if len(args) > 0 {
  		trimmed := strings.TrimSpace(args[0])

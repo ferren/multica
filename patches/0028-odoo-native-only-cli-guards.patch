@@ -1,0 +1,253 @@
+Index: multica/server/cmd/multica/cmd_agent_mcp.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_agent_mcp.go
++++ multica/server/cmd/multica/cmd_agent_mcp.go
+@@ -97,6 +97,9 @@ func runAgentMcpList(cmd *cobra.Command,
+ 	if err != nil {
+ 		return err
+ 	}
++	if err := client.RequireNativeBackend("agent MCP management"); err != nil {
++		return err
++	}
+ 	ctx, cancel := cli.APIContext(context.Background())
+ 	defer cancel()
+ 
+@@ -113,6 +116,9 @@ func runAgentMcpAdd(cmd *cobra.Command,
+ 	if err != nil {
+ 		return err
+ 	}
++	if err := client.RequireNativeBackend("agent MCP management"); err != nil {
++		return err
++	}
+ 	ctx, cancel := cli.APIContext(context.Background())
+ 	defer cancel()
+ 
+@@ -138,6 +144,9 @@ func setAgentMcpEnabled(cmd *cobra.Comma
+ 	if err != nil {
+ 		return err
+ 	}
++	if err := client.RequireNativeBackend("agent MCP management"); err != nil {
++		return err
++	}
+ 	ctx, cancel := cli.APIContext(context.Background())
+ 	defer cancel()
+ 
+@@ -155,6 +164,9 @@ func runAgentMcpRemove(cmd *cobra.Comman
+ 	if err != nil {
+ 		return err
+ 	}
++	if err := client.RequireNativeBackend("agent MCP management"); err != nil {
++		return err
++	}
+ 	ctx, cancel := cli.APIContext(context.Background())
+ 	defer cancel()
+ 
+Index: multica/server/cmd/multica/cmd_chat.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_chat.go
++++ multica/server/cmd/multica/cmd_chat.go
+@@ -84,6 +84,9 @@ func fetchChatRead(cmd *cobra.Command, b
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if err := client.RequireNativeBackend("chat history and thread commands"); err != nil {
++		return nil, err
++	}
+ 	ctx, cancel := cli.APIContext(context.Background())
+ 	defer cancel()
+ 
+Index: multica/server/cmd/multica/cmd_plugin.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_plugin.go
++++ multica/server/cmd/multica/cmd_plugin.go
+@@ -293,6 +293,9 @@ func runPluginInstall(cmd *cobra.Command
+ 	if err != nil {
+ 		return err
+ 	}
++	if err := client.RequireNativeBackend("remote Plugin management"); err != nil {
++		return err
++	}
+ 	client.WorkspaceID = workspaceID
+ 	ctx, cancel := context.WithTimeout(context.Background(), cli.AtLeastAPITimeout(time.Minute))
+ 	defer cancel()
+@@ -317,6 +320,9 @@ func fetchPrivatePlugins(cmd *cobra.Comm
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if err := client.RequireNativeBackend("Plugin listing"); err != nil {
++		return nil, err
++	}
+ 	client.WorkspaceID = workspaceID
+ 	ctx, cancel := cli.APIContext(context.Background())
+ 	defer cancel()
+@@ -363,6 +369,9 @@ func runPluginStatus(cmd *cobra.Command,
+ 		if err != nil {
+ 			return err
+ 		}
++		if err := client.RequireNativeBackend("Plugin status"); err != nil {
++			return err
++		}
+ 		client.WorkspaceID = workspaceID
+ 		ctx, cancel := cli.APIContext(context.Background())
+ 		defer cancel()
+@@ -399,6 +408,9 @@ func remoteMCPAPI(cmd *cobra.Command, ar
+ 	if err != nil {
+ 		return err
+ 	}
++	if err := client.RequireNativeBackend("Remote MCP management"); err != nil {
++		return err
++	}
+ 	client.WorkspaceID = workspaceID
+ 	path := "/api/workspaces/" + workspaceID + "/plugins/" + url.PathEscape(args[0]) + "/remote-mcp/" + url.PathEscape(args[1]) + suffix
+ 	ctx, cancel := context.WithTimeout(context.Background(), cli.AtLeastAPITimeout(time.Minute))
+Index: multica/server/cmd/multica/cmd_project.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_project.go
++++ multica/server/cmd/multica/cmd_project.go
+@@ -571,6 +571,13 @@ func runProjectResourceList(cmd *cobra.C
+ }
+ 
+ func runProjectResourceAdd(cmd *cobra.Command, args []string) error {
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		return err
++	}
++	if err := client.RequireNativeBackend("project resource creation"); err != nil {
++		return err
++	}
+ 	resourceType, _ := cmd.Flags().GetString("type")
+ 	resourceType = strings.TrimSpace(resourceType)
+ 	if resourceType == "" {
+@@ -622,11 +629,6 @@ func runProjectResourceAdd(cmd *cobra.Co
+ 		body["label"] = label
+ 	}
+ 
+-	client, err := newAPIClient(cmd)
+-	if err != nil {
+-		return err
+-	}
+-
+ 	ctx, cancel := cli.APIContext(context.Background())
+ 	defer cancel()
+ 
+@@ -731,6 +733,16 @@ func runProjectResourceUpdate(cmd *cobra
+ 	if len(body) == 0 {
+ 		return fmt.Errorf("nothing to update — pass --ref / --url / --local-path / --label / --position / --clear-label")
+ 	}
++	if client.OdooBackend {
++		if cmd.Flags().Changed("position") {
++			return fmt.Errorf("project resource positioning is not supported with the Odoo backend")
++		}
++		if ref, ok := body["resource_ref"].(map[string]any); ok {
++			if _, hasMode := ref["execution_mode"]; hasMode {
++				return fmt.Errorf("project resource worktree mode is not supported with the Odoo backend")
++			}
++		}
++	}
+ 
+ 	var result map[string]any
+ 	if err := client.PutJSON(ctx, "/api/projects/"+projectRef.ID+"/resources/"+resourceRef.ID, body, &result); err != nil {
+@@ -929,6 +941,9 @@ func runProjectResourceRemove(cmd *cobra
+ 	if err != nil {
+ 		return err
+ 	}
++	if err := client.RequireNativeBackend("project resource removal"); err != nil {
++		return err
++	}
+ 
+ 	ctx, cancel := cli.APIContext(context.Background())
+ 	defer cancel()
+Index: multica/server/cmd/multica/cmd_workspace.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_workspace.go
++++ multica/server/cmd/multica/cmd_workspace.go
+@@ -615,6 +615,9 @@ func runWorkspaceMcpList(cmd *cobra.Comm
+ 	if err != nil {
+ 		return err
+ 	}
++	if err := client.RequireNativeBackend("workspace MCP management"); err != nil {
++		return err
++	}
+ 
+ 	ctx, cancel := cli.APIContext(context.Background())
+ 	defer cancel()
+@@ -652,6 +655,9 @@ func runWorkspaceMcpAdd(cmd *cobra.Comma
+ 	if err != nil {
+ 		return err
+ 	}
++	if err := client.RequireNativeBackend("workspace MCP management"); err != nil {
++		return err
++	}
+ 
+ 	ctx, cancel := cli.APIContext(context.Background())
+ 	defer cancel()
+@@ -698,6 +704,9 @@ func runWorkspaceMcpUpdate(cmd *cobra.Co
+ 	if err != nil {
+ 		return err
+ 	}
++	if err := client.RequireNativeBackend("workspace MCP management"); err != nil {
++		return err
++	}
+ 
+ 	ctx, cancel := cli.APIContext(context.Background())
+ 	defer cancel()
+@@ -728,6 +737,9 @@ func runWorkspaceMcpRemove(cmd *cobra.Co
+ 	if err != nil {
+ 		return err
+ 	}
++	if err := client.RequireNativeBackend("workspace MCP management"); err != nil {
++		return err
++	}
+ 
+ 	ctx, cancel := cli.APIContext(context.Background())
+ 	defer cancel()
+Index: multica/server/internal/cli/client.go
+===================================================================
+--- multica.orig/server/internal/cli/client.go
++++ multica/server/internal/cli/client.go
+@@ -174,6 +174,17 @@ func NewAPIClient(baseURL, workspaceID,
+ 	return c
+ }
+ 
++// RequireNativeBackend prevents commands whose API surface is not implemented
++// by the Odoo compatibility backend from falling through to an opaque 404.
++// Local-only commands do not call this method and remain available in either
++// backend mode.
++func (c *APIClient) RequireNativeBackend(feature string) error {
++	if c.OdooBackend {
++		return fmt.Errorf("%s is not supported with the Odoo backend", feature)
++	}
++	return nil
++}
++
+ // url builds the absolute request URL. In Odoo backend mode it rewrites the
+ // hardcoded native "/api" prefix to the configured PathPrefix
+ // ("/multica/agent"); other paths (e.g. "/health") are left untouched.
+Index: multica/server/internal/cli/client_test.go
+===================================================================
+--- multica.orig/server/internal/cli/client_test.go
++++ multica/server/internal/cli/client_test.go
+@@ -11,6 +11,23 @@ import (
+ 	"testing"
+ )
+ 
++func TestRequireNativeBackend(t *testing.T) {
++	t.Run("native backend", func(t *testing.T) {
++		client := NewAPIClient("http://example.test", "", "")
++		if err := client.RequireNativeBackend("chat history"); err != nil {
++			t.Fatalf("native backend rejected: %v", err)
++		}
++	})
++
++	t.Run("odoo backend", func(t *testing.T) {
++		t.Setenv("MULTICA_BACKEND_MODE", "odoo")
++		client := NewAPIClient("http://example.test", "", "")
++		if err := client.RequireNativeBackend("chat history"); err == nil || !strings.Contains(err.Error(), "not supported with the Odoo backend") {
++			t.Fatalf("Odoo backend error = %v", err)
++		}
++	})
++}
++
+ func TestPostJSON(t *testing.T) {
+ 	type reqBody struct {
+ 		Name string `json:"name"`

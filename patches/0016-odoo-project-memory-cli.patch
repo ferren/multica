@@ -1201,7 +1201,7 @@ Index: multica/server/cmd/multica/main.go
 ===================================================================
 --- multica.orig/server/cmd/multica/main.go
 +++ multica/server/cmd/multica/main.go
-@@ -90,6 +90,7 @@ func init() {
+@@ -92,6 +92,7 @@ func init() {
  	rootCmd.AddCommand(setupCmd)
  	rootCmd.AddCommand(attachmentCmd)
  	rootCmd.AddCommand(blogCmd)

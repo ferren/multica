@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -7926,6 +7926,7 @@ func convertSkillsForEnv(skills []SkillD
+@@ -8658,6 +8658,7 @@ func convertSkillsForEnv(skills []SkillD
  			Name:        s.Name,
  			Description: s.Description,
  			Content:     s.Content,
@@ -22,7 +22,7 @@ Index: multica/server/internal/daemon/execenv/context.go
  	"os"
  	"path/filepath"
  	"regexp"
-@@ -182,7 +183,13 @@ func writeContextFiles(workDir, provider
+@@ -183,7 +184,13 @@ func writeContextFiles(workDir, provider
  			}
  			// Codex skills are written to codex-home in Prepare; skip here.
  			if provider != "codex" {
@@ -37,7 +37,7 @@ Index: multica/server/internal/daemon/execenv/context.go
  					return fmt.Errorf("write skill files: %w", err)
  				}
  			}
-@@ -930,6 +937,63 @@ func sanitizeSkillName(name string) stri
+@@ -935,6 +942,63 @@ func sanitizeSkillName(name string) stri
  // overwrite user bytes (the bug PR #3444 review caught) or skip the
  // skill entirely (which would silently drop a Multica skill the agent
  // expects to see).
@@ -105,7 +105,7 @@ Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
 +++ multica/server/internal/daemon/execenv/execenv.go
-@@ -213,6 +213,11 @@ type SkillContextForEnv struct {
+@@ -250,6 +250,11 @@ type SkillContextForEnv struct {
  	Description string
  	Content     string
  	Files       []SkillFileContextForEnv
@@ -121,7 +121,7 @@ Index: multica/server/internal/daemon/types.go
 ===================================================================
 --- multica.orig/server/internal/daemon/types.go
 +++ multica/server/internal/daemon/types.go
-@@ -224,6 +224,13 @@ type SkillData struct {
+@@ -260,6 +260,13 @@ type SkillData struct {
  	SizeBytes   int64           `json:"size_bytes,omitempty"`
  	Content     string          `json:"content"`
  	Files       []SkillFileData `json:"files,omitempty"`

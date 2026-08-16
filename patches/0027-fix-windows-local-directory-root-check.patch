@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/local_directory.go
 ===================================================================
 --- multica.orig/server/internal/daemon/local_directory.go
 +++ multica/server/internal/daemon/local_directory.go
-@@ -250,14 +250,17 @@ func isSameOrUnderPath(target, base stri
+@@ -294,14 +294,17 @@ func isSameOrUnderPath(target, base stri
  	if base == "" {
  		return false
  	}

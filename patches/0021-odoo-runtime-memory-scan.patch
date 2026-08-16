@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/client.go
 ===================================================================
 --- multica.orig/server/internal/daemon/client.go
 +++ multica/server/internal/daemon/client.go
-@@ -636,6 +636,7 @@ type (
+@@ -693,6 +693,7 @@ type (
  	PendingModelList        = protocol.DaemonHeartbeatPendingModelList
  	PendingLocalSkills      = protocol.DaemonHeartbeatPendingLocalSkills
  	PendingLocalSkillImport = protocol.DaemonHeartbeatPendingLocalSkillImport
@@ -10,7 +10,7 @@ Index: multica/server/internal/daemon/client.go
  )
  
  func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*HeartbeatResponse, error) {
-@@ -669,6 +670,12 @@ func (c *Client) ReportLocalSkillImportR
+@@ -726,6 +727,12 @@ func (c *Client) ReportLocalSkillImportR
  	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/local-skills/import/%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
  }
  
@@ -27,7 +27,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -3845,6 +3845,11 @@ func (d *Daemon) handleHeartbeatActions(
+@@ -4181,6 +4181,11 @@ func (d *Daemon) handleHeartbeatActions(
  			go d.handleLocalSkillList(ctx, *rt, resp.PendingLocalSkills.ID)
  		}
  	}
@@ -39,7 +39,7 @@ Index: multica/server/internal/daemon/daemon.go
  	// Prefer the batch field (new backend); fall back to singular (old backend).
  	if len(resp.PendingLocalSkillImports) > 0 {
  		if rt := d.findRuntime(runtimeID); rt != nil {
-@@ -4102,6 +4107,55 @@ func (d *Daemon) handleLocalSkillList(ct
+@@ -4438,6 +4443,55 @@ func (d *Daemon) handleLocalSkillList(ct
  	})
  }
  
@@ -530,7 +530,7 @@ Index: multica/server/pkg/protocol/messages.go
 ===================================================================
 --- multica.orig/server/pkg/protocol/messages.go
 +++ multica/server/pkg/protocol/messages.go
-@@ -337,6 +337,10 @@ type DaemonHeartbeatAckPayload struct {
+@@ -353,6 +353,10 @@ type DaemonHeartbeatAckPayload struct {
  	// that don't know this field silently ignore it (standard JSON behavior)
  	// and fall back to the singular PendingLocalSkillImport above.
  	PendingLocalSkillImports []DaemonHeartbeatPendingLocalSkillImport `json:"pending_local_skill_imports,omitempty"`
@@ -541,7 +541,7 @@ Index: multica/server/pkg/protocol/messages.go
  }
  
  // HeartbeatStatusRuntimeGone is the ack Status used when the runtime row no
-@@ -368,3 +372,18 @@ type DaemonHeartbeatPendingLocalSkillImp
+@@ -384,3 +388,18 @@ type DaemonHeartbeatPendingLocalSkillImp
  	ID       string `json:"id"`
  	SkillKey string `json:"skill_key"`
  }

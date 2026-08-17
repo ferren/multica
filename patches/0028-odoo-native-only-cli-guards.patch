@@ -2,37 +2,7 @@ Index: multica/server/cmd/multica/cmd_plugin.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_plugin.go
 +++ multica/server/cmd/multica/cmd_plugin.go
-@@ -293,6 +293,9 @@ func runPluginInstall(cmd *cobra.Command
- 	if err != nil {
- 		return err
- 	}
-+	if err := client.RequireNativeBackend("remote Plugin management"); err != nil {
-+		return err
-+	}
- 	client.WorkspaceID = workspaceID
- 	ctx, cancel := context.WithTimeout(context.Background(), cli.AtLeastAPITimeout(time.Minute))
- 	defer cancel()
-@@ -317,6 +320,9 @@ func fetchPrivatePlugins(cmd *cobra.Comm
- 	if err != nil {
- 		return nil, err
- 	}
-+	if err := client.RequireNativeBackend("Plugin listing"); err != nil {
-+		return nil, err
-+	}
- 	client.WorkspaceID = workspaceID
- 	ctx, cancel := cli.APIContext(context.Background())
- 	defer cancel()
-@@ -363,6 +369,9 @@ func runPluginStatus(cmd *cobra.Command,
- 		if err != nil {
- 			return err
- 		}
-+		if err := client.RequireNativeBackend("Plugin status"); err != nil {
-+			return err
-+		}
- 		client.WorkspaceID = workspaceID
- 		ctx, cancel := cli.APIContext(context.Background())
- 		defer cancel()
-@@ -399,6 +408,9 @@ func remoteMCPAPI(cmd *cobra.Command, ar
+@@ -399,6 +399,9 @@ func remoteMCPAPI(cmd *cobra.Command, ar
  	if err != nil {
  		return err
  	}
@@ -121,6 +91,17 @@ Index: multica/server/internal/cli/client.go
  // url builds the absolute request URL. In Odoo backend mode it rewrites the
  // hardcoded native "/api" prefix to the configured PathPrefix
  // ("/multica/agent"); other paths (e.g. "/health") are left untouched.
+@@ -722,7 +733,9 @@ func (c *APIClient) UploadPrivatePlugin(
+ 		return fmt.Errorf("close Plugin artifact upload: %w", err)
+ 	}
+ 
+-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, &body)
++	// c.url rewrites the native "/api" prefix to the configured PathPrefix in
++	// Odoo backend mode; joining on BaseURL directly would bypass that rewrite.
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(path), &body)
+ 	if err != nil {
+ 		return err
+ 	}
 Index: multica/server/internal/cli/client_test.go
 ===================================================================
 --- multica.orig/server/internal/cli/client_test.go
@@ -383,5 +364,132 @@ Index: multica/server/cmd/multica/cmd_workspace_mcp_odoo_test.go
 +	}
 +	if gotPath != "/multica/agent/agents/"+agentID+"/mcp-servers" {
 +		t.Fatalf("path = %q, want the Odoo agent MCP route", gotPath)
++	}
++}
+Index: multica/server/cmd/multica/cmd_plugin_odoo_test.go
+===================================================================
+--- /dev/null
++++ multica/server/cmd/multica/cmd_plugin_odoo_test.go
+@@ -0,0 +1,122 @@
++package main
++
++import (
++	"bytes"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/spf13/cobra"
++)
++
++func pluginOdooTestCmd() *cobra.Command {
++	cmd := &cobra.Command{}
++	cmd.SetOut(&bytes.Buffer{})
++	cmd.Flags().String("workspace-id", "", "")
++	cmd.Flags().String("profile", "", "")
++	cmd.Flags().String("server-url", "", "")
++	cmd.Flags().String("output", "json", "")
++	return cmd
++}
++
++func pluginOdooTestServer(t *testing.T, handler http.HandlerFunc) {
++	t.Helper()
++	t.Setenv("HOME", t.TempDir())
++	t.Setenv("MULTICA_TOKEN", "test-token")
++	t.Setenv("MULTICA_WORKSPACE_ID", testWorkspaceMcpID)
++	srv := httptest.NewServer(handler)
++	t.Cleanup(srv.Close)
++	t.Setenv("MULTICA_SERVER_URL", srv.URL)
++}
++
++func TestRunPluginListUsesOdooBackendRoute(t *testing.T) {
++	var gotPath string
++	pluginOdooTestServer(t, func(w http.ResponseWriter, r *http.Request) {
++		gotPath = r.URL.Path
++		w.Header().Set("Content-Type", "application/json")
++		_ = json.NewEncoder(w).Encode(map[string]any{"plugins": []map[string]any{}})
++	})
++	t.Setenv("MULTICA_BACKEND_MODE", "odoo")
++
++	cmd := pluginOdooTestCmd()
++	if _, err := captureStdout(t, func() error { return runPluginList(cmd, nil) }); err != nil {
++		t.Fatalf("runPluginList: %v", err)
++	}
++	want := "/multica/agent/workspaces/" + testWorkspaceMcpID + "/plugins/private"
++	if gotPath != want {
++		t.Fatalf("path = %q, want %q", gotPath, want)
++	}
++}
++
++func TestRunPluginStatusUsesOdooBackendRoute(t *testing.T) {
++	const pluginRef = "dev.example.private-skill"
++	var gotPath string
++	pluginOdooTestServer(t, func(w http.ResponseWriter, r *http.Request) {
++		gotPath = r.URL.Path
++		w.Header().Set("Content-Type", "application/json")
++		_ = json.NewEncoder(w).Encode(map[string]any{})
++	})
++	t.Setenv("MULTICA_BACKEND_MODE", "odoo")
++
++	cmd := pluginOdooTestCmd()
++	if _, err := captureStdout(t, func() error {
++		return runPluginStatus(cmd, []string{pluginRef})
++	}); err != nil {
++		t.Fatalf("runPluginStatus: %v", err)
++	}
++	want := "/multica/agent/workspaces/" + testWorkspaceMcpID +
++		"/plugins/private/" + pluginRef
++	if gotPath != want {
++		t.Fatalf("path = %q, want %q", gotPath, want)
++	}
++}
++
++func TestRunPluginInstallUsesOdooBackendRoute(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "plugin")
++	var output bytes.Buffer
++	initCmd := &cobra.Command{}
++	initCmd.SetOut(&output)
++	initCmd.Flags().String("key", "dev.example.private-skill", "")
++	initCmd.Flags().String("name", "Private Skill", "")
++	initCmd.Flags().String("publisher", "example.local", "")
++	if err := runPluginInit(initCmd, []string{root}); err != nil {
++		t.Fatalf("plugin init: %v", err)
++	}
++
++	var gotPath string
++	var gotMethod string
++	var gotMultipart bool
++	pluginOdooTestServer(t, func(w http.ResponseWriter, r *http.Request) {
++		gotPath = r.URL.Path
++		gotMethod = r.Method
++		gotMultipart = strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data")
++		_, _ = io.Copy(io.Discard, r.Body)
++		w.Header().Set("Content-Type", "application/json")
++		_ = json.NewEncoder(w).Encode(map[string]any{
++			"plugin_key": "dev.example.private-skill",
++		})
++	})
++	t.Setenv("MULTICA_BACKEND_MODE", "odoo")
++
++	cmd := pluginOdooTestCmd()
++	if _, err := captureStdout(t, func() error {
++		return runPluginInstall(cmd, []string{root})
++	}); err != nil {
++		t.Fatalf("runPluginInstall: %v", err)
++	}
++	want := "/multica/agent/workspaces/" + testWorkspaceMcpID +
++		"/plugins/private/install"
++	if gotPath != want {
++		t.Fatalf("path = %q, want %q", gotPath, want)
++	}
++	if gotMethod != http.MethodPost {
++		t.Fatalf("method = %q, want POST", gotMethod)
++	}
++	if !gotMultipart {
++		t.Fatalf("request was not a multipart upload")
 +	}
 +}

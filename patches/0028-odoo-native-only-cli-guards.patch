@@ -42,20 +42,6 @@ Index: multica/server/cmd/multica/cmd_agent_mcp.go
  	ctx, cancel := cli.APIContext(context.Background())
  	defer cancel()
  
-Index: multica/server/cmd/multica/cmd_chat.go
-===================================================================
---- multica.orig/server/cmd/multica/cmd_chat.go
-+++ multica/server/cmd/multica/cmd_chat.go
-@@ -84,6 +84,9 @@ func fetchChatRead(cmd *cobra.Command, b
- 	if err != nil {
- 		return nil, err
- 	}
-+	if err := client.RequireNativeBackend("chat history and thread commands"); err != nil {
-+		return nil, err
-+	}
- 	ctx, cancel := cli.APIContext(context.Background())
- 	defer cancel()
- 
 Index: multica/server/cmd/multica/cmd_plugin.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_plugin.go
@@ -251,34 +237,31 @@ Index: multica/server/internal/cli/client_test.go
  func TestPostJSON(t *testing.T) {
  	type reqBody struct {
  		Name string `json:"name"`
-Index: multica/server/cmd/multica/cmd_skill.go
-===================================================================
---- multica.orig/server/cmd/multica/cmd_skill.go
-+++ multica/server/cmd/multica/cmd_skill.go
-@@ -427,6 +427,9 @@ func runSkillRefresh(cmd *cobra.Command,
- 	if err != nil {
- 		return err
- 	}
-+	if err := client.RequireNativeBackend("skill refresh"); err != nil {
-+		return err
-+	}
- 
- 	// The server re-fetches the bundle from the upstream source before
- 	// answering; give it the same budget as an import (server-side cap: 45s).
 Index: multica/server/cmd/multica/cmd_skill_test.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_skill_test.go
 +++ multica/server/cmd/multica/cmd_skill_test.go
-@@ -506,6 +506,25 @@ func TestRunSkillRefreshPostsToRefreshEn
+@@ -506,6 +506,40 @@ func TestRunSkillRefreshPostsToRefreshEn
  	}
  }
  
-+func TestRunSkillRefreshRejectsOdooBackend(t *testing.T) {
++func TestRunSkillRefreshUsesOdooBackendRoute(t *testing.T) {
 +	t.Setenv("HOME", t.TempDir())
 +	t.Setenv("MULTICA_TOKEN", "test-token")
 +	t.Setenv("MULTICA_WORKSPACE_ID", "workspace-123")
-+	t.Setenv("MULTICA_SERVER_URL", "http://127.0.0.1:1")
 +	t.Setenv("MULTICA_BACKEND_MODE", "odoo")
++	t.Setenv("MULTICA_ODOO_API_KEY", "test-api-key")
++
++	var gotPath string
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		gotPath = r.URL.Path
++		w.Header().Set("Content-Type", "application/json")
++		json.NewEncoder(w).Encode(map[string]any{
++			"id": 123, "name": "review-helper",
++		})
++	}))
++	defer srv.Close()
++	t.Setenv("MULTICA_SERVER_URL", srv.URL)
 +
 +	cmd := &cobra.Command{Use: "refresh"}
 +	cmd.Flags().String("server-url", "", "")
@@ -286,12 +269,153 @@ Index: multica/server/cmd/multica/cmd_skill_test.go
 +	cmd.Flags().String("profile", "", "")
 +	cmd.Flags().String("output", "table", "")
 +
-+	err := runSkillRefresh(cmd, []string{"skill-123"})
-+	if err == nil || !strings.Contains(err.Error(), "skill refresh is not supported with the Odoo backend") {
-+		t.Fatalf("Odoo backend error = %v", err)
++	if _, err := captureStdout(t, func() error {
++		return runSkillRefresh(cmd, []string{"123"})
++	}); err != nil {
++		t.Fatalf("runSkillRefresh: %v", err)
++	}
++	if gotPath != "/multica/agent/skills/123/refresh" {
++		t.Fatalf("path = %q, want Odoo refresh route", gotPath)
 +	}
 +}
 +
  func TestRunSkillRefreshJsonPrintsSkill(t *testing.T) {
  	t.Setenv("HOME", t.TempDir())
  	t.Setenv("MULTICA_TOKEN", "test-token")
+Index: multica/server/internal/daemon/client.go
+===================================================================
+--- multica.orig/server/internal/daemon/client.go
++++ multica/server/internal/daemon/client.go
+@@ -359,19 +359,19 @@ func (c *Client) OdooExpiresIn() int {
+ }
+ 
+ // MintAgentToken exchanges the daemon's shared Odoo credentials for a fresh
+-// access_token/api_key pair scoped to a single agent (Odoo backend mode
++// access_token/api_key pair scoped to a single agent task (Odoo backend mode
+ // only; see inair_multica's /multica/daemon/agents/<id>/token). The daemon
+ // injects the result into that agent's task env instead of the shared pair,
+-// so Odoo can identify which agent is calling from the credential itself —
+-// no self-reported header needed.
+-func (c *Client) MintAgentToken(ctx context.Context, agentID string) (accessToken, apiKey string, expiresIn int, err error) {
++// so Odoo can identify both the agent and its exact task from the credential
++// itself — no self-reported task context is trusted by task-scoped APIs.
++func (c *Client) MintAgentToken(ctx context.Context, agentID, taskID string) (accessToken, apiKey string, expiresIn int, err error) {
+ 	var resp struct {
+ 		AccessToken string `json:"access_token"`
+ 		APIKey      string `json:"api_key"`
+ 		ExpiresIn   int    `json:"expires_in"`
+ 	}
+ 	path := fmt.Sprintf("%s/daemon/agents/%s/token", c.pathPrefix, agentID)
+-	if err := c.postJSON(ctx, path, nil, &resp); err != nil {
++	if err := c.postJSON(ctx, path, map[string]any{"task_id": taskID}, &resp); err != nil {
+ 		return "", "", 0, err
+ 	}
+ 	return resp.AccessToken, resp.APIKey, resp.ExpiresIn, nil
+Index: multica/server/internal/daemon/client_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/client_test.go
++++ multica/server/internal/daemon/client_test.go
+@@ -745,8 +745,14 @@ func TestClient_FetchOdooToken_NoAPIKeyE
+ // /openapi/token) and parses the resulting access_token/api_key/expires_in.
+ func TestClient_MintAgentToken_PostsToAgentScopedEndpoint(t *testing.T) {
+ 	var gotPath string
++	var gotTaskID string
+ 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		gotPath = r.URL.Path
++		var body map[string]any
++		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
++			t.Fatalf("decode request: %v", err)
++		}
++		gotTaskID, _ = body["task_id"].(string)
+ 		w.Header().Set("Content-Type", "application/json")
+ 		json.NewEncoder(w).Encode(map[string]any{
+ 			"access_token": "agent-tok",
+@@ -758,7 +764,7 @@ func TestClient_MintAgentToken_PostsToAg
+ 
+ 	c := NewClient(srv.URL)
+ 	c.SetPathPrefix("/multica")
+-	accessToken, apiKey, expiresIn, err := c.MintAgentToken(context.Background(), "42")
++	accessToken, apiKey, expiresIn, err := c.MintAgentToken(context.Background(), "42", "task-99")
+ 	if err != nil {
+ 		t.Fatalf("MintAgentToken: %v", err)
+ 	}
+@@ -768,4 +774,7 @@ func TestClient_MintAgentToken_PostsToAg
+ 	if want := "/multica/daemon/agents/42/token"; gotPath != want {
+ 		t.Fatalf("path = %q, want %q", gotPath, want)
+ 	}
++	if gotTaskID != "task-99" {
++		t.Fatalf("task_id = %q, want task-99", gotTaskID)
++	}
+ }
+Index: multica/server/internal/daemon/daemon.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -6585,7 +6585,7 @@ func (d *Daemon) runTask(ctx context.Con
+ 		// fall back to the shared credential (today's behavior) rather than
+ 		// failing the task if minting is unavailable.
+ 		mintCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+-		scopedAccessToken, scopedAPIKey, _, mintErr := d.client.MintAgentToken(mintCtx, agentID)
++		scopedAccessToken, scopedAPIKey, _, mintErr := d.client.MintAgentToken(mintCtx, agentID, task.ID)
+ 		cancel()
+ 		if mintErr != nil {
+ 			d.logger.Warn("mint per-agent odoo token failed; falling back to shared daemon credentials",
+Index: multica/server/cmd/multica/cmd_chat_test.go
+===================================================================
+--- /dev/null
++++ multica/server/cmd/multica/cmd_chat_test.go
+@@ -0,0 +1,54 @@
++package main
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/spf13/cobra"
++)
++
++func TestFetchChatReadUsesTaskScopedOdooRoute(t *testing.T) {
++	t.Setenv("HOME", t.TempDir())
++	t.Setenv("MULTICA_TOKEN", "agent-token")
++	t.Setenv("MULTICA_ODOO_API_KEY", "agent-api-key")
++	t.Setenv("MULTICA_WORKSPACE_ID", "42")
++	t.Setenv("MULTICA_TASK_ID", "99")
++	t.Setenv("MULTICA_BACKEND_MODE", "odoo")
++
++	var gotPath, gotQuery, gotTaskID string
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		gotPath = r.URL.Path
++		gotQuery = r.URL.RawQuery
++		gotTaskID = r.Header.Get("X-Task-ID")
++		w.Header().Set("Content-Type", "application/json")
++		json.NewEncoder(w).Encode(map[string]any{
++			"channel_type": "odoo", "messages": []any{},
++		})
++	}))
++	defer srv.Close()
++	t.Setenv("MULTICA_SERVER_URL", srv.URL)
++
++	cmd := &cobra.Command{Use: "history"}
++	cmd.Flags().String("server-url", "", "")
++	cmd.Flags().String("workspace-id", "", "")
++	cmd.Flags().String("profile", "", "")
++	cmd.Flags().Int("limit", 0, "")
++	cmd.Flags().String("before", "", "")
++	_ = cmd.Flags().Set("limit", "12")
++	_ = cmd.Flags().Set("before", "cursor-1")
++
++	if _, err := fetchChatRead(cmd, "/api/chat/history", ""); err != nil {
++		t.Fatalf("fetchChatRead: %v", err)
++	}
++	if gotPath != "/multica/agent/chat/history" {
++		t.Fatalf("path = %q, want Odoo chat history route", gotPath)
++	}
++	if gotQuery != "before=cursor-1&limit=12" {
++		t.Fatalf("query = %q", gotQuery)
++	}
++	if gotTaskID != "99" {
++		t.Fatalf("X-Task-ID = %q, want 99", gotTaskID)
++	}
++}

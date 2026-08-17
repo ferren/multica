@@ -251,3 +251,47 @@ Index: multica/server/internal/cli/client_test.go
  func TestPostJSON(t *testing.T) {
  	type reqBody struct {
  		Name string `json:"name"`
+Index: multica/server/cmd/multica/cmd_skill.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_skill.go
++++ multica/server/cmd/multica/cmd_skill.go
+@@ -427,6 +427,9 @@ func runSkillRefresh(cmd *cobra.Command,
+ 	if err != nil {
+ 		return err
+ 	}
++	if err := client.RequireNativeBackend("skill refresh"); err != nil {
++		return err
++	}
+ 
+ 	// The server re-fetches the bundle from the upstream source before
+ 	// answering; give it the same budget as an import (server-side cap: 45s).
+Index: multica/server/cmd/multica/cmd_skill_test.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_skill_test.go
++++ multica/server/cmd/multica/cmd_skill_test.go
+@@ -506,6 +506,25 @@ func TestRunSkillRefreshPostsToRefreshEn
+ 	}
+ }
+ 
++func TestRunSkillRefreshRejectsOdooBackend(t *testing.T) {
++	t.Setenv("HOME", t.TempDir())
++	t.Setenv("MULTICA_TOKEN", "test-token")
++	t.Setenv("MULTICA_WORKSPACE_ID", "workspace-123")
++	t.Setenv("MULTICA_SERVER_URL", "http://127.0.0.1:1")
++	t.Setenv("MULTICA_BACKEND_MODE", "odoo")
++
++	cmd := &cobra.Command{Use: "refresh"}
++	cmd.Flags().String("server-url", "", "")
++	cmd.Flags().String("workspace-id", "", "")
++	cmd.Flags().String("profile", "", "")
++	cmd.Flags().String("output", "table", "")
++
++	err := runSkillRefresh(cmd, []string{"skill-123"})
++	if err == nil || !strings.Contains(err.Error(), "skill refresh is not supported with the Odoo backend") {
++		t.Fatalf("Odoo backend error = %v", err)
++	}
++}
++
+ func TestRunSkillRefreshJsonPrintsSkill(t *testing.T) {
+ 	t.Setenv("HOME", t.TempDir())
+ 	t.Setenv("MULTICA_TOKEN", "test-token")

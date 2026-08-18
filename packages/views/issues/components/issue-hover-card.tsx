@@ -1,5 +1,7 @@
 "use client";
 
+import { issueStatusCategory } from "@multica/core/issues";
+import { useStatusLabel } from "./../utils/status-label";
 import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { childIssueProgressOptions, issueDetailOptions } from "@multica/core/issues/queries";
@@ -116,6 +118,7 @@ function IssueHoverCardBody({
   fallbackLabel?: string;
 }) {
   const wsId = useWorkspaceId();
+  const resolveStatusLabel = useStatusLabel(wsId);
   const detail = useQuery(issueDetailOptions(wsId, issueId));
   // One workspace-wide progress snapshot shared with the issues list and issue
   // detail, not a per-issue children fetch: opening a card reuses the cache.
@@ -180,10 +183,14 @@ function IssueHoverCardBody({
         )}
         <span
           role="img"
-          aria-label={t(($) => $.status[issue.status])}
+          aria-label={resolveStatusLabel(issue.status)}
           className="flex shrink-0"
         >
-          <StatusIcon status={issue.status} className="h-3.5 w-3.5 shrink-0" />
+          <StatusIcon
+            status={issue.status}
+            category={issueStatusCategory(issue) ?? undefined}
+            className="h-3.5 w-3.5 shrink-0"
+          />
         </span>
         <span className="text-caption font-medium text-muted-foreground">
           {issue.identifier}

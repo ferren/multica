@@ -2,7 +2,7 @@ Index: multica/server/cmd/multica/cmd_project.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_project.go
 +++ multica/server/cmd/multica/cmd_project.go
-@@ -571,6 +571,13 @@ func runProjectResourceList(cmd *cobra.C
+@@ -571,6 +571,10 @@ func runProjectResourceList(cmd *cobra.C
  }
  
  func runProjectResourceAdd(cmd *cobra.Command, args []string) error {
@@ -10,13 +10,10 @@ Index: multica/server/cmd/multica/cmd_project.go
 +	if err != nil {
 +		return err
 +	}
-+	if err := client.RequireNativeBackend("project resource creation"); err != nil {
-+		return err
-+	}
  	resourceType, _ := cmd.Flags().GetString("type")
  	resourceType = strings.TrimSpace(resourceType)
  	if resourceType == "" {
-@@ -622,11 +629,6 @@ func runProjectResourceAdd(cmd *cobra.Co
+@@ -622,11 +626,6 @@ func runProjectResourceAdd(cmd *cobra.Co
  		body["label"] = label
  	}
  
@@ -28,7 +25,7 @@ Index: multica/server/cmd/multica/cmd_project.go
  	ctx, cancel := cli.APIContext(context.Background())
  	defer cancel()
  
-@@ -731,6 +733,16 @@ func runProjectResourceUpdate(cmd *cobra
+@@ -731,6 +730,16 @@ func runProjectResourceUpdate(cmd *cobra
  	if len(body) == 0 {
  		return fmt.Errorf("nothing to update — pass --ref / --url / --local-path / --label / --position / --clear-label")
  	}
@@ -45,16 +42,6 @@ Index: multica/server/cmd/multica/cmd_project.go
  
  	var result map[string]any
  	if err := client.PutJSON(ctx, "/api/projects/"+projectRef.ID+"/resources/"+resourceRef.ID, body, &result); err != nil {
-@@ -929,6 +941,9 @@ func runProjectResourceRemove(cmd *cobra
- 	if err != nil {
- 		return err
- 	}
-+	if err := client.RequireNativeBackend("project resource removal"); err != nil {
-+		return err
-+	}
- 
- 	ctx, cancel := cli.APIContext(context.Background())
- 	defer cancel()
 Index: multica/server/internal/cli/client.go
 ===================================================================
 --- multica.orig/server/internal/cli/client.go
@@ -545,6 +532,109 @@ Index: multica/server/cmd/multica/cmd_plugin_odoo_test.go
 +	}
 +	want := "/multica/agent/workspaces/" + testWorkspaceMcpID +
 +		"/plugins/" + installationID + "/remote-mcp/search/credential"
++	if gotPath != want {
++		t.Fatalf("path = %q, want %q", gotPath, want)
++	}
++	if gotMethod != http.MethodDelete {
++		t.Fatalf("method = %q, want DELETE", gotMethod)
++	}
++}
+Index: multica/server/cmd/multica/cmd_project_odoo_test.go
+===================================================================
+--- /dev/null
++++ multica/server/cmd/multica/cmd_project_odoo_test.go
+@@ -0,0 +1,98 @@
++package main
++
++import (
++	"bytes"
++	"encoding/json"
++	"net/http"
++	"testing"
++
++	"github.com/spf13/cobra"
++)
++
++func projectOdooTestCmd() *cobra.Command {
++	cmd := &cobra.Command{}
++	cmd.SetOut(&bytes.Buffer{})
++	cmd.Flags().String("workspace-id", "", "")
++	cmd.Flags().String("profile", "", "")
++	cmd.Flags().String("server-url", "", "")
++	cmd.Flags().String("output", "json", "")
++	cmd.Flags().String("type", "", "")
++	cmd.Flags().String("local-path", "", "")
++	cmd.Flags().String("daemon-id", "", "")
++	cmd.Flags().String("ref-label", "", "")
++	cmd.Flags().String("execution-mode", "", "")
++	cmd.Flags().String("label", "", "")
++	return cmd
++}
++
++func TestRunProjectResourceAddUsesOdooBackendRoute(t *testing.T) {
++	const projectID = "42"
++	var gotPath string
++	var gotMethod string
++	var gotBody map[string]any
++	mcpTestServer(t, func(w http.ResponseWriter, r *http.Request) {
++		gotPath = r.URL.Path
++		gotMethod = r.Method
++		_ = json.NewDecoder(r.Body).Decode(&gotBody)
++		w.Header().Set("Content-Type", "application/json")
++		_ = json.NewEncoder(w).Encode(map[string]any{
++			"id":            "99",
++			"resource_type": "local_directory",
++		})
++	})
++	t.Setenv("MULTICA_BACKEND_MODE", "odoo")
++
++	cmd := projectOdooTestCmd()
++	cmd.Flags().Set("type", "local_directory")
++	cmd.Flags().Set("local-path", "/home/dev/workspace")
++	cmd.Flags().Set("daemon-id", "daemon-1")
++	cmd.Flags().Set("label", "Odoo checkout")
++	if _, err := captureStdout(t, func() error {
++		return runProjectResourceAdd(cmd, []string{projectID})
++	}); err != nil {
++		t.Fatalf("runProjectResourceAdd: %v", err)
++	}
++	if gotPath != "/multica/agent/projects/"+projectID+"/resources" {
++		t.Fatalf("path = %q, want the Odoo project resources route", gotPath)
++	}
++	if gotMethod != http.MethodPost {
++		t.Fatalf("method = %q, want POST", gotMethod)
++	}
++	if gotBody["resource_type"] != "local_directory" {
++		t.Fatalf("resource_type = %v", gotBody["resource_type"])
++	}
++	ref, _ := gotBody["resource_ref"].(map[string]any)
++	if ref["local_path"] != "/home/dev/workspace" || ref["daemon_id"] != "daemon-1" {
++		t.Fatalf("resource_ref = %v", gotBody["resource_ref"])
++	}
++	if gotBody["label"] != "Odoo checkout" {
++		t.Fatalf("label = %v", gotBody["label"])
++	}
++}
++
++func TestRunProjectResourceRemoveUsesOdooBackendRoute(t *testing.T) {
++	const projectID = "42"
++	const resourceID = "99"
++	var gotPath string
++	var gotMethod string
++	mcpTestServer(t, func(w http.ResponseWriter, r *http.Request) {
++		gotPath = r.URL.Path
++		gotMethod = r.Method
++		w.WriteHeader(http.StatusNoContent)
++	})
++	t.Setenv("MULTICA_BACKEND_MODE", "odoo")
++
++	cmd := projectOdooTestCmd()
++	if _, err := captureStdout(t, func() error {
++		return runProjectResourceRemove(cmd, []string{projectID, resourceID})
++	}); err != nil {
++		t.Fatalf("runProjectResourceRemove: %v", err)
++	}
++	want := "/multica/agent/projects/" + projectID + "/resources/" + resourceID
 +	if gotPath != want {
 +		t.Fatalf("path = %q, want %q", gotPath, want)
 +	}

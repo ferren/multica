@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -6440,6 +6440,9 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -6467,6 +6467,9 @@ func (d *Daemon) runTask(ctx context.Con
  		CommentReplyTargets: commentReplyThreads(task),
  		NewCommentCount:     task.NewCommentCount,
  		NewCommentsSince:    task.NewCommentsSince,
@@ -12,7 +12,7 @@ Index: multica/server/internal/daemon/daemon.go
  		PriorSessionResumed: task.PriorSessionID != "",
  		// MUL-5305: the server sets this when a more recent Codex session was
  		// withheld (rollout missing) and PriorSessionID is an older fallback (or
-@@ -8311,6 +8314,29 @@ func convertProjectResourcesForEnv(resou
+@@ -8370,6 +8373,29 @@ func convertProjectResourcesForEnv(resou
  		}
  	}
  	return result
@@ -46,7 +46,7 @@ Index: multica/server/internal/daemon/execenv/context.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/context.go
 +++ multica/server/internal/daemon/execenv/context.go
-@@ -1027,7 +1027,13 @@ func renderIssueContext(provider string,
+@@ -1031,7 +1031,13 @@ func renderIssueContext(provider string,
  	}
  
  	b.WriteString("## Quick Start\n\n")
@@ -108,7 +108,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv_test.go
 +++ multica/server/internal/daemon/execenv/execenv_test.go
-@@ -5434,6 +5434,158 @@ func TestSanitizeEmailForBrief(t *testin
+@@ -5443,6 +5443,158 @@ func TestSanitizeEmailForBrief(t *testin
  	}
  }
  
@@ -369,20 +369,18 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
  // writeWorkflowIssue emits the single issue workflow used by BOTH
  // assignment-triggered and comment-triggered runs.
  //
-@@ -580,9 +671,9 @@ func writeWorkflowIssue(b *strings.Build
- 	b.WriteString("**Turn mode.** The per-turn user message names this run's mode on a line of its own: `Turn mode: Reply.` (respond to the comment that message carries — it brings the triggering comment's id and your `--parent` value) or `Turn mode: Ownership.` (an assignment or status change started this run). Steps 1–6 are shared; then **apply exactly one mode block, the one the user message named** — they differ on issue status. No mode line → Reply mode, do not change the issue status.\n\n")
+@@ -589,8 +680,8 @@ func writeWorkflowIssue(b *strings.Build
+ 	b.WriteString("**Turn mode.** The per-turn user message names this run's mode on a line of its own: `Turn mode: Reply.` (respond to the comment that message carries — it brings the triggering comment's id and your `--parent` value) or `Turn mode: Ownership.` (an assignment or status change started this run). Steps 1–5 are shared; then **apply exactly one mode block, the one the user message named** — they differ on issue status. No mode line → Reply mode.\n\n")
  
- 	b.WriteString("**Steps 1–6 — both modes** (the per-turn user message carries this issue's real id and ready-to-run context-read commands; assemble other calls from `## Available Commands`)\n\n")
--	b.WriteString("1. Read the issue (`multica issue get`) to understand the context.\n")
--	b.WriteString("2. Read the metadata bag (`multica issue metadata list`) — best-effort, empty `{}` and CLI failures are normal. What to look for: `## Issue Metadata`.\n")
--	b.WriteString("3. Catch up on the comment history — this is mandatory, not optional — in two bounded reads, never one bulk pull: scan every thread cheaply (`--roots-only --summary --compact`), then expand only the threads that matter (`--thread <id> --tail 30 --compact`). Earlier comments often carry context the issue body lacks. Skipping this step is the most common cause of agents acting on stale or incomplete instructions — so always run the scan, even when the trigger looks self-contained. In Reply mode the per-turn user message names the thread to expand first; the scan is how you decide whether any OTHER thread is also relevant.\n")
-+	b.WriteString("1. Read the issue (`multica issue get`) to understand the context. The `## Issue Context` section above pre-injects the body when the backend has it; reach for the CLI only when that section says nothing was pre-injected.\n")
-+	b.WriteString("2. Read the metadata bag (`multica issue metadata list`) — `## Issue Context` above pre-injects it when the backend has it; otherwise best-effort, empty `{}` and CLI failures are normal. What to look for: `## Issue Metadata`.\n")
-+	b.WriteString("3. Catch up on the comment history — this is mandatory, not optional. The `## Issue Context` section above pre-injects recently active comments when the backend has them; treat those as covering the threads they list, and still scan for any that fall outside that capped window — in two bounded reads, never one bulk pull: scan every thread cheaply (`--roots-only --summary --compact`), then expand only the threads that matter (`--thread <id> --tail 30 --compact`). Earlier comments often carry context the issue body lacks. Skipping this step is the most common cause of agents acting on stale or incomplete instructions — so always run the scan, even when the trigger looks self-contained. In Reply mode the per-turn user message names the thread to expand first; the scan is how you decide whether any OTHER thread is also relevant.\n")
- 	b.WriteString("4. Complete the task within your Agent Identity boundaries (`## Instruction Precedence` lists the actions Agent Identity can forbid). If your role is delegation-only, perform the allowed delegation work and stop once that outcome is delivered. Before self-assigning, check the target issue's comment history for an existing claim and any `## Active sibling runs` block; when assignment or status only records ownership/progress for work already underway, pass `--no-start` on every such command (the default start behavior is for handing off fresh work).\n")
+ 	b.WriteString("**Steps 1–5 — both modes** (the per-turn user message carries this issue's real id and ready-to-run context-read commands; assemble other calls from `## Available Commands`)\n\n")
+-	b.WriteString("1. Read the issue (`multica issue get`) to understand the context — its JSON already carries the issue's `metadata` bag (empty `{}` is normal), so no separate metadata read is needed. What to look for: `## Issue Metadata`.\n")
+-	b.WriteString("2. Catch up on the comment history — this is mandatory, not optional — in two bounded reads, never one bulk pull: scan every thread cheaply (`--roots-only --summary --compact`), then expand only the threads that matter (`--thread <id> --tail 30 --compact`). Earlier comments often carry context the issue body lacks. Skipping this step is the most common cause of agents acting on stale or incomplete instructions — so always run the scan, even when the trigger looks self-contained. In Reply mode the per-turn user message names the thread to expand first; the scan is how you decide whether any OTHER thread is also relevant.\n")
++	b.WriteString("1. Read the issue (`multica issue get`) to understand the context — its JSON already carries the issue's `metadata` bag (empty `{}` is normal), so no separate metadata read is needed. What to look for: `## Issue Metadata`. The `## Issue Context` section above pre-injects the body and metadata when the backend has them; reach for the CLI only when that section says nothing was pre-injected.\n")
++	b.WriteString("2. Catch up on the comment history — this is mandatory, not optional — in two bounded reads, never one bulk pull: scan every thread cheaply (`--roots-only --summary --compact`), then expand only the threads that matter (`--thread <id> --tail 30 --compact`). Earlier comments often carry context the issue body lacks. Skipping this step is the most common cause of agents acting on stale or incomplete instructions — so always run the scan, even when the trigger looks self-contained. In Reply mode the per-turn user message names the thread to expand first; the scan is how you decide whether any OTHER thread is also relevant. The `## Issue Context` section above pre-injects recently active comments when the backend has them; treat those as covering the threads they list, and still scan for any that fall outside that capped window.\n")
+ 	b.WriteString("3. Complete the task within your Agent Identity boundaries (`## Instruction Precedence` lists the actions Agent Identity can forbid). If your role is delegation-only, perform the allowed delegation work and stop once that outcome is delivered. Before self-assigning, check the target issue's comment history for an existing claim and any `## Active sibling runs` block; when assignment or status only records ownership/progress for work already underway, pass `--no-start` on every such command (the default start behavior is for handing off fresh work).\n")
  	if ctx.IsSquadLeader {
- 		b.WriteString("5. **Post your final results as a comment** (unless your outcome is `no_action` — in that case, calling `multica squad activity <issue-id> no_action --reason \"...\"` alone is sufficient; you MUST exit without posting any comment. DO NOT post a comment announcing no_action or saying you are exiting silently): post it with `multica issue comment add` using the platform-correct non-inline mode from ## Comment Formatting (never inline `--content`). Your results are only visible to the user if posted via this CLI call; text in your terminal or run logs is NOT delivered.\n")
-@@ -843,6 +934,15 @@ func buildMetaSkillContentSlim(provider
+ 		b.WriteString("4. **Post your final results as a comment** (unless your outcome is `no_action` — in that case, calling `multica squad activity <issue-id> no_action --reason \"...\"` alone is sufficient; you MUST exit without posting any comment. DO NOT post a comment announcing no_action or saying you are exiting silently): post it with `multica issue comment add` using the platform-correct non-inline mode from ## Comment Formatting (never inline `--content`). Your results are only visible to the user if posted via this CLI call; text in your terminal or run logs is NOT delivered.\n")
+@@ -867,6 +958,15 @@ func buildMetaSkillContentSlim(provider
  		writeInstructionPrecedence(&b)
  	}
  
@@ -402,7 +400,7 @@ Index: multica/server/internal/daemon/types.go
 ===================================================================
 --- multica.orig/server/internal/daemon/types.go
 +++ multica/server/internal/daemon/types.go
-@@ -114,6 +114,15 @@ type Task struct {
+@@ -113,6 +113,15 @@ type Task struct {
  	TriggerAuthorName             string                 `json:"trigger_author_name,omitempty"`              // display name of the triggering comment author
  	NewCommentCount               int                    `json:"new_comment_count,omitempty"`                // issue-wide comments since this agent's last run (excludes its own and the injected trigger); 0/omitted for old daemons or cold start
  	NewCommentsSince              string                 `json:"new_comments_since,omitempty"`               // RFC3339 anchor (last run's started_at) the count is measured from; empty on cold start

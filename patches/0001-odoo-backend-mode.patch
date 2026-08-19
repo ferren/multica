@@ -647,7 +647,7 @@ Index: multica/server/internal/daemon/config.go
 ===================================================================
 --- multica.orig/server/internal/daemon/config.go
 +++ multica/server/internal/daemon/config.go
-@@ -132,6 +132,8 @@ type Config struct {
+@@ -133,6 +133,8 @@ type Config struct {
  	CodebuddyArgs                   []string
  	QwenArgs                        []string
  	QwenpawArgs                     []string
@@ -656,7 +656,7 @@ Index: multica/server/internal/daemon/config.go
  
  	// ProfileCommandOverrides maps a custom runtime profile_id -> the absolute
  	// executable path to use for that profile on THIS machine (MUL-3284).
-@@ -427,6 +429,12 @@ func LoadConfig(overrides Overrides) (Co
+@@ -430,6 +432,12 @@ func LoadConfig(overrides Overrides) (Co
  		return Config{}, err
  	}
  
@@ -669,7 +669,7 @@ Index: multica/server/internal/daemon/config.go
  	// Health port: override > default
  	healthPort := DefaultHealthPort
  	if overrides.HealthPort > 0 {
-@@ -489,6 +497,11 @@ func LoadConfig(overrides Overrides) (Co
+@@ -492,6 +500,11 @@ func LoadConfig(overrides Overrides) (Co
  	if overrides.DisableAutoUpdate {
  		autoUpdateEnabled = false
  	}
@@ -681,7 +681,7 @@ Index: multica/server/internal/daemon/config.go
  	autoUpdateInterval, err := durationFromEnv("MULTICA_DAEMON_AUTO_UPDATE_INTERVAL", DefaultAutoUpdateCheckInterval)
  	if err != nil {
  		return Config{}, err
-@@ -548,6 +561,8 @@ func LoadConfig(overrides Overrides) (Co
+@@ -551,6 +564,8 @@ func LoadConfig(overrides Overrides) (Co
  		CodebuddyArgs:                   codebuddyArgs,
  		QwenArgs:                        qwenArgs,
  		QwenpawArgs:                     qwenpawArgs,
@@ -845,7 +845,7 @@ Index: multica/server/internal/daemon/daemon.go
 +func (d *Daemon) connectDaemon(ctx context.Context) error {
 +	var runtimes []map[string]string
 +	for name, entry := range d.cfg.Agents {
-+		version, err := detectAgentVersion(ctx, entry.Path)
++		version, err := detectAgentVersion(ctx, agent.Command{Path: entry.Path})
 +		if err != nil {
 +			d.logger.Warn("skip runtime for connect", "name", name, "error", err)
 +			continue
@@ -942,7 +942,7 @@ Index: multica/server/internal/daemon/daemon.go
  	return ids
  }
  
-@@ -3579,14 +3729,24 @@ func (d *Daemon) syncWorkspacesFromAPI(c
+@@ -3585,14 +3735,24 @@ func (d *Daemon) syncWorkspacesFromAPI(c
  	apiCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
  	defer cancel()
  
@@ -968,7 +968,7 @@ Index: multica/server/internal/daemon/daemon.go
  		apiIDs[ws.ID] = ws.Name
  	}
  
-@@ -3639,6 +3799,26 @@ func (d *Daemon) syncWorkspacesFromAPI(c
+@@ -3645,6 +3805,26 @@ func (d *Daemon) syncWorkspacesFromAPI(c
  			registered++
  			continue
  		}
@@ -995,7 +995,7 @@ Index: multica/server/internal/daemon/daemon.go
  		payload := probeBuiltins()
  		var (
  			resp       *RegisterResponse
-@@ -3898,13 +4078,14 @@ func (d *Daemon) handleHeartbeatActions(
+@@ -3904,13 +4084,14 @@ func (d *Daemon) handleHeartbeatActions(
  	if resp == nil {
  		return
  	}
@@ -1011,7 +1011,7 @@ Index: multica/server/internal/daemon/daemon.go
  		)
  	}
  	if resp.PendingUpdate != nil {
-@@ -3932,6 +4113,13 @@ func (d *Daemon) handleHeartbeatActions(
+@@ -3938,6 +4119,13 @@ func (d *Daemon) handleHeartbeatActions(
  			go d.handleLocalSkillImport(ctx, *rt, *resp.PendingLocalSkillImport)
  		}
  	}
@@ -1025,7 +1025,7 @@ Index: multica/server/internal/daemon/daemon.go
  }
  
  // handlePendingWorkHint reacts to a server-pushed daemon:pending_work frame by
-@@ -6868,7 +7056,7 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -6927,7 +7115,7 @@ func (d *Daemon) runTask(ctx context.Con
  	if task.Agent != nil && task.Agent.Model != "" {
  		model = task.Agent.Model
  	}

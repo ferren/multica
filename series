@@ -24,4 +24,8 @@
 0025-odoo-skill-source-path.patch
 0026-odoo-upstream-runtime-compat.patch
 0027-fix-windows-local-directory-root-check.patch
+# TODO(上游 plugin v2 / MUL-6350, 2026-08-19): 上游重建 plugin 系统已删除
+# V1 CLI（cmd_plugin.go）与相关面。本补丁中 plugin CLI 启用内容随基线
+# 更新退役（cmd_plugin_odoo_test.go 已移除）；Odoo 端 V1 后端冻结不跟改。
+# 待上游 3/4、4/4 落地后按新契约重做（multica_update.md P9）。
 0028-odoo-native-only-cli-guards.patch

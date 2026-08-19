@@ -2,7 +2,7 @@ Index: multica/server/internal/handler/squad_briefing.go
 ===================================================================
 --- multica.orig/server/internal/handler/squad_briefing.go
 +++ multica/server/internal/handler/squad_briefing.go
-@@ -131,7 +131,15 @@ const squadOperatingProtocolHardRules =
+@@ -133,7 +133,15 @@ const squadOperatingProtocolHardRules =
    work, the agent runs twice in parallel (once from the mention, once
    from the assignment). Pick exactly one path: either delegate by
    @mention on this issue, or create a ` + "`" + `todo` + "`" + ` child issue assigned to

@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/config.go
 ===================================================================
 --- multica.orig/server/internal/daemon/config.go
 +++ multica/server/internal/daemon/config.go
-@@ -507,9 +507,10 @@ func LoadConfig(overrides Overrides) (Co
+@@ -510,9 +510,10 @@ func LoadConfig(overrides Overrides) (Co
  	if overrides.DisableAutoUpdate {
  		autoUpdateEnabled = false
  	}
@@ -19,7 +19,7 @@ Index: multica/server/internal/daemon/config_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/config_test.go
 +++ multica/server/internal/daemon/config_test.go
-@@ -753,6 +753,28 @@ func TestLoadConfig_AutoUpdateEnv_Forces
+@@ -754,6 +754,28 @@ func TestLoadConfig_AutoUpdateEnv_Forces
  	}
  }
  

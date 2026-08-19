@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -5503,7 +5503,7 @@ func (d *Daemon) acquireLocalDirectoryLo
+@@ -5524,7 +5524,7 @@ func (d *Daemon) acquireLocalDirectoryLo
  		}
  		return nil, true
  	}

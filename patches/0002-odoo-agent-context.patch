@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -6388,6 +6388,23 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -6859,6 +6859,23 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
@@ -26,9 +26,9 @@ Index: multica/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:             task.IssueID,
  		TriggerCommentID:    task.TriggerCommentID,
-@@ -6431,6 +6448,10 @@ func (d *Daemon) runTask(ctx context.Con
- 		InitiatorEmail:                   task.InitiatorEmail,
- 		WorkspaceContext:                 task.WorkspaceContext,
+@@ -6904,6 +6921,10 @@ func (d *Daemon) runTask(ctx context.Con
+ 		IssueStatuses:                    convertIssueStatusesForEnv(task.IssueStatuses),
+ 		IssueStatusesOmitted:             task.IssueStatusesOmitted,
  		ConnectedApps:                    task.ConnectedApps,
 +		BackendMode:                      d.cfg.BackendMode,
 +		OdooURL:                          d.cfg.ServerBaseURL,
@@ -37,7 +37,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  
  	// Mark candidate env roots as active before any env work so the GC loop
-@@ -6936,15 +6957,35 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -7512,15 +7533,35 @@ func (d *Daemon) runTask(ctx context.Con
  	// MULTICA_TOKEN is bound to (agent, task) by the server. Never fall back
  	// to the daemon's own credential here: doing so lets agent CLI writes land
  	// as the runtime owner's member actor and can retrigger the same agent.
@@ -81,7 +81,7 @@ Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
 +++ multica/server/internal/daemon/execenv/execenv.go
-@@ -201,6 +201,11 @@ type TaskContextForEnv struct {
+@@ -225,6 +225,11 @@ type TaskContextForEnv struct {
  	// context and the agent stays anonymous-user mode.
  	RequestingUserName               string
  	RequestingUserProfileDescription string

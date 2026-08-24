@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -4184,7 +4184,7 @@ func (d *Daemon) handleHeartbeatActions(
+@@ -4207,7 +4207,7 @@ func (d *Daemon) handleHeartbeatActions(
  	}
  	if resp.PendingLocalSkills != nil {
  		if rt := d.findRuntime(runtimeID); rt != nil {
@@ -11,7 +11,7 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  	}
  	if resp.PendingMemoryScan != nil {
-@@ -4433,11 +4433,12 @@ func (d *Daemon) handleModelList(ctx con
+@@ -4462,11 +4462,12 @@ func (d *Daemon) handleModelList(ctx con
  	})
  }
  
@@ -27,7 +27,7 @@ Index: multica/server/internal/daemon/daemon.go
  		d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
  			"status": "failed",
  			"error":  err.Error(),
-@@ -4451,6 +4452,7 @@ func (d *Daemon) handleLocalSkillList(ct
+@@ -4480,6 +4481,7 @@ func (d *Daemon) handleLocalSkillList(ct
  		mcpSupported = false
  	}
  
@@ -35,7 +35,7 @@ Index: multica/server/internal/daemon/daemon.go
  	d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
  		"status":        "completed",
  		"skills":        skills,
-@@ -4567,7 +4569,7 @@ func (d *Daemon) reportMemoryWriteResult
+@@ -4596,7 +4598,7 @@ func (d *Daemon) reportMemoryWriteResult
  func (d *Daemon) handleLocalSkillImport(ctx context.Context, rt Runtime, pending PendingLocalSkillImport) {
  	d.logger.Info("runtime local skill import requested", "runtime_id", rt.ID, "request_id", pending.ID, "provider", rt.Provider, "skill_key", pending.SkillKey)
  
@@ -48,7 +48,7 @@ Index: multica/server/internal/daemon/local_skills.go
 ===================================================================
 --- multica.orig/server/internal/daemon/local_skills.go
 +++ multica/server/internal/daemon/local_skills.go
-@@ -71,6 +71,12 @@ const (
+@@ -74,6 +74,12 @@ const (
  	// localSkillRootProvider marks a runtime's own skill directory (e.g.
  	// ~/.claude/skills). These take priority over the universal root.
  	localSkillRootProvider = "provider"
@@ -61,7 +61,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	// localSkillRootUniversal marks the cross-tool ~/.agents/skills root,
  	// a convention shared by Codex, Gemini CLI, Augment and others as a
  	// universal home-level skill store. It is always searched last so a
-@@ -83,17 +89,21 @@ const (
+@@ -86,17 +92,21 @@ const (
  	localSkillRootPlugin = "plugin"
  )
  
@@ -91,7 +91,7 @@ Index: multica/server/internal/daemon/local_skills.go
  //
  // Keep the provider roots in sync with upstream docs / conventions:
  //   - GitHub Copilot: https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills
-@@ -119,7 +129,7 @@ const (
+@@ -122,7 +132,7 @@ const (
  // Longer-term this mapping would be better colocated with the provider
  // definitions under server/pkg/agent so adding a new runtime can't silently
  // miss the local-skills surface.
@@ -100,7 +100,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	home, err := os.UserHomeDir()
  	if err != nil {
  		return nil, false, fmt.Errorf("resolve user home: %w", err)
-@@ -243,8 +253,27 @@ func localSkillRootsForProvider(provider
+@@ -246,8 +256,27 @@ func localSkillRootsForProvider(provider
  
  	roots := []localSkillRoot{
  		{path: providerRoot, kind: localSkillRootProvider},
@@ -129,7 +129,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	if provider == "claude" {
  		for _, plugin := range listEnabledClaudePlugins(home) {
  			manifest, _ := readClaudePluginManifest(plugin.InstallPath)
-@@ -265,6 +294,55 @@ func localSkillRootsForProvider(provider
+@@ -268,6 +297,55 @@ func localSkillRootsForProvider(provider
  	return roots, true, nil
  }
  
@@ -185,7 +185,7 @@ Index: multica/server/internal/daemon/local_skills.go
  func isIgnoredLocalSkillEntry(name string) bool {
  	if name == "" {
  		return true
-@@ -401,8 +479,8 @@ func collectLocalSkillFiles(skillDir str
+@@ -451,8 +529,8 @@ func collectLocalSkillFiles(skillDir str
  	return files, nil
  }
  
@@ -196,7 +196,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	if err != nil || !supported {
  		return nil, supported, err
  	}
-@@ -534,11 +612,21 @@ func enumerateLocalSkills(
+@@ -584,11 +662,21 @@ func enumerateLocalSkills(
  				continue
  			}
  
@@ -219,7 +219,7 @@ Index: multica/server/internal/daemon/local_skills.go
  				Provider:    provider,
  				Root:        root.kind,
  				Plugin:      root.plugin,
-@@ -558,8 +646,8 @@ func enumerateLocalSkills(
+@@ -608,8 +696,8 @@ func enumerateLocalSkills(
  	}
  }
  

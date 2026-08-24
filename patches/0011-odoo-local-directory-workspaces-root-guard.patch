@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -5524,7 +5524,7 @@ func (d *Daemon) acquireLocalDirectoryLo
+@@ -5560,7 +5560,7 @@ func (d *Daemon) acquireLocalDirectoryLo
  		}
  		return nil, true
  	}
@@ -15,7 +15,7 @@ Index: multica/server/internal/daemon/local_directory.go
 ===================================================================
 --- multica.orig/server/internal/daemon/local_directory.go
 +++ multica/server/internal/daemon/local_directory.go
-@@ -198,13 +198,19 @@ func resolveRealPath(absPath string) (st
+@@ -255,13 +255,19 @@ func resolveRealPath(absPath string) (st
  //     this a symlink like /Users/me/proj/home -> /Users/me would slip the
  //     literal-equality check above while still routing every daemon write
  //     into $HOME;
@@ -36,7 +36,7 @@ Index: multica/server/internal/daemon/local_directory.go
  	if absPath == "" {
  		return errors.New("local_directory: local_path is empty")
  	}
-@@ -250,12 +256,54 @@ func validateLocalPath(absPath string) e
+@@ -307,12 +313,54 @@ func validateLocalPath(absPath string) e
  		}
  		return fmt.Errorf("local_directory: %s (canonical path %q)", reason, absPath)
  	}

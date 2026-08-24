@@ -27,16 +27,20 @@ import type {
   WorkspaceSubscriptionPrices,
   CreateWorkspaceSubscriptionCheckoutResponse,
   WorkspaceSubscriptionSeatReconcileResult,
+  WorkspaceSeatPurchasePreview,
+  PurchaseWorkspaceSeatsResponse,
   CreateWorkspaceSubscriptionPortalResponse,
   CronPreviewResponse,
-  DingTalkGroupRoute,
   DingTalkInstallation,
-  ListDingTalkGroupRoutesResponse,
   ListDingTalkInstallationsResponse,
+  ListDingTalkGroupsResponse,
   RedeemDingTalkBindingTokenResponse,
   WecomInstallation,
   ListWecomInstallationsResponse,
   RedeemWecomBindingTokenResponse,
+  TelegramInstallation,
+  ListTelegramInstallationsResponse,
+  RedeemTelegramBindingTokenResponse,
   GroupedIssuesResponse,
   GitHubConnectResponse,
   GitHubPullRequest,
@@ -63,7 +67,10 @@ import type {
   NotificationPreferenceResponse,
   PluginInstallation,
   PluginInstallationListResponse,
+  PluginPackage,
+  PluginPackageListResponse,
   PluginPreview,
+  PluginSurfaceLaunch,
   ResourceLabelsResponse,
   RuntimeModelListRequest,
   SearchIssuesResponse,
@@ -105,6 +112,11 @@ export const PluginHookSchema = z.object({
   description: z.string().default(""),
   triggers: z.array(z.string()).default([]),
   events: z.array(z.string()).default([]),
+  schedule: z.object({
+    cron: z.string().default(""),
+    timezone: z.string().default(""),
+    next_run_at: z.string().optional(),
+  }).loose().optional(),
   transport: z.string().default(""),
 }).loose();
 
@@ -120,7 +132,7 @@ export const PluginInstallationSchema = z.object({
   name: z.string().default(""),
   description: z.string().optional(),
   version: z.string().default(""),
-  source_url: z.string().default(""),
+  package_version_id: z.string().default(""),
   enabled: z.boolean().default(false),
   granted_scopes: z.array(z.string()).default([]),
   config_schema: z.array(PluginConfigFieldSchema).default([]),
@@ -138,7 +150,7 @@ export const EMPTY_PLUGIN_INSTALLATION: PluginInstallation = {
   plugin_key: "",
   name: "",
   version: "",
-  source_url: "",
+  package_version_id: "",
   enabled: false,
   granted_scopes: [],
   config_schema: [],
@@ -159,6 +171,67 @@ export const EMPTY_PLUGIN_INSTALLATION_LIST: PluginInstallationListResponse = {
   plugins: [],
 };
 
+/**
+ * One completed hook call. `status` is the host's classification, not the
+ * endpoint's: "refused" means we declined to make the call at all, which is a
+ * different problem for the reader than an endpoint that answered badly.
+ */
+export const PluginHookResultSchema = z.object({
+  status: z.string().default("ok"),
+  output: z.unknown().optional(),
+  error: z.string().optional(),
+  latency_ms: z.number().default(0),
+  hook_key: z.string().default(""),
+  trigger: z.string().default(""),
+  attempts: z.number().default(1),
+}).loose();
+
+export const PluginInvocationSchema = z.object({
+  id: z.string().default(""),
+  hook_key: z.string().default(""),
+  trigger: z.string().default(""),
+  status: z.string().default(""),
+  event_type: z.string().optional(),
+  attempt: z.number().default(1),
+  latency_ms: z.number().default(0),
+  error: z.string().optional(),
+  delivery_id: z.string().optional(),
+  planned_at: z.string().optional(),
+  created_at: z.string().default(""),
+}).loose();
+
+export const PluginInvocationListSchema = z.object({
+  invocations: z.array(PluginInvocationSchema).default([]),
+}).loose();
+
+/**
+ * Returned once, by the request that minted it. There is no read endpoint for
+ * either value, so a client that discards this cannot recover it.
+ */
+export const PluginTokenIssueSchema = z.object({
+  token: z.string().default(""),
+  signing_secret: z.string().default(""),
+}).loose();
+
+/**
+ * Discovered tools for one `mcp`-transport hook.
+ *
+ * Defaults matter here in the usual direction: an unparseable response yields
+ * an EMPTY list and nothing approved, so a drifted backend cannot make the UI
+ * render a tool as already-approved.
+ */
+export const PluginMCPToolSchema = z.object({
+  name: z.string().default(""),
+  description: z.string().default(""),
+  schema_digest: z.string().default(""),
+  approved: z.boolean().default(false),
+  drifted: z.boolean().default(false),
+}).loose();
+
+export const PluginMCPToolListSchema = z.object({
+  tools: z.array(PluginMCPToolSchema).default([]),
+}).loose();
+
 export const PluginManifestSummarySchema = z.object({
   key: z.string().default(""),
   name: z.string().default(""),
@@ -168,12 +241,26 @@ export const PluginManifestSummarySchema = z.object({
     name: z.string().default(""),
     url: z.string().optional(),
   }).loose().default({ name: "" }),
+  contributes: z.object({
+    hooks: z.array(z.object({
+      key: z.string().default(""),
+      name: z.string().default(""),
+      triggers: z.array(z.string()).default([]),
+      schedule: z.object({
+        cron: z.string().default(""),
+        timezone: z.string().default(""),
+      }).loose().optional(),
+    }).loose()).default([]),
+  }).loose().optional(),
 }).loose();
 
 export const PluginPreviewSchema = z.object({
   manifest: PluginManifestSummarySchema,
   scopes: z.array(z.string()).default([]),
   config_schema: z.array(PluginConfigFieldSchema).default([]),
+  version_id: z.string().default(""),
+  version: z.string().default(""),
+  digest: z.string().default(""),
   installed: z.boolean().default(false),
   installed_version: z.string().optional(),
   added_scopes: z.array(z.string()).default([]),
@@ -183,8 +270,64 @@ export const EMPTY_PLUGIN_PREVIEW: PluginPreview = {
   manifest: { key: "", name: "", version: "", author: { name: "" } },
   scopes: [],
   config_schema: [],
+  version_id: "",
+  version: "",
+  digest: "",
   installed: false,
   added_scopes: [],
+};
+
+/**
+ * A published version. `installed` is the marker the settings page reads to
+ * answer "which one am I on"; it defaults to false so a malformed response can
+ * never claim a version is running that is not.
+ */
+export const PluginPackageVersionSchema = z.object({
+  id: z.string().default(""),
+  version: z.string().default(""),
+  digest: z.string().default(""),
+  size_bytes: z.number().default(0),
+  published_at: z.string().default(""),
+  installed: z.boolean().default(false),
+}).loose();
+
+export const PluginPackageSchema = z.object({
+  id: z.string().default(""),
+  plugin_key: z.string().default(""),
+  name: z.string().default(""),
+  versions: z.array(PluginPackageVersionSchema).default([]),
+  created_at: z.string().default(""),
+}).loose();
+
+export const PluginPackageListResponseSchema = z.object({
+  packages: z.array(PluginPackageSchema).default([]),
+}).loose();
+
+export const EMPTY_PLUGIN_PACKAGE_LIST: PluginPackageListResponse = {
+  packages: [],
+};
+
+export const EMPTY_PLUGIN_PACKAGE: PluginPackage = {
+  id: "",
+  plugin_key: "",
+  name: "",
+  versions: [],
+  created_at: "",
+};
+
+/** A malformed launch becomes unavailable, never a partly trusted frame. */
+export const PluginSurfaceLaunchSchema = z.object({
+  url: z.string().default(""),
+  bridge_token: z.string().default(""),
+  version: z.string().default(""),
+  digest: z.string().default(""),
+}).loose();
+
+export const EMPTY_PLUGIN_SURFACE_LAUNCH: PluginSurfaceLaunch = {
+  url: "",
+  bridge_token: "",
+  version: "",
+  digest: "",
 };
 
 export const GitHubInstallationSchema = z.object({
@@ -376,6 +519,7 @@ export const EMPTY_LIST_ISSUE_STATUSES_RESPONSE: ListIssueStatusesResponse = {
 
 export const ResourceLabelsResponseSchema = z.object({
   labels: z.array(LabelSchema).default([]),
+  issue_revision: z.number().int().positive().optional(),
 }).loose();
 
 export const EMPTY_RESOURCE_LABELS_RESPONSE: ResourceLabelsResponse = {
@@ -568,6 +712,7 @@ export const IssuePropertyValuesSchema = z.preprocess(
 
 export const IssuePropertiesResponseSchema = z.object({
   properties: IssuePropertyValuesSchema,
+  issue_revision: z.number().int().positive().optional(),
 }).loose();
 
 export const EMPTY_ISSUE_PROPERTIES_RESPONSE: IssuePropertiesResponse = {
@@ -750,6 +895,7 @@ const TimelineEntrySchema = z.object({
   content: z.string().optional(),
   parent_id: z.string().nullable().optional(),
   updated_at: z.string().optional(),
+  revision: z.number().int().positive().optional(),
   comment_type: z.string().optional(),
   reactions: z.array(ReactionSchema).optional(),
   attachments: z.array(AttachmentSchema).optional(),
@@ -849,6 +995,7 @@ export const CommentSchema = z.object({
   attachments: z.array(AttachmentSchema).default([]),
   created_at: z.string(),
   updated_at: z.string(),
+  revision: z.number().int().positive().optional(),
   source_task_id: z.string().nullable().optional(),
   // Set only on comments a quick action produced (MUL-5465). Server-only.
   quick_action_id: z.string().nullable().optional(),
@@ -963,6 +1110,10 @@ export const IssueSchema = z.object({
   labels: z.array(z.unknown()).optional(),
   created_at: z.string(),
   updated_at: z.string(),
+  revision: z.number().int().positive().optional(),
+  // Optional for compatibility with older self-hosted backends; a current
+  // backend emits null until its historical backfill reaches the issue.
+  last_activity_at: z.string().nullable().optional(),
 }).loose();
 
 export const ListIssuesResponseSchema = z.object({
@@ -1187,6 +1338,17 @@ export const SubscribersListSchema = z.array(SubscriberSchema);
 
 export const ChildIssuesResponseSchema = z.object({
   issues: z.array(IssueSchema).default([]),
+}).loose();
+
+export const ChildIssueProgressResponseSchema = z.object({
+  progress: z.array(z.object({
+    parent_issue_id: z.string(),
+    total: z.number(),
+    done: z.number(),
+    visible_total: z.number().optional(),
+    visible_done: z.number().optional(),
+    hidden_total: z.number().optional(),
+  }).loose()).default([]),
 }).loose();
 
 export const CloudRuntimeNodeSchema = z.object({
@@ -1470,8 +1632,11 @@ export const AgentTaskSchema = z.object({
   trigger_summary: z.string().optional(),
   handoff_note: z.string().optional(),
   kind: z.string().optional(),
-  work_dir: z.string().optional(),
-  relative_work_dir: z.string().optional(),
+  work_dir: z.string().optional().catch(undefined),
+  relative_work_dir: z.string().optional().catch(undefined),
+  durable_work_dir: z.string().optional().catch(undefined),
+  relative_durable_work_dir: z.string().optional().catch(undefined),
+  branch_name: z.string().optional().catch(undefined),
   attribution: TaskAttributionSchema.optional(),
   // Per-run token usage. Same independent-degradation rule as the coverage
   // arrays above: usage is additive display metadata, so one malformed entry
@@ -1814,6 +1979,8 @@ const WebhookDeliverySchema = z.object({
   autopilot_run_id: z.string().nullable(),
   replayed_from_delivery_id: z.string().nullable(),
   error: z.string().nullable(),
+  reason_code: z.string().nullable().default(null),
+  replay_idempotency_key: z.string().nullable().default(null),
   received_at: z.string(),
   last_attempt_at: z.string(),
   created_at: z.string(),
@@ -1904,6 +2071,17 @@ export const AutopilotRunSchema = z.object({
   created_at: z.string().default(""),
 }).loose();
 
+export const AutopilotQuotaUsageSchema = z.object({
+  action: z.enum(["off", "observe", "enforce"]).default("off"),
+  used: z.number().nullable().default(null),
+  reserved: z.number().nullable().default(null),
+  limit: z.number().nullable().default(null),
+  period_start: z.string().nullable().default(null),
+  period_end: z.string().nullable().default(null),
+  reset_at: z.string().nullable().default(null),
+  blocked_counts: z.record(z.string(), z.number().int().nonnegative()).nullable().catch(null).default(null),
+}).loose();
+
 export const FALLBACK_AUTOPILOT_RUN: AutopilotRun = {
   id: "",
   autopilot_id: "",
@@ -1951,6 +2129,8 @@ export const EMPTY_WEBHOOK_DELIVERY: WebhookDelivery = {
   autopilot_run_id: null,
   replayed_from_delivery_id: null,
   error: null,
+  reason_code: null,
+  replay_idempotency_key: null,
   received_at: "",
   last_attempt_at: "",
   created_at: "",
@@ -2281,6 +2461,20 @@ export const WorkspaceSubscriptionSummarySchema = z
     actual_seats: z.number().int().nonnegative(),
     billed_seats: z.number().int().nonnegative().nullable().optional(),
     pending_seat_quantity: z.number().int().nonnegative().nullable().optional(),
+    used_seats: z.number().int().nonnegative().optional().catch(undefined),
+    reserved_seats: z.number().int().nonnegative().optional().catch(0),
+    purchase_version: z.number().int().positive().optional().catch(undefined),
+    active_seat_purchase: z
+      .object({
+        request_id: z.string(),
+        target_seats: z.number().int().positive(),
+        status: z.enum(["pending", "processing", "submitted"]),
+        expires_at: z.string().min(1).optional().catch(undefined),
+      })
+      .loose()
+      .nullable()
+      .optional()
+      .catch(null),
     cancel_at_period_end: z.boolean().optional(),
     grace_until: z.string().nullable().optional(),
     has_stripe_customer: z.boolean().optional(),
@@ -2293,6 +2487,17 @@ export const WorkspaceSubscriptionSummarySchema = z
       actualSeats: value.actual_seats,
       billedSeats: value.billed_seats ?? null,
       pendingSeatQuantity: value.pending_seat_quantity ?? null,
+      usedSeats: value.used_seats ?? value.actual_seats,
+      reservedSeats: value.reserved_seats ?? 0,
+      purchaseVersion: value.purchase_version ?? null,
+      activeSeatPurchase: value.active_seat_purchase
+        ? {
+            requestId: value.active_seat_purchase.request_id,
+            targetSeats: value.active_seat_purchase.target_seats,
+            status: value.active_seat_purchase.status,
+            expiresAt: value.active_seat_purchase.expires_at ?? null,
+          }
+        : null,
       cancelAtPeriodEnd: value.cancel_at_period_end ?? false,
       graceUntil: value.grace_until ?? null,
       hasStripeCustomer: value.has_stripe_customer ?? false,
@@ -2368,6 +2573,56 @@ export const WorkspaceSubscriptionSeatReconcileResultSchema = z
       billedSeats: value.billed_seats,
       actualSeats: value.actual_seats,
       action: value.action,
+    }),
+  );
+
+export const WorkspaceSeatPurchasePreviewSchema = z
+  .object({
+    current_seats: z.number().int().positive(),
+    additional_seats: z.number().int().positive(),
+    resulting_seats: z.number().int().positive(),
+    purchase_version: z.number().int().positive(),
+    currency: z.string().regex(/^[a-z]{3}$/),
+    proration_amount: z.number().int().nonnegative(),
+    next_invoice_amount: z.number().int().nonnegative(),
+    quoted_at: z.string().min(1),
+  })
+  .loose()
+  .transform(
+    (value): WorkspaceSeatPurchasePreview => ({
+      currentSeats: value.current_seats,
+      additionalSeats: value.additional_seats,
+      resultingSeats: value.resulting_seats,
+      purchaseVersion: value.purchase_version,
+      currency: value.currency,
+      prorationAmount: value.proration_amount,
+      nextInvoiceAmount: value.next_invoice_amount,
+      quotedAt: value.quoted_at,
+    }),
+  );
+
+export const PurchaseWorkspaceSeatsResponseSchema = z
+  .object({
+    request_id: z.string(),
+    current_seats: z.number().int().positive(),
+    additional_seats: z.number().int().positive(),
+    resulting_seats: z.number().int().positive(),
+    currency: z.string().regex(/^[a-z]{3}$/),
+    proration_amount: z.number().int().nonnegative(),
+    next_invoice_amount: z.number().int().nonnegative(),
+    status: z.enum(["pending", "submitted", "confirmed"]),
+  })
+  .loose()
+  .transform(
+    (value): PurchaseWorkspaceSeatsResponse => ({
+      requestId: value.request_id,
+      currentSeats: value.current_seats,
+      additionalSeats: value.additional_seats,
+      resultingSeats: value.resulting_seats,
+      currency: value.currency,
+      prorationAmount: value.proration_amount,
+      nextInvoiceAmount: value.next_invoice_amount,
+      status: value.status,
     }),
   );
 
@@ -2468,6 +2723,7 @@ export const DingTalkInstallationSchema = z.object({
   installed_at: z.string().default(""),
   created_at: z.string().default(""),
   updated_at: z.string().default(""),
+  agent_available: z.boolean().optional(),
   bound_dingtalk_user_ids: z.array(z.string()).catch([]).default([]),
 }).loose();
 
@@ -2487,7 +2743,6 @@ export const ListDingTalkInstallationsResponseSchema = z.object({
   installations: z.array(DingTalkInstallationSchema).default([]),
   configured: z.boolean().default(false),
   install_supported: z.boolean().optional(),
-  group_routing_supported: z.boolean().optional(),
 }).loose();
 
 export const EMPTY_LIST_DINGTALK_INSTALLATIONS_RESPONSE: ListDingTalkInstallationsResponse = {
@@ -2495,34 +2750,32 @@ export const EMPTY_LIST_DINGTALK_INSTALLATIONS_RESPONSE: ListDingTalkInstallatio
   configured: false,
 };
 
-export const DingTalkGroupRouteSchema = z.object({
-  id: z.string(),
-  workspace_id: z.string().default(""),
+export const DingTalkGroupBotSchema = z.object({
   installation_id: z.string().default(""),
-  conversation_id: z.string().default(""),
-  conversation_title: z.string().default(""),
   agent_id: z.string().default(""),
-  discovered_at: z.string().default(""),
-  updated_at: z.string().default(""),
+  bot_name: z.string().default(""),
+  bot_identity_issue: z.string().default(""),
+  last_active_at: z.string().optional(),
+  mention_count: z.number().int().nonnegative().optional(),
 }).loose();
 
-export const EMPTY_DINGTALK_GROUP_ROUTE: DingTalkGroupRoute = {
-  id: "",
-  workspace_id: "",
-  installation_id: "",
-  conversation_id: "",
-  conversation_title: "",
-  agent_id: "",
-  discovered_at: "",
-  updated_at: "",
-};
-
-export const ListDingTalkGroupRoutesResponseSchema = z.object({
-  routes: z.array(DingTalkGroupRouteSchema).default([]),
+export const DingTalkGroupSchema = z.object({
+  conversation_id: z.string(),
+  conversation_title: z.string().default(""),
+  bots: z.array(DingTalkGroupBotSchema).catch([]).default([]),
 }).loose();
 
-export const EMPTY_LIST_DINGTALK_GROUP_ROUTES_RESPONSE: ListDingTalkGroupRoutesResponse = {
-  routes: [],
+export const ListDingTalkGroupsResponseSchema = z.object({
+  groups: z.array(DingTalkGroupSchema).default([]),
+  group_discovery_supported: z.boolean().default(false),
+  inactive_group_counts: z.record(z.string(), z.number().int().nonnegative()).optional(),
+  bot_identities: z.record(z.string(), DingTalkGroupBotSchema).optional(),
+  next_offset: z.number().int().nonnegative().optional(),
+}).loose();
+
+export const EMPTY_LIST_DINGTALK_GROUPS_RESPONSE: ListDingTalkGroupsResponse = {
+  groups: [],
+  group_discovery_supported: false,
 };
 
 export const RedeemDingTalkBindingTokenResponseSchema = z.object({
@@ -2583,6 +2836,55 @@ export const EMPTY_REDEEM_WECOM_BINDING_TOKEN_RESPONSE: RedeemWecomBindingTokenR
   workspace_id: "",
   installation_id: "",
   wecom_user_id: "",
+};
+
+export const TelegramInstallationSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string().default(""),
+  agent_id: z.string().default(""),
+  bot_id: z.string().default(""),
+  bot_username: z.string().default(""),
+  installer_user_id: z.string().default(""),
+  status: z.string().default("revoked"),
+  installed_at: z.string().default(""),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+}).loose();
+
+export const EMPTY_TELEGRAM_INSTALLATION: TelegramInstallation = {
+  id: "",
+  workspace_id: "",
+  agent_id: "",
+  bot_id: "",
+  bot_username: "",
+  installer_user_id: "",
+  status: "revoked",
+  installed_at: "",
+  created_at: "",
+  updated_at: "",
+};
+
+export const ListTelegramInstallationsResponseSchema = z.object({
+  installations: z.array(TelegramInstallationSchema).default([]),
+  configured: z.boolean().default(false),
+  install_supported: z.boolean().optional(),
+}).loose();
+
+export const EMPTY_LIST_TELEGRAM_INSTALLATIONS_RESPONSE: ListTelegramInstallationsResponse = {
+  installations: [],
+  configured: false,
+};
+
+export const RedeemTelegramBindingTokenResponseSchema = z.object({
+  workspace_id: z.string().default(""),
+  installation_id: z.string().default(""),
+  telegram_user_id: z.string().default(""),
+}).loose();
+
+export const EMPTY_REDEEM_TELEGRAM_BINDING_TOKEN_RESPONSE: RedeemTelegramBindingTokenResponse = {
+  workspace_id: "",
+  installation_id: "",
+  telegram_user_id: "",
 };
 
 // Skills. Introduced for `POST /api/skills/:id/refresh` (update a skill from

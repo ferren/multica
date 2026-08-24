@@ -5,10 +5,16 @@ enforcement-policy endpoint. Commercial inputs stay in Cloud: this package does
 not contain plan names, subscription-state mapping, rollout dates, cohorts,
 exemptions, limit values, or kill-switch policy.
 
-PR-2 intentionally has no production caller. `Config.Enabled` defaults to
-`false`, a disabled client performs no HTTP request, and all gates return `off`.
-Future SaaS wiring must explicitly enable and construct the client; self-hosted
-deployments remain disabled.
+Production wiring remains explicit and off by default. Set
+`MULTICA_ENTITLEMENT_POLICY_ENABLED=true`,
+`MULTICA_ENTITLEMENT_POLICY_URL`, and the independent
+`MULTICA_ENTITLEMENT_SERVICE_TOKEN` to enable the client. A disabled client
+performs no HTTP request, and the autopilot consumer does not access its quota
+tables; the issue-window consumer likewise keeps its legacy SQL and performs no
+window read. Self-hosted deployments therefore retain the legacy paths.
+Timeout, stale grace, and the emergency down switch are controlled by
+`MULTICA_ENTITLEMENT_POLICY_TIMEOUT`, `MULTICA_ENTITLEMENT_STALE_GRACE`, and
+`MULTICA_ENTITLEMENT_EMERGENCY_DISABLED`.
 
 ## Contract
 
@@ -45,8 +51,39 @@ also bounds Cloud request rate when an outage returns errors immediately; cold
 failures are cached only as `off` and never as policy.
 
 `SetEmergencyDisabled(true)` is the local immediate down switch. It only returns
-`off`; it cannot promote a Cloud action. No background goroutine, database
-state, migration, or startup dependency is introduced by this package.
+`off`; it cannot promote a Cloud action. The client itself has no background
+goroutine and introduces no startup dependency; the autopilot consumer owns its
+policy-neutral accounting and recovery lifecycle separately.
 
 Future consumers should depend on the small `Provider` interface. Tests can use
 `server/internal/entitlement/entitlementtest.Stub` without Cloud.
+
+## Recently-created issue window
+
+The `issue_window` gate limits reads, not creation. Its base set is the
+workspace's newest `limit` rows by immutable `issue.number DESC`; deleted
+numbers may leave gaps, so implementations always use an indexed `LIMIT` and
+never derive a threshold from `workspace.issue_counter`. Every ancestor of a
+base issue is added so clients do not receive orphaned child references.
+Supplemental ancestors do not consume the base limit and do not make their
+other children visible.
+
+`last_activity_at` remains an independent issue activity/sort field. Comments,
+edits, archive-like status changes, and restores do not change membership in
+the creation window. No activity backfill is required for this gate.
+
+`off` preserves the original queries. `observe` preserves responses and records
+whether the response would contain a hidden issue. `enforce` filters list,
+search, table, children, Inbox, plugin, and agent-context reads through the same
+recursive set. A same-workspace direct read outside the set returns HTTP 402
+with `issue_outside_creation_window`; cross-workspace identifiers are resolved
+inside the requested workspace first and remain indistinguishable 404s. The
+bounded `/api/issues/window-usage` probe scans at most `limit + 1` entries from
+the existing unique `(workspace_id, number)` index.
+
+The two failure stages intentionally differ. An unavailable, stale, or
+malformed Cloud decision degrades through `observe` to `off`, so it never
+creates a new read-path dependency. After a valid `enforce` decision exists,
+however, a database failure while evaluating the visible set fails closed: the
+server cannot prove that the requested issue is allowed. `observe` evaluation
+errors remain fail-open and are recorded as telemetry only.

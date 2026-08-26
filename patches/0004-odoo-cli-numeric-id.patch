@@ -2,7 +2,7 @@ Index: multica/server/cmd/multica/cmd_autopilot.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_autopilot.go
 +++ multica/server/cmd/multica/cmd_autopilot.go
-@@ -827,11 +827,25 @@ func resolveAutopilotSubscriberInputs(ct
+@@ -940,11 +940,25 @@ func resolveAutopilotSubscriberInputs(ct
  // uuidRegexp matches a canonical UUID (8-4-4-4-12 hex).
  var uuidRegexp = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
  
@@ -34,7 +34,7 @@ Index: multica/server/cmd/multica/cmd_id_resolver.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_id_resolver.go
 +++ multica/server/cmd/multica/cmd_id_resolver.go
-@@ -78,7 +78,7 @@ func resolveIDByPrefix(ctx context.Conte
+@@ -80,7 +80,7 @@ func resolveIDByPrefix(ctx context.Conte
  	if trimmed == "" {
  		return resolvedID{}, fmt.Errorf("%s id is required", kind)
  	}
@@ -43,16 +43,20 @@ Index: multica/server/cmd/multica/cmd_id_resolver.go
  		return resolvedID{ID: trimmed, Display: trimmed}, nil
  	}
  
-@@ -150,7 +150,7 @@ func resolveIssueRef(ctx context.Context
- 	if looksLikeIssueIdentifier(trimmed) {
- 		return fetchIssueRef(ctx, client, trimmed)
+@@ -164,6 +164,12 @@ func resolveIssueRef(ctx context.Context
+ 		id := strings.ToLower(trimmed)
+ 		return resolvedID{ID: id, Display: id}, nil
  	}
--	if uuidRegexp.MatchString(trimmed) {
++	// Odoo backend mode keys records by integer ID rather than UUID, so a
++	// bare number there is a direct record id — resolve it through the issue
++	// endpoint (fetch) rather than rejecting it as an unrecognized ref.
 +	if looksLikeDirectID(trimmed) {
- 		return fetchIssueRef(ctx, client, trimmed)
- 	}
++		return fetchIssueRef(ctx, client, trimmed)
++	}
  
-@@ -275,7 +275,7 @@ func fetchAutopilotCandidates(ctx contex
+ 	// Detect the common "I copied a truncated UUID" case and give a
+ 	// tailored hint. normalizeUUIDPrefix succeeds for any input that is
+@@ -286,7 +292,7 @@ func fetchAutopilotCandidates(ctx contex
  
  func resolveTaskRunID(ctx context.Context, client *cli.APIClient, issueID, input string) (resolvedID, error) {
  	trimmed := strings.TrimSpace(input)
@@ -61,7 +65,7 @@ Index: multica/server/cmd/multica/cmd_id_resolver.go
  		return resolvedID{ID: trimmed, Display: trimmed}, nil
  	}
  	if strings.TrimSpace(issueID) == "" {
-@@ -308,7 +308,7 @@ func fetchTaskRunCandidatesForIssue(ctx
+@@ -319,7 +325,7 @@ func fetchTaskRunCandidatesForIssue(ctx
  
  func resolveAutopilotTriggerID(ctx context.Context, client *cli.APIClient, autopilotID, input string) (resolvedID, error) {
  	trimmed := strings.TrimSpace(input)
@@ -74,7 +78,7 @@ Index: multica/server/cmd/multica/cmd_issue.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_issue.go
 +++ multica/server/cmd/multica/cmd_issue.go
-@@ -2757,7 +2757,7 @@ func resolveAssigneeByID(ctx context.Con
+@@ -2760,7 +2760,7 @@ func resolveAssigneeByID(ctx context.Con
  		return "", "", fmt.Errorf("workspace ID is required to resolve assignees; use --workspace-id or set MULTICA_WORKSPACE_ID")
  	}
  	input := strings.TrimSpace(id)

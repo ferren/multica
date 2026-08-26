@@ -1,0 +1,75 @@
+Index: multica/server/internal/daemon/client.go
+===================================================================
+--- multica.orig/server/internal/daemon/client.go
++++ multica/server/internal/daemon/client.go
+@@ -868,10 +868,11 @@ func (c *Client) ListWorkspaces(ctx cont
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if c.token != "" {
+-		req.Header.Set("Authorization", "Bearer "+c.token)
+-	}
+-	c.setIdentityHeaders(req)
++	// setAuthHeaders, not a hand-rolled Bearer: in Odoo mode the credential
++	// is the OpenAPI header pair and c.token is empty, so a Bearer-only
++	// request reaches the server unauthenticated (400 "Access token missing")
++	// and workspace sync never succeeds.
++	c.setAuthHeaders(req)
+ 	if c.workspaceETag != "" {
+ 		req.Header.Set("If-None-Match", c.workspaceETag)
+ 	}
+Index: multica/server/internal/daemon/client_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/client_test.go
++++ multica/server/internal/daemon/client_test.go
+@@ -207,6 +207,50 @@ func TestClient_ListWorkspacesUsesDaemon
+ 	}
+ }
+ 
++// TestClient_ListWorkspacesSendsOdooAuthHeaders guards the Odoo-mode regression
++// where ListWorkspaces hand-rolled a Bearer-only Authorization header: in Odoo
++// mode c.token is empty and the credential is the X-GALAXY-* pair, so the
++// request reached the server with no credentials at all and every workspace
++// sync failed with 400 "Access token missing" — which also silently disabled
++// hot runtime registration (newly installed agent CLIs never converged).
++func TestClient_ListWorkspacesSendsOdooAuthHeaders(t *testing.T) {
++	mux := http.NewServeMux()
++	mux.HandleFunc("/openapi/token", func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		_ = json.NewEncoder(w).Encode(map[string]any{
++			"access_token": "tok-1",
++			"api_key":      "key-1",
++			"expires_in":   7200,
++		})
++	})
++	mux.HandleFunc("/multica/daemon/workspaces", func(w http.ResponseWriter, r *http.Request) {
++		if r.Header.Get("X-GALAXY-API-KEY") != "key-1" || r.Header.Get("X-GALAXY-ACCESS-TOKEN") != "Bearer tok-1" {
++			t.Errorf("odoo auth headers missing: api_key=%q access_token=%q",
++				r.Header.Get("X-GALAXY-API-KEY"), r.Header.Get("X-GALAXY-ACCESS-TOKEN"))
++			w.WriteHeader(http.StatusBadRequest)
++			_, _ = w.Write([]byte("Access token missing"))
++			return
++		}
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write([]byte(`[{"id":"ws-1","name":"One"}]`))
++	})
++	srv := httptest.NewServer(mux)
++	defer srv.Close()
++
++	c := NewClient(srv.URL)
++	c.SetPathPrefix("/multica")
++	if err := c.FetchOdooToken(context.Background(), "app", "secret", ""); err != nil {
++		t.Fatalf("FetchOdooToken: %v", err)
++	}
++	workspaces, err := c.ListWorkspaces(context.Background(), nil)
++	if err != nil {
++		t.Fatalf("ListWorkspaces: %v", err)
++	}
++	if len(workspaces) != 1 || workspaces[0].ID != "ws-1" {
++		t.Fatalf("workspaces = %+v, want one ws-1", workspaces)
++	}
++}
++
+ func TestClient_ListWorkspacesFallsBackToLegacyEndpointOnce(t *testing.T) {
+ 	var daemonCalls atomic.Int32
+ 	var legacyCalls atomic.Int32

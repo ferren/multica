@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -9276,6 +9276,7 @@ func convertSkillsForEnv(skills []SkillD
+@@ -9294,6 +9294,7 @@ func convertSkillsForEnv(skills []SkillD
  			Name:        s.Name,
  			Description: s.Description,
  			Content:     s.Content,
@@ -105,7 +105,7 @@ Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
 +++ multica/server/internal/daemon/execenv/execenv.go
-@@ -286,6 +286,11 @@ type SkillContextForEnv struct {
+@@ -288,6 +288,11 @@ type SkillContextForEnv struct {
  	Description string
  	Content     string
  	Files       []SkillFileContextForEnv
@@ -121,7 +121,7 @@ Index: multica/server/internal/daemon/types.go
 ===================================================================
 --- multica.orig/server/internal/daemon/types.go
 +++ multica/server/internal/daemon/types.go
-@@ -265,6 +265,13 @@ type SkillData struct {
+@@ -268,6 +268,13 @@ type SkillData struct {
  	SizeBytes   int64           `json:"size_bytes,omitempty"`
  	Content     string          `json:"content"`
  	Files       []SkillFileData `json:"files,omitempty"`

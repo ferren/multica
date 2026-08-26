@@ -31,3 +31,4 @@
 # 后续 package/publish/scheduled-hook/Public API 已全部落地；Odoo 端 plugin
 # v2 后端按新契约重做已解除阻塞（multica_update.md P9 / inair_multica TODO）。
 0028-odoo-native-only-cli-guards.patch
+0029-odoo-workspaces-list-auth.patch

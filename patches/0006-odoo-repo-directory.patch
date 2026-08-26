@@ -59,7 +59,7 @@ Index: multica/server/internal/daemon/daemon.go
  func (d *Daemon) clearTaskRepoRefs(workspaceID, taskID string) {
  	taskID = strings.TrimSpace(taskID)
  	if taskID == "" {
-@@ -8873,7 +8902,7 @@ func convertReposForEnv(repos []RepoData
+@@ -8891,7 +8920,7 @@ func convertReposForEnv(repos []RepoData
  	}
  	result := make([]execenv.RepoContextForEnv, len(repos))
  	for i, r := range repos {
@@ -115,7 +115,7 @@ Index: multica/server/internal/daemon/health.go
 ===================================================================
 --- multica.orig/server/internal/daemon/health.go
 +++ multica/server/internal/daemon/health.go
-@@ -362,11 +362,16 @@ func (d *Daemon) repoCheckoutHandler() h
+@@ -472,11 +472,16 @@ func (d *Daemon) repoCheckoutHandler() h
  			checkoutRef = d.taskRepoDefaultRef(req.WorkspaceID, req.TaskID, req.URL)
  		}
  

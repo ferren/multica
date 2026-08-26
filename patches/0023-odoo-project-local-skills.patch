@@ -562,7 +562,7 @@ Index: multica/server/pkg/protocol/messages.go
 ===================================================================
 --- multica.orig/server/pkg/protocol/messages.go
 +++ multica/server/pkg/protocol/messages.go
-@@ -385,6 +385,11 @@ type DaemonHeartbeatPendingModelList str
+@@ -405,6 +405,11 @@ type DaemonHeartbeatPendingModelList str
  // local-skill inventory.
  type DaemonHeartbeatPendingLocalSkills struct {
  	ID string `json:"id"`
@@ -574,7 +574,7 @@ Index: multica/server/pkg/protocol/messages.go
  }
  
  // DaemonHeartbeatPendingLocalSkillImport describes a request to import a
-@@ -392,6 +397,10 @@ type DaemonHeartbeatPendingLocalSkills s
+@@ -412,6 +417,10 @@ type DaemonHeartbeatPendingLocalSkills s
  type DaemonHeartbeatPendingLocalSkillImport struct {
  	ID       string `json:"id"`
  	SkillKey string `json:"skill_key"`

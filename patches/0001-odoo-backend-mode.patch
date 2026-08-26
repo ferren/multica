@@ -60,7 +60,7 @@ Index: multica/server/internal/daemon/client.go
  func cloneDefaultTransport() http.RoundTripper {
  	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
  		return transport.Clone()
-@@ -198,6 +226,22 @@ func daemonClientCapabilities() string {
+@@ -199,6 +227,22 @@ func daemonClientCapabilities() string {
  	}, ",")
  }
  
@@ -83,7 +83,7 @@ Index: multica/server/internal/daemon/client.go
  // SetToken sets the auth token for authenticated requests.
  func (c *Client) SetToken(token string) {
  	c.token = token
-@@ -208,11 +252,137 @@ func (c *Client) Token() string {
+@@ -209,11 +253,137 @@ func (c *Client) Token() string {
  	return c.token
  }
  
@@ -222,7 +222,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return resp.Task, nil
-@@ -270,7 +440,7 @@ func (c *Client) ClaimTasks(ctx context.
+@@ -271,7 +441,7 @@ func (c *Client) ClaimTasks(ctx context.
  	var resp struct {
  		Tasks []*Task `json:"tasks"`
  	}
@@ -231,7 +231,7 @@ Index: multica/server/internal/daemon/client.go
  		"daemon_id":   daemonID,
  		"runtime_ids": runtimeIDs,
  		"max_tasks":   maxTasks,
-@@ -388,7 +558,7 @@ func (c *Client) ResolveSkillBundle(ctx
+@@ -389,7 +559,7 @@ func (c *Client) ResolveSkillBundle(ctx
  		Bundles []SkillData `json:"bundles"`
  	}
  	var stats TransferStats
@@ -240,7 +240,7 @@ Index: multica/server/internal/daemon/client.go
  	if err := c.postJSONViaWithRetry(ctx, c.bundleClient, path, map[string]any{
  		"skills": []SkillRefData{ref},
  	}, &resp, skillBundleResolveRetrySchedule, &stats); err != nil {
-@@ -401,11 +571,11 @@ func (c *Client) ResolveSkillBundle(ctx
+@@ -402,11 +572,11 @@ func (c *Client) ResolveSkillBundle(ctx
  }
  
  func (c *Client) ExtendTaskPrepareLease(ctx context.Context, runtimeID, taskID string) error {
@@ -254,7 +254,7 @@ Index: multica/server/internal/daemon/client.go
  }
  
  // MarkTaskWaitingLocalDirectory parks a freshly-dispatched task in the
-@@ -418,7 +588,7 @@ func (c *Client) StartTask(ctx context.C
+@@ -419,7 +589,7 @@ func (c *Client) StartTask(ctx context.C
  // underlying SQL filters on status='dispatched', so the second call is a
  // 400 the daemon swallows and proceeds to wait).
  func (c *Client) MarkTaskWaitingLocalDirectory(ctx context.Context, taskID, reason string) error {
@@ -263,7 +263,7 @@ Index: multica/server/internal/daemon/client.go
  		"reason": reason,
  	}, nil)
  }
-@@ -466,11 +636,11 @@ func (c *Client) AckTaskCancelled(ctx co
+@@ -467,11 +637,11 @@ func (c *Client) AckTaskCancelled(ctx co
  	if ack.FailureReason != "" {
  		body["failure_reason"] = ack.FailureReason
  	}
@@ -277,7 +277,7 @@ Index: multica/server/internal/daemon/client.go
  		"summary": summary,
  		"step":    step,
  		"total":   total,
-@@ -488,7 +658,7 @@ type TaskMessageData struct {
+@@ -489,7 +659,7 @@ type TaskMessageData struct {
  }
  
  func (c *Client) ReportTaskMessages(ctx context.Context, taskID string, messages []TaskMessageData) error {
@@ -286,7 +286,7 @@ Index: multica/server/internal/daemon/client.go
  		"messages": messages,
  	}, nil)
  }
-@@ -513,14 +683,14 @@ func (c *Client) CompleteTask(ctx contex
+@@ -514,14 +684,14 @@ func (c *Client) CompleteTask(ctx contex
  	if retiredSessionID != "" {
  		body["retired_session_id"] = retiredSessionID
  	}
@@ -303,7 +303,7 @@ Index: multica/server/internal/daemon/client.go
  		"usage": usage,
  	}, nil)
  }
-@@ -551,7 +721,7 @@ func (c *Client) FailTask(ctx context.Co
+@@ -552,7 +722,7 @@ func (c *Client) FailTask(ctx context.Co
  	if retiredSessionID != "" {
  		body["retired_session_id"] = retiredSessionID
  	}
@@ -312,7 +312,7 @@ Index: multica/server/internal/daemon/client.go
  }
  
  // PinTaskSession persists the agent's session_id and work_dir on the task
-@@ -567,14 +737,14 @@ func (c *Client) PinTaskSession(ctx cont
+@@ -568,14 +738,14 @@ func (c *Client) PinTaskSession(ctx cont
  	if workDir != "" {
  		body["work_dir"] = workDir
  	}
@@ -329,7 +329,7 @@ Index: multica/server/internal/daemon/client.go
  }
  
  // GetTaskStatus returns the current status of a task. Used by the daemon to
-@@ -584,7 +754,7 @@ func (c *Client) GetTaskStatus(ctx conte
+@@ -585,7 +755,7 @@ func (c *Client) GetTaskStatus(ctx conte
  	var resp struct {
  		Status string `json:"status"`
  	}
@@ -338,7 +338,7 @@ Index: multica/server/internal/daemon/client.go
  		return "", err
  	}
  	return resp.Status, nil
-@@ -603,7 +773,7 @@ type (
+@@ -604,7 +774,7 @@ type (
  
  func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*HeartbeatResponse, error) {
  	var resp HeartbeatResponse
@@ -347,7 +347,7 @@ Index: multica/server/internal/daemon/client.go
  		"runtime_id":            runtimeID,
  		"supports_batch_import": true,
  	}, &resp); err != nil {
-@@ -614,28 +784,30 @@ func (c *Client) SendHeartbeat(ctx conte
+@@ -615,28 +785,30 @@ func (c *Client) SendHeartbeat(ctx conte
  
  // ReportUpdateResult sends the CLI update result back to the server.
  func (c *Client) ReportUpdateResult(ctx context.Context, runtimeID, updateID string, result map[string]any) error {
@@ -384,7 +384,7 @@ Index: multica/server/internal/daemon/client.go
  }
  
  // RenewTokenResponse mirrors handler.RenewPATResponse — kept loose (string +
-@@ -663,15 +835,19 @@ func (c *Client) RenewToken(ctx context.
+@@ -664,15 +836,19 @@ func (c *Client) RenewToken(ctx context.
  // daemon. New servers expose a daemon-specific endpoint with ETag support;
  // when an installed daemon talks to an older server, the first 404 switches
  // this process to the legacy full-workspace endpoint for compatibility.
@@ -407,7 +407,7 @@ Index: multica/server/internal/daemon/client.go
  	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
  	if err != nil {
  		return nil, err
-@@ -696,7 +872,7 @@ func (c *Client) ListWorkspaces(ctx cont
+@@ -697,7 +873,7 @@ func (c *Client) ListWorkspaces(ctx cont
  		c.workspaceETag = ""
  		c.workspaceCache = nil
  		c.workspaceCacheValid = false
@@ -416,7 +416,7 @@ Index: multica/server/internal/daemon/client.go
  	}
  	if resp.StatusCode == http.StatusNotModified {
  		if !c.workspaceCacheValid {
-@@ -719,9 +895,13 @@ func (c *Client) ListWorkspaces(ctx cont
+@@ -720,9 +896,13 @@ func (c *Client) ListWorkspaces(ctx cont
  	return append([]WorkspaceInfo(nil), workspaces...), nil
  }
  
@@ -432,7 +432,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return workspaces, nil
-@@ -780,7 +960,7 @@ func (c *Client) GetIssueGCChecks(ctx co
+@@ -781,7 +961,7 @@ func (c *Client) GetIssueGCChecks(ctx co
  		return c.getLegacyIssueGCChecks(ctx, issueIDs), nil
  	}
  
@@ -441,7 +441,7 @@ Index: multica/server/internal/daemon/client.go
  	var resp issueGCBatchResponse
  	err := c.postJSON(ctx, path, map[string]any{"issue_ids": issueIDs}, &resp)
  	if err != nil {
-@@ -824,7 +1004,7 @@ func (c *Client) getLegacyIssueGCChecks(
+@@ -825,7 +1005,7 @@ func (c *Client) getLegacyIssueGCChecks(
  // GetIssueGCCheck returns the status and updated_at of an issue for GC decisions.
  func (c *Client) GetIssueGCCheck(ctx context.Context, issueID string) (*IssueGCStatus, error) {
  	var resp IssueGCStatus
@@ -450,7 +450,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return &resp, nil
-@@ -842,7 +1022,7 @@ type ChatSessionGCStatus struct {
+@@ -843,7 +1023,7 @@ type ChatSessionGCStatus struct {
  // signal.
  func (c *Client) GetChatSessionGCCheck(ctx context.Context, sessionID string) (*ChatSessionGCStatus, error) {
  	var resp ChatSessionGCStatus
@@ -459,7 +459,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return &resp, nil
-@@ -861,7 +1041,7 @@ type AutopilotRunGCStatus struct {
+@@ -862,7 +1042,7 @@ type AutopilotRunGCStatus struct {
  // GetAutopilotRunGCCheck returns the status of an autopilot run for GC decisions.
  func (c *Client) GetAutopilotRunGCCheck(ctx context.Context, runID string) (*AutopilotRunGCStatus, error) {
  	var resp AutopilotRunGCStatus
@@ -468,7 +468,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return &resp, nil
-@@ -878,7 +1058,7 @@ type TaskGCStatus struct {
+@@ -879,7 +1059,7 @@ type TaskGCStatus struct {
  // GetTaskGCCheck returns the status of an agent task for GC decisions.
  func (c *Client) GetTaskGCCheck(ctx context.Context, taskID string) (*TaskGCStatus, error) {
  	var resp TaskGCStatus
@@ -477,7 +477,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return &resp, nil
-@@ -909,7 +1089,7 @@ func (c *Client) Deregister(ctx context.
+@@ -910,7 +1090,7 @@ func (c *Client) Deregister(ctx context.
  	if len(reasons) > 0 {
  		body["offline_reasons"] = reasons
  	}
@@ -486,7 +486,7 @@ Index: multica/server/internal/daemon/client.go
  }
  
  // RegisterResponse holds the server's response to a daemon registration.
-@@ -922,7 +1102,24 @@ type RegisterResponse struct {
+@@ -923,7 +1103,24 @@ type RegisterResponse struct {
  
  func (c *Client) Register(ctx context.Context, req map[string]any) (*RegisterResponse, error) {
  	var resp RegisterResponse
@@ -512,7 +512,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return &resp, nil
-@@ -937,7 +1134,7 @@ type WorkspaceReposResponse struct {
+@@ -938,7 +1135,7 @@ type WorkspaceReposResponse struct {
  
  func (c *Client) GetWorkspaceRepos(ctx context.Context, workspaceID string) (*WorkspaceReposResponse, error) {
  	var resp WorkspaceReposResponse
@@ -521,7 +521,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return &resp, nil
-@@ -974,7 +1171,7 @@ type RuntimeProfilesResponse struct {
+@@ -975,7 +1172,7 @@ type RuntimeProfilesResponse struct {
  // continues with built-in runtimes only.
  func (c *Client) GetRuntimeProfiles(ctx context.Context, workspaceID string) (*RuntimeProfilesResponse, error) {
  	var resp RuntimeProfilesResponse
@@ -530,7 +530,7 @@ Index: multica/server/internal/daemon/client.go
  		return nil, err
  	}
  	return &resp, nil
-@@ -1110,29 +1307,41 @@ func (c *Client) postJSONVia(ctx context
+@@ -1111,29 +1308,41 @@ func (c *Client) postJSONVia(ctx context
  // produced a response" apart from "the body arrived too slowly to finish" —
  // see TransferStats.
  func (c *Client) postJSONViaObserved(ctx context.Context, httpClient *http.Client, path string, reqBody any, respBody any, stats *TransferStats) error {
@@ -584,7 +584,7 @@ Index: multica/server/internal/daemon/client.go
  	defer resp.Body.Close()
  	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
  		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-@@ -1148,7 +1357,46 @@ func (c *Client) postJSONViaObserved(ctx
+@@ -1149,7 +1358,46 @@ func (c *Client) postJSONViaObserved(ctx
  }
  
  func (c *Client) getJSON(ctx context.Context, path string, respBody any) error {
@@ -1014,7 +1014,7 @@ Index: multica/server/internal/daemon/daemon.go
  }
  
  // handlePendingWorkHint reacts to a server-pushed daemon:pending_work frame by
-@@ -7479,7 +7667,7 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -7497,7 +7685,7 @@ func (d *Daemon) runTask(ctx context.Con
  	if task.Agent != nil && task.Agent.Model != "" {
  		model = task.Agent.Model
  	}
@@ -1027,7 +1027,7 @@ Index: multica/server/pkg/protocol/messages.go
 ===================================================================
 --- multica.orig/server/pkg/protocol/messages.go
 +++ multica/server/pkg/protocol/messages.go
-@@ -343,6 +343,7 @@ type DaemonHeartbeatAckPayload struct {
+@@ -363,6 +363,7 @@ type DaemonHeartbeatAckPayload struct {
  	Status                  string                                  `json:"status"`
  	ServerCapabilities      []string                                `json:"server_capabilities,omitempty"`
  	RuntimeGone             bool                                    `json:"runtime_gone,omitempty"`

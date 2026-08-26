@@ -11,7 +11,7 @@ Index: multica/server/internal/cli/client.go
  	AgentID     string // When set, requests are attributed to this agent instead of the user.
  	TaskID      string // When set, sent as X-Task-ID for agent-task validation.
  	HTTPClient  *http.Client
-@@ -166,6 +168,8 @@ func NewAPIClient(baseURL, workspaceID,
+@@ -198,6 +200,8 @@ func NewAPIClient(baseURL, workspaceID,
  	// controllers. Native mode leaves PathPrefix empty (no rewrite).
  	if os.Getenv("MULTICA_BACKEND_MODE") == "odoo" {
  		c.PathPrefix = "/multica/agent"
@@ -20,7 +20,7 @@ Index: multica/server/internal/cli/client.go
  	}
  	return c
  }
-@@ -197,7 +201,20 @@ const clientCapabilities = "stable_attac
+@@ -229,7 +233,20 @@ const clientCapabilities = "stable_attac
  
  func (c *APIClient) setHeaders(req *http.Request) {
  	req.Header.Set("X-Client-Capabilities", clientCapabilities)
@@ -46,7 +46,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -7590,16 +7590,18 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -7608,16 +7608,18 @@ func (d *Daemon) runTask(ctx context.Con
  	// as the runtime owner's member actor and can retrigger the same agent.
  	var agentToken string
  	if d.cfg.BackendMode == "odoo" {
@@ -75,7 +75,7 @@ Index: multica/server/internal/daemon/daemon.go
  	} else {
  		tok, err := taskScopedAuthToken(task)
  		if err != nil {
-@@ -7616,6 +7618,12 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -7634,6 +7636,12 @@ func (d *Daemon) runTask(ctx context.Con
  		// Signals the agent CLI to skip the task-scoped mat_ token requirement
  		// (Odoo auths via Galaxy headers, see newAPIClient / runtime brief).
  		agentEnv["MULTICA_BACKEND_MODE"] = "odoo"

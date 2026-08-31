@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -9294,6 +9294,7 @@ func convertSkillsForEnv(skills []SkillD
+@@ -9391,6 +9391,7 @@ func convertSkillsForEnv(skills []SkillD
  			Name:        s.Name,
  			Description: s.Description,
  			Content:     s.Content,
@@ -37,7 +37,7 @@ Index: multica/server/internal/daemon/execenv/context.go
  					return fmt.Errorf("write skill files: %w", err)
  				}
  			}
-@@ -941,6 +948,63 @@ func sanitizeSkillName(name string) stri
+@@ -945,6 +952,63 @@ func sanitizeSkillName(name string) stri
  // overwrite user bytes (the bug PR #3444 review caught) or skip the
  // skill entirely (which would silently drop a Multica skill the agent
  // expects to see).

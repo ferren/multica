@@ -636,7 +636,7 @@ Index: multica/server/internal/daemon/config.go
 ===================================================================
 --- multica.orig/server/internal/daemon/config.go
 +++ multica/server/internal/daemon/config.go
-@@ -146,6 +146,8 @@ type Config struct {
+@@ -142,6 +142,8 @@ type Config struct {
  	CodebuddyArgs                   []string
  	QwenArgs                        []string
  	QwenpawArgs                     []string
@@ -645,7 +645,7 @@ Index: multica/server/internal/daemon/config.go
  
  	// ProfileCommandOverrides maps a custom runtime profile_id -> the absolute
  	// executable path to use for that profile on THIS machine (MUL-3284).
-@@ -443,6 +445,12 @@ func LoadConfig(overrides Overrides) (Co
+@@ -479,6 +481,12 @@ func LoadConfig(overrides Overrides) (Co
  		return Config{}, err
  	}
  
@@ -658,7 +658,7 @@ Index: multica/server/internal/daemon/config.go
  	// Health port: override > default
  	healthPort := DefaultHealthPort
  	if overrides.HealthPort > 0 {
-@@ -513,6 +521,11 @@ func LoadConfig(overrides Overrides) (Co
+@@ -549,6 +557,11 @@ func LoadConfig(overrides Overrides) (Co
  	if overrides.DisableAutoUpdate {
  		autoUpdateEnabled = false
  	}
@@ -670,7 +670,7 @@ Index: multica/server/internal/daemon/config.go
  	autoUpdateInterval, err := durationFromEnv("MULTICA_DAEMON_AUTO_UPDATE_INTERVAL", DefaultAutoUpdateCheckInterval)
  	if err != nil {
  		return Config{}, err
-@@ -574,6 +587,8 @@ func LoadConfig(overrides Overrides) (Co
+@@ -610,6 +623,8 @@ func LoadConfig(overrides Overrides) (Co
  		CodebuddyArgs:                   codebuddyArgs,
  		QwenArgs:                        qwenArgs,
  		QwenpawArgs:                     qwenpawArgs,
@@ -683,7 +683,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -362,9 +362,10 @@ type Daemon struct {
+@@ -373,9 +373,10 @@ type Daemon struct {
  	skillCache *SkillBundleCache
  	logger     *slog.Logger
  
@@ -697,7 +697,7 @@ Index: multica/server/internal/daemon/daemon.go
  	// profileLaunchSpecs maps a custom runtime profile_id -> the absolute
  	// executable path plus fixed launch args resolved for that profile
  	// (MUL-3284). Populated in registerRuntimesForWorkspace when a profile's
-@@ -618,6 +619,10 @@ func New(cfg Config, logger *slog.Logger
+@@ -629,6 +630,10 @@ func New(cfg Config, logger *slog.Logger
  	// Tag every daemon HTTP request with the daemon's CLI version so the
  	// server can split logs/metrics by client version (parallel to the CLI).
  	client.SetVersion(cfg.CLIVersion)
@@ -708,7 +708,7 @@ Index: multica/server/internal/daemon/daemon.go
  	d := &Daemon{
  		cfg:                       cfg,
  		client:                    client,
-@@ -626,6 +631,7 @@ func New(cfg Config, logger *slog.Logger
+@@ -637,6 +642,7 @@ func New(cfg Config, logger *slog.Logger
  		logger:                    logger,
  		workspaces:                make(map[string]*workspaceState),
  		runtimeIndex:              make(map[string]Runtime),
@@ -716,7 +716,7 @@ Index: multica/server/internal/daemon/daemon.go
  		profileLaunchSpecs:        make(map[string]profileLaunchSpec),
  		runtimeSet:                newRuntimeSetWatcher(),
  		agentVersions:             make(map[string]string),
-@@ -1979,9 +1985,15 @@ func (d *Daemon) Run(ctx context.Context
+@@ -1997,9 +2003,15 @@ func (d *Daemon) Run(ctx context.Context
  		d.logger.Warn("workspaces root marker not written; CLI fail-closed guard limited to task workdirs", "error", err)
  	}
  
@@ -735,7 +735,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  
  	// Bind and serve the health port before the (potentially slow) preflight,
-@@ -1991,17 +2003,25 @@ func (d *Daemon) Run(ctx context.Context
+@@ -2009,17 +2021,25 @@ func (d *Daemon) Run(ctx context.Context
  	// which on a cold cache with many agents takes ~20s. Liveness (port up) and
  	// readiness (status:"running") are reported separately: /health stays
  	// "starting" until d.ready is set after preflight, so a slow or *failing*
@@ -770,7 +770,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  
  	// Deregister runtimes on shutdown (uses a fresh context since ctx will be cancelled).
-@@ -2016,11 +2036,19 @@ func (d *Daemon) Run(ctx context.Context
+@@ -2034,11 +2054,19 @@ func (d *Daemon) Run(ctx context.Context
  	go d.agentDiscoveryLoop(ctx)
  
  	taskWakeups := make(chan taskWakeup, 256)
@@ -794,7 +794,7 @@ Index: multica/server/internal/daemon/daemon.go
  
  	// Preflight succeeded and the background loops are up: the daemon has
  	// registered its runtimes and can now claim and run tasks. Flip /health
-@@ -2081,7 +2109,126 @@ func (d *Daemon) resolveAuth() error {
+@@ -2099,7 +2127,126 @@ func (d *Daemon) resolveAuth() error {
  	return nil
  }
  
@@ -921,7 +921,7 @@ Index: multica/server/internal/daemon/daemon.go
  func (d *Daemon) allRuntimeIDs() []string {
  	d.mu.Lock()
  	defer d.mu.Unlock()
-@@ -2089,6 +2236,9 @@ func (d *Daemon) allRuntimeIDs() []strin
+@@ -2107,6 +2254,9 @@ func (d *Daemon) allRuntimeIDs() []strin
  	for _, ws := range d.workspaces {
  		ids = append(ids, ws.runtimeIDs...)
  	}
@@ -931,7 +931,7 @@ Index: multica/server/internal/daemon/daemon.go
  	return ids
  }
  
-@@ -3608,14 +3758,24 @@ func (d *Daemon) syncWorkspacesFromAPI(c
+@@ -3637,14 +3787,24 @@ func (d *Daemon) syncWorkspacesFromAPI(c
  	apiCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
  	defer cancel()
  
@@ -957,7 +957,7 @@ Index: multica/server/internal/daemon/daemon.go
  		apiIDs[ws.ID] = ws.Name
  	}
  
-@@ -3668,6 +3828,26 @@ func (d *Daemon) syncWorkspacesFromAPI(c
+@@ -3697,6 +3857,26 @@ func (d *Daemon) syncWorkspacesFromAPI(c
  			registered++
  			continue
  		}
@@ -984,7 +984,7 @@ Index: multica/server/internal/daemon/daemon.go
  		payload := probeBuiltins()
  		var (
  			resp       *RegisterResponse
-@@ -3927,13 +4107,14 @@ func (d *Daemon) handleHeartbeatActions(
+@@ -3956,13 +4136,14 @@ func (d *Daemon) handleHeartbeatActions(
  	if resp == nil {
  		return
  	}
@@ -1000,7 +1000,7 @@ Index: multica/server/internal/daemon/daemon.go
  		)
  	}
  	if resp.PendingUpdate != nil {
-@@ -3961,6 +4142,13 @@ func (d *Daemon) handleHeartbeatActions(
+@@ -3990,6 +4171,13 @@ func (d *Daemon) handleHeartbeatActions(
  			go d.handleLocalSkillImport(ctx, *rt, *resp.PendingLocalSkillImport)
  		}
  	}
@@ -1014,7 +1014,7 @@ Index: multica/server/internal/daemon/daemon.go
  }
  
  // handlePendingWorkHint reacts to a server-pushed daemon:pending_work frame by
-@@ -7497,7 +7685,7 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -7573,7 +7761,7 @@ func (d *Daemon) runTask(ctx context.Con
  	if task.Agent != nil && task.Agent.Model != "" {
  		model = task.Agent.Model
  	}
@@ -1027,7 +1027,7 @@ Index: multica/server/pkg/protocol/messages.go
 ===================================================================
 --- multica.orig/server/pkg/protocol/messages.go
 +++ multica/server/pkg/protocol/messages.go
-@@ -363,6 +363,7 @@ type DaemonHeartbeatAckPayload struct {
+@@ -365,6 +365,7 @@ type DaemonHeartbeatAckPayload struct {
  	Status                  string                                  `json:"status"`
  	ServerCapabilities      []string                                `json:"server_capabilities,omitempty"`
  	RuntimeGone             bool                                    `json:"runtime_gone,omitempty"`

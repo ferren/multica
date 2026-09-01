@@ -1,0 +1,200 @@
+Index: multica/server/internal/daemon/local_skills.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_skills.go
++++ multica/server/internal/daemon/local_skills.go
+@@ -13,6 +13,7 @@ import (
+ 
+ 	"github.com/multica-ai/multica/server/internal/skill"
+ 	"github.com/multica-ai/multica/server/pkg/agent"
++	"github.com/multica-ai/multica/server/pkg/skillbundle"
+ )
+ 
+ const (
+@@ -48,7 +49,32 @@ type runtimeLocalSkillSummary struct {
+ 	Plugin     string `json:"plugin,omitempty"`
+ 	CanDisable bool   `json:"can_disable,omitempty"`
+ 	FileCount  int    `json:"file_count"`
+-}
++	// ContentHash fingerprints the skill's on-disk content (SKILL.md plus the
++	// supporting files) so the server can detect body-only edits that leave
++	// FileCount and Description untouched. It is built with the very same
++	// skillbundle.BuildManifest construction as the slim-claim skill_refs
++	// (source=localSkillContentHashSource, id=<skill key>), so a summary
++	// hash, the hash the server recomputes after importing the bundle, and a
++	// library skill's ref.hash all share one algorithm and cross-verify with
++	// a single tool. Older servers ignore the field; older daemons omit it
++	// (omitempty) and the server falls back to its file_count/description
++	// heuristic.
++	//
++	// IO tradeoff: computing it means enumeration passes includeContent=true
++	// to collectLocalSkillFiles and holds the bytes in memory for the hash —
++	// but the walk already reads every file for the UTF-8/NUL round-trip
++	// check, so the extra cost is transient memory bounded by the existing
++	// 1 MiB/file, 8 MiB/bundle and 256-file caps. The list payload itself
++	// still never carries file contents.
++	ContentHash string `json:"content_hash,omitempty"`
++}
++
++// localSkillContentHashSource is the skillbundle manifest source used for
++// runtime-local skill summary hashes. Distinct from workspace/builtin/plugin
++// so a summary hash can never be mistaken for a library skill's skill_refs
++// ref.hash; the Odoo importer recomputes with the same source/id pair
++// (build_skill_manifest('local', key, …) in inair_multica).
++const localSkillContentHashSource = "local"
+ 
+ type runtimeLocalSkillBundle struct {
+ 	Name        string          `json:"name"`
+@@ -669,10 +695,26 @@ func enumerateLocalSkills(
+ 				skillName = filepath.Base(path)
+ 			}
+ 
+-			files, err := collectLocalSkillFiles(path, false)
++			// includeContent=true: the summary itself still carries no file
++			// contents — the bytes are only needed in memory to compute
++			// ContentHash (see the struct comment for the IO tradeoff; the
++			// walk reads them either way for the UTF-8/NUL check).
++			files, err := collectLocalSkillFiles(path, true)
+ 			if err != nil {
+ 				continue
+ 			}
++			bundleFiles := make([]skillbundle.File, 0, len(files))
++			for _, f := range files {
++				bundleFiles = append(bundleFiles, skillbundle.File{Path: f.Path, Content: f.Content})
++			}
++			contentHash := skillbundle.BuildManifest(skillbundle.Skill{
++				Source:      localSkillContentHashSource,
++				ID:          key,
++				Name:        skillName,
++				Description: description,
++				Content:     content,
++				Files:       bundleFiles,
++			}).Hash
+ 
+ 			// source_path is matched against local_directory.local_path on the
+ 			// Odoo side for project-level skills (root="project"). Odoo stores
+@@ -698,7 +740,8 @@ func enumerateLocalSkills(
+ 				// field can carry it without duplication on import). For the
+ 				// list summary the user expects the total file count, so add
+ 				// one back for SKILL.md itself.
+-				FileCount: len(files) + 1,
++				FileCount:   len(files) + 1,
++				ContentHash: contentHash,
+ 			})
+ 			continue
+ 		}
+Index: multica/server/internal/daemon/local_skills_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_skills_test.go
++++ multica/server/internal/daemon/local_skills_test.go
+@@ -1,6 +1,7 @@
+ package daemon
+ 
+ import (
++	"encoding/json"
+ 	"os"
+ 	"path/filepath"
+ 	"reflect"
+@@ -1467,3 +1468,103 @@ func TestCollectLocalSkillFiles_ValidUTF
+ 		}
+ 	}
+ }
++
++// The summary content hash must be stable across rescans of an unchanged
++// skill directory, and must surface on the wire under the exact key the
++// Odoo report parser reads ("content_hash") without leaking file contents.
++func TestLocalSkills_ContentHash_StableAcrossRescans(t *testing.T) {
++	home := t.TempDir()
++	t.Setenv("HOME", home)
++
++	writeTestLocalSkill(t, filepath.Join(home, ".claude", "skills"), "brandkit", map[string]string{
++		"SKILL.md":        "---\nname: Brandkit\ndescription: 品牌套件\n---\n# Brandkit\n正文",
++		"refs/palette.md": "colors",
++	})
++
++	first, supported, err := listRuntimeLocalSkills("claude", nil)
++	if err != nil || !supported {
++		t.Fatalf("listRuntimeLocalSkills: supported=%v err=%v", supported, err)
++	}
++	if len(first) != 1 {
++		t.Fatalf("expected 1 skill, got %d", len(first))
++	}
++	hash := first[0].ContentHash
++	if !strings.HasPrefix(hash, "sha256:") {
++		t.Fatalf("content hash = %q, want a sha256:-prefixed digest", hash)
++	}
++
++	second, _, err := listRuntimeLocalSkills("claude", nil)
++	if err != nil {
++		t.Fatalf("rescan: %v", err)
++	}
++	if second[0].ContentHash != hash {
++		t.Fatalf("content hash changed across rescans of an unchanged dir: %q -> %q",
++			hash, second[0].ContentHash)
++	}
++
++	// Wire shape: the Odoo report parser reads "content_hash"; the summary
++	// still carries no file bodies.
++	raw, err := json.Marshal(first[0])
++	if err != nil {
++		t.Fatalf("marshal summary: %v", err)
++	}
++	var wire map[string]any
++	if err := json.Unmarshal(raw, &wire); err != nil {
++		t.Fatalf("unmarshal summary: %v", err)
++	}
++	if wire["content_hash"] != hash {
++		t.Fatalf("wire content_hash = %v, want %q", wire["content_hash"], hash)
++	}
++	if _, leaked := wire["files"]; leaked {
++		t.Fatal("summary must not carry file contents on the wire")
++	}
++}
++
++// The hash exists precisely because the file_count/description heuristic is
++// blind to body-only edits: same frontmatter (so same description), same
++// file set (so same file_count) — only bytes change. The hash must move in
++// every one of those cases.
++func TestLocalSkills_ContentHash_SensitiveToBodyOnlyChanges(t *testing.T) {
++	home := t.TempDir()
++	t.Setenv("HOME", home)
++	skillDir := filepath.Join(home, ".claude", "skills", "brandkit")
++
++	frontmatter := "---\nname: Brandkit\ndescription: 品牌套件\n---\n"
++	writeTestLocalSkill(t, filepath.Dir(skillDir), "brandkit", map[string]string{
++		"SKILL.md":        frontmatter + "# Brandkit\nv1 正文",
++		"refs/palette.md": "colors-v1",
++	})
++	hashAt := func() string {
++		t.Helper()
++		skills, _, err := listRuntimeLocalSkills("claude", nil)
++		if err != nil {
++			t.Fatalf("listRuntimeLocalSkills: %v", err)
++		}
++		if len(skills) != 1 {
++			t.Fatalf("expected 1 skill, got %d", len(skills))
++		}
++		return skills[0].ContentHash
++	}
++
++	v1 := hashAt()
++
++	// SKILL.md body-only edit: identical frontmatter and file set.
++	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
++		[]byte(frontmatter+"# Brandkit\nv2 正文改了"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	if v2 := hashAt(); v2 == v1 {
++		t.Fatal("hash must change when only the SKILL.md body changes (the old file_count/description heuristic cannot see this)")
++	} else {
++		v1 = v2
++	}
++
++	// Supporting-file body-only edit: same path set, same file_count.
++	if err := os.WriteFile(filepath.Join(skillDir, "refs", "palette.md"),
++		[]byte("colors-v2"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	if v3 := hashAt(); v3 == v1 {
++		t.Fatal("hash must change when a supporting file's content changes")
++	}
++}

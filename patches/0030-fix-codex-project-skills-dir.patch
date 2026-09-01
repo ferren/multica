@@ -1,0 +1,200 @@
+Index: multica/server/internal/daemon/local_skills.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_skills.go
++++ multica/server/internal/daemon/local_skills.go
+@@ -305,8 +305,15 @@ func localSkillRootsForProvider(provider
+ //
+ // Project-level directories mirror the user-level layout but are rooted in
+ // each project's workdir rather than $HOME. For providers whose user-level
+-// path depends on an environment variable (codex, grok, qwen), the project
++// path depends on an environment variable (grok, qwen), the project
+ // convention is the default dot-directory regardless of the env var.
++//
++// codex is the exception: its project-level convention is the cross-tool
++// .agents/skills directory, scanned by the codex CLI from $CWD up to the
++// repo root (https://developers.openai.com/codex/skills) — not a project
++// .codex/skills mirror of the user-level $CODEX_HOME/skills compat dir.
++// The earlier .codex/skills project mapping was never read by the codex
++// CLI and is no longer scanned.
+ func providerProjectSkillRelPath(provider string) (string, bool) {
+ 	switch provider {
+ 	case "claude":
+@@ -314,7 +321,10 @@ func providerProjectSkillRelPath(provide
+ 	case "codebuddy":
+ 		return ".codebuddy/skills", true
+ 	case "codex":
+-		return ".codex/skills", true
++		// Official project-level convention is the cross-tool .agents/skills
++		// (developers.openai.com/codex/skills); the user-level
++		// $CODEX_HOME/skills provider root above is the compat dir and stays.
++		return ".agents/skills", true
+ 	case "copilot":
+ 		return ".copilot/skills", true
+ 	case "opencode":
+Index: multica/server/internal/daemon/local_skills_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_skills_test.go
++++ multica/server/internal/daemon/local_skills_test.go
+@@ -4,6 +4,7 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"reflect"
++	"strings"
+ 	"testing"
+ )
+ 
+@@ -562,6 +563,154 @@ func TestListRuntimeLocalSkills_CodexUse
+ 	}
+ }
+ 
++// Codex's project-level skills live in .agents/skills per the official
++// convention (developers.openai.com/codex/skills), not in a project
++// .codex/skills mirror of the user-level compat dir. The list must surface
++// them with root=project and an absolute source_path (the Odoo side
++// prefix-matches it against local_directory.local_path), the pre-fix
++// .codex/skills project layout must no longer be scanned, and the
++// home-level universal ~/.agents/skills root must keep working for codex.
++func TestListRuntimeLocalSkills_CodexProjectRoot(t *testing.T) {
++	home := t.TempDir()
++	t.Setenv("HOME", home)
++	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
++
++	proj := t.TempDir()
++	writeTestLocalSkill(t, filepath.Join(proj, ".agents", "skills"), "proj-helper", map[string]string{
++		"SKILL.md":      "---\nname: Proj Helper\ndescription: Project-level skill\n---\n# Proj Helper\n",
++		"docs/notes.md": "notes",
++	})
++	// Old, never-official project layout: must not surface anymore.
++	writeTestLocalSkill(t, filepath.Join(proj, ".codex", "skills"), "legacy-helper", map[string]string{
++		"SKILL.md": "---\nname: Legacy Helper\n---\n",
++	})
++	writeTestLocalSkill(t, filepath.Join(home, ".agents", "skills"), "home-helper", map[string]string{
++		"SKILL.md": "---\nname: Home Helper\n---\n",
++	})
++
++	skills, supported, err := listRuntimeLocalSkills("codex", []string{proj})
++	if err != nil {
++		t.Fatalf("listRuntimeLocalSkills: %v", err)
++	}
++	if !supported {
++		t.Fatal("codex should be supported")
++	}
++
++	byKey := make(map[string]runtimeLocalSkillSummary, len(skills))
++	for _, s := range skills {
++		byKey[s.Key] = s
++	}
++	projSkill, ok := byKey["proj-helper"]
++	if !ok {
++		t.Fatalf("project .agents/skills skill missing: %#v", skills)
++	}
++	if projSkill.Root != localSkillRootProject {
++		t.Fatalf("root = %q, want %q", projSkill.Root, localSkillRootProject)
++	}
++	wantPath := filepath.ToSlash(filepath.Join(proj, ".agents", "skills", "proj-helper"))
++	if projSkill.SourcePath != wantPath {
++		t.Fatalf("source_path = %q, want absolute %q", projSkill.SourcePath, wantPath)
++	}
++	if projSkill.FileCount != 2 {
++		t.Fatalf("file_count = %d, want 2", projSkill.FileCount)
++	}
++	if _, ok := byKey["legacy-helper"]; ok {
++		t.Fatalf("legacy <project>/.codex/skills skill must not be listed: %#v", skills)
++	}
++	homeSkill, ok := byKey["home-helper"]
++	if !ok {
++		t.Fatalf("universal ~/.agents/skills skill missing for codex: %#v", skills)
++	}
++	if homeSkill.Root != localSkillRootUniversal {
++		t.Fatalf("root = %q, want %q", homeSkill.Root, localSkillRootUniversal)
++	}
++	if len(skills) != 2 {
++		t.Fatalf("expected 2 skills, got %d: %#v", len(skills), skills)
++	}
++
++	bundle, supported, err := loadRuntimeLocalSkillBundle("codex", "proj-helper", []string{proj})
++	if err != nil || !supported {
++		t.Fatalf("loadRuntimeLocalSkillBundle: supported=%v err=%v", supported, err)
++	}
++	if !strings.Contains(bundle.Content, "# Proj Helper") {
++		t.Fatalf("bundle content = %q, want project skill body", bundle.Content)
++	}
++	if len(bundle.Files) != 1 || bundle.Files[0].Path != "docs/notes.md" {
++		t.Fatalf("bundle files = %#v, want docs/notes.md", bundle.Files)
++	}
++}
++
++// A same-key skill in the user-level provider root must keep winning over
++// the project .agents/skills copy, and load must agree with the list.
++func TestLocalSkills_CodexProviderRootWinsOverProject(t *testing.T) {
++	home := t.TempDir()
++	t.Setenv("HOME", home)
++	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
++
++	proj := t.TempDir()
++	writeTestLocalSkill(t, filepath.Join(home, ".codex", "skills"), "dup", map[string]string{
++		"SKILL.md": "---\nname: Provider Dup\n---\n# provider copy\n",
++	})
++	writeTestLocalSkill(t, filepath.Join(proj, ".agents", "skills"), "dup", map[string]string{
++		"SKILL.md": "---\nname: Project Dup\n---\n# project copy\n",
++	})
++	writeTestLocalSkill(t, filepath.Join(home, ".agents", "skills"), "dup", map[string]string{
++		"SKILL.md": "---\nname: Universal Dup\n---\n# universal copy\n",
++	})
++
++	skills, _, err := listRuntimeLocalSkills("codex", []string{proj})
++	if err != nil {
++		t.Fatalf("listRuntimeLocalSkills: %v", err)
++	}
++	if len(skills) != 1 {
++		t.Fatalf("expected 1 skill, got %d: %#v", len(skills), skills)
++	}
++	if skills[0].Root != localSkillRootProvider {
++		t.Fatalf("root = %q, want %q", skills[0].Root, localSkillRootProvider)
++	}
++
++	bundle, _, err := loadRuntimeLocalSkillBundle("codex", "dup", []string{proj})
++	if err != nil {
++		t.Fatalf("loadRuntimeLocalSkillBundle: %v", err)
++	}
++	if !strings.Contains(bundle.Content, "# provider copy") {
++		t.Fatalf("bundle content = %q, want provider copy", bundle.Content)
++	}
++}
++
++// Claude's project-level mapping stays .claude/skills (unchanged by the
++// codex .agents/skills switch).
++func TestListRuntimeLocalSkills_ClaudeProjectRoot(t *testing.T) {
++	home := t.TempDir()
++	t.Setenv("HOME", home)
++
++	proj := t.TempDir()
++	writeTestLocalSkill(t, filepath.Join(proj, ".claude", "skills"), "review-helper", map[string]string{
++		"SKILL.md": "---\nname: Review Helper\n---\n# Review Helper\n",
++	})
++
++	skills, supported, err := listRuntimeLocalSkills("claude", []string{proj})
++	if err != nil {
++		t.Fatalf("listRuntimeLocalSkills: %v", err)
++	}
++	if !supported {
++		t.Fatal("claude should be supported")
++	}
++	if len(skills) != 1 {
++		t.Fatalf("expected 1 skill, got %d: %#v", len(skills), skills)
++	}
++	if skills[0].Key != "review-helper" {
++		t.Fatalf("key = %q, want review-helper", skills[0].Key)
++	}
++	if skills[0].Root != localSkillRootProject {
++		t.Fatalf("root = %q, want %q", skills[0].Root, localSkillRootProject)
++	}
++	wantPath := filepath.ToSlash(filepath.Join(proj, ".claude", "skills", "review-helper"))
++	if skills[0].SourcePath != wantPath {
++		t.Fatalf("source_path = %q, want %q", skills[0].SourcePath, wantPath)
++	}
++}
++
+ // opencode (and possibly future providers) lay skills out one level deep,
+ // e.g. ~/.config/opencode/skills/release/reporter/SKILL.md.
+ // loadRuntimeLocalSkillBundle already accepts that nested key, so the list

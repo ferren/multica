@@ -34,3 +34,4 @@
 0029-odoo-workspaces-list-auth.patch
 0030-fix-codex-project-skills-dir.patch
 0031-odoo-local-skill-content-hash.patch
+0032-odoo-memory-scan-managed-flag.patch

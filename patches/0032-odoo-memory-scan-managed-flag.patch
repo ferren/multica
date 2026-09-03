@@ -1,0 +1,66 @@
+Index: multica/server/internal/daemon/local_memory.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_memory.go
++++ multica/server/internal/daemon/local_memory.go
+@@ -58,6 +58,11 @@ type localMemoryEntry struct {
+ 	SizeBytes   int64  `json:"size_bytes"`
+ 	ModifiedAt  string `json:"modified_at,omitempty"`
+ 	ContentHash string `json:"content_hash,omitempty"`
++	// Managed reports whether this file carries the managed_by: multica
++	// marker. It is always serialized (no omitempty) so the server can tell
++	// "this daemon says the file is unmanaged" apart from "this daemon is
++	// older and does not report the flag at all".
++	Managed bool `json:"managed"`
+ }
+ 
+ // localMemoryScanResult is the per-target result.
+@@ -162,6 +167,12 @@ func parseLocalMemoryFile(dir, fileName
+ 		}
+ 		entry.Description = strings.TrimSpace(fm.Description)
+ 		entry.MemoryType = strings.TrimSpace(fm.Metadata.Type)
++		// Same rule as fileManagedByMultica, reported up front at scan time
++		// so the server can flag locally-managed files before any failed
++		// delete attempt. Read/parse failures above leave it false, which is
++		// the same fail-closed answer fileManagedByMultica would give.
++		entry.Managed = strings.EqualFold(
++			strings.TrimSpace(fm.Metadata.ManagedBy), memoryManagedByMultica)
+ 	}
+ 	body = strings.TrimSpace(body)
+ 	if utf8.RuneCountInString(body) > memoryContentReportMax {
+Index: multica/server/internal/daemon/local_memory_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_memory_test.go
++++ multica/server/internal/daemon/local_memory_test.go
+@@ -71,6 +71,9 @@ func TestParseLocalMemoryFileFrontmatter
+ 	if entry.Name != "communicate-in-chinese" || entry.MemoryType != "feedback" {
+ 		t.Fatalf("got name=%q type=%q", entry.Name, entry.MemoryType)
+ 	}
++	if entry.Managed {
++		t.Fatal("file without managed_by must not report Managed")
++	}
+ 	if entry.Description != "用户要求所有沟通一律用中文回复" {
+ 		t.Fatalf("description = %q", entry.Description)
+ 	}
+@@ -101,6 +104,22 @@ func TestParseLocalMemoryFileWithoutFron
+ 	if entry.Content != "just a note" {
+ 		t.Fatalf("content = %q", entry.Content)
+ 	}
++	if entry.Managed {
++		t.Fatal("file with no frontmatter must not report Managed")
++	}
++}
++
++func TestParseLocalMemoryFileManagedMarker(t *testing.T) {
++	// The scan report mirrors fileManagedByMultica's verdict so the server
++	// can flag locally-managed files without a failed delete first.
++	dir := t.TempDir()
++	writeMemoryFile(t, dir, "platform.md",
++		"---\nname: platform\ndescription: d\nmetadata:\n  type: project\n  managed_by: multica\n---\n\nbody\n")
++	info, _ := os.Stat(filepath.Join(dir, "platform.md"))
++	entry := parseLocalMemoryFile(dir, "platform.md", info)
++	if !entry.Managed {
++		t.Fatal("file with managed_by: multica must report Managed")
++	}
+ }
+ 
+ func TestParseLocalMemoryFileTruncatesLongBody(t *testing.T) {

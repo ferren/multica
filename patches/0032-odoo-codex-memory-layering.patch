@@ -1,0 +1,732 @@
+Index: multica/server/internal/daemon/execenv/codex_home.go
+===================================================================
+--- multica.orig/server/internal/daemon/execenv/codex_home.go
++++ multica/server/internal/daemon/execenv/codex_home.go
+@@ -212,6 +212,17 @@ func prepareCodexHomeWithOpts(codexHome
+ 	if err := prepareCodexSessionsDir(codexHome, sharedHome, opts, logger); err != nil {
+ 		logger.Warn("execenv: codex-home sessions dir prepare failed", "error", err)
+ 	}
++	// Native Codex memory is valuable within a conversation, but must never
++	// fall back to the host user's global memory or bleed into another issue.
++	// Local-directory/worktree tasks get a fresh codex-home every task ID, so
++	// mount their native store below the already issue-scoped session store.
++	if err := prepareCodexMemoriesDir(codexHome, sharedHome, opts, logger); err != nil {
++		// A failed mount only disables this optional local-learning layer for
++		// the current task. Do not mask later fatal preparation errors (notably
++		// the managed sandbox config), and do not fall back to the user's global
++		// memory directory: CODEX_HOME remains task-local either way.
++		logger.Warn("execenv: codex-home memories dir prepare failed; native memory may be unavailable for this task", "error", err)
++	}
+ 
+ 	// Symlink shared files (auth).
+ 	for _, name := range codexSymlinkedFiles {
+@@ -306,10 +317,10 @@ func prepareCodexHomeWithOpts(codexHome
+ 		logger.Warn("execenv: codex-home ensure multi-agent config failed", "error", err)
+ 	}
+ 
+-	// Disable Codex native auto-memory inside daemon-managed task sessions
+-	// so cross-task and cross-workspace context leaks (multica#3130) cannot
+-	// happen via `codex-home/memories/` or `~/.codex/memories/`. See
+-	// codex_memory.go for the full rationale and escape hatch.
++	// The task-local memory directory is isolated above, so the managed config
++	// can safely enable Codex native memory. Platform memories remain separate
++	// and are retrieved on demand; see codex_memory.go for the boundary and
++	// MULTICA_CODEX_MEMORY=0 to opt out.
+ 	if err := ensureCodexMemoryConfig(filepath.Join(codexHome, "config.toml"), logger); err != nil {
+ 		logger.Warn("execenv: codex-home ensure memory config failed", "error", err)
+ 	}
+@@ -370,6 +381,60 @@ func codexSessionStoreDir(sharedHome, ke
+ 	return filepath.Join(sharedHome, codexSessionStoreRoot, key)
+ }
+ 
++// codexMemoryStoreDir puts the native Codex memory store beneath the existing
++// per-issue session store. This gives it the same (profile, agent, issue)
++// isolation and lifecycle: the normal session-store retention job removes both
++// together, and a plain host Codex run never discovers either store.
++func codexMemoryStoreDir(sharedHome, key string) string {
++	sessionStore := codexSessionStoreDir(sharedHome, key)
++	if sessionStore == "" {
++		return ""
++	}
++	return filepath.Join(sessionStore, "memories")
++}
++
++// prepareCodexMemoriesDir makes native Codex memory durable across fresh
++// local-directory/worktree task homes, without sharing it with another issue
++// or with the user's normal ~/.codex/memories. Managed task homes are reused,
++// so their already-local directory remains authoritative.
++//
++// Existing real directories are deliberately left in place. They may belong to
++// an in-flight task created by an older daemon; replacing them would be data
++// loss. New local task homes have no such directory and get the scoped link.
++func prepareCodexMemoriesDir(codexHome, sharedHome string, opts CodexHomeOptions, logger *slog.Logger) error {
++	dst := filepath.Join(codexHome, "memories")
++	if !codexMemoryEnabled() || !opts.IsLocalDirectory {
++		return os.MkdirAll(dst, 0o755)
++	}
++	storeDir := codexMemoryStoreDir(sharedHome, opts.SessionStoreKey)
++	if storeDir == "" {
++		return os.MkdirAll(dst, 0o755)
++	}
++
++	if fi, err := os.Lstat(dst); err == nil {
++		if fi.Mode()&os.ModeSymlink != 0 {
++			if target, readErr := os.Readlink(dst); readErr == nil && sameCodexPath(target, storeDir) {
++				return nil
++			}
++		}
++		if logger != nil {
++			logger.Warn("execenv: preserving existing task-local Codex memories instead of replacing them",
++				"codex_home", codexHome)
++		}
++		return nil
++	} else if !os.IsNotExist(err) {
++		return fmt.Errorf("stat codex memories dir %s: %w", dst, err)
++	}
++
++	if err := os.MkdirAll(storeDir, 0o755); err != nil {
++		return fmt.Errorf("create codex memory store %s: %w", storeDir, err)
++	}
++	if err := createDirLink(storeDir, dst); err != nil {
++		return fmt.Errorf("link codex memories dir %s: %w", dst, err)
++	}
++	return nil
++}
++
+ // codexSessionStoreNamespace maps a daemon's profile to the directory segment
+ // that isolates its session stores from another profile-daemon's when several
+ // run on the same machine sharing one ~/.codex (profiles get separate daemon
+Index: multica/server/internal/daemon/execenv/codex_home_sessions_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/execenv/codex_home_sessions_test.go
++++ multica/server/internal/daemon/execenv/codex_home_sessions_test.go
+@@ -426,6 +426,54 @@ func TestPrepareCodexSessionsDir_LocalDi
+ 	}
+ }
+ 
++// Native Codex memories are useful across follow-up tasks, but must be no
++// broader than the same agent/issue scope as the resumed conversation. A
++// local_directory task has a fresh codex-home every time, so this locks the
++// durable-store link rather than accidentally falling back to ~/.codex.
++func TestPrepareCodexMemoriesDir_LocalDirectoryIsScopedAcrossTaskIDs(t *testing.T) {
++	t.Parallel()
++	root := t.TempDir()
++	sharedHome := filepath.Join(root, "shared")
++	key := filepath.Join("agent-1", "issue-1")
++	opts := CodexHomeOptions{IsLocalDirectory: true, SessionStoreKey: key}
++
++	home1 := filepath.Join(root, "task-1", "codex-home")
++	if err := os.MkdirAll(home1, 0o755); err != nil {
++		t.Fatalf("mkdir home1: %v", err)
++	}
++	if err := prepareCodexMemoriesDir(home1, sharedHome, opts, testLogger()); err != nil {
++		t.Fatalf("round 1 prepare: %v", err)
++	}
++	memory := filepath.Join(home1, "memories", "raw_memories.md")
++	if err := os.WriteFile(memory, []byte("only issue 1"), 0o644); err != nil {
++		t.Fatalf("write native memory: %v", err)
++	}
++
++	home2 := filepath.Join(root, "task-2", "codex-home")
++	if err := os.MkdirAll(home2, 0o755); err != nil {
++		t.Fatalf("mkdir home2: %v", err)
++	}
++	if err := prepareCodexMemoriesDir(home2, sharedHome, opts, testLogger()); err != nil {
++		t.Fatalf("round 2 prepare: %v", err)
++	}
++	data, err := os.ReadFile(filepath.Join(home2, "memories", "raw_memories.md"))
++	if err != nil || string(data) != "only issue 1" {
++		t.Fatalf("round 2 cannot read issue-scoped native memory: err=%v data=%q", err, data)
++	}
++
++	otherHome := filepath.Join(root, "task-other", "codex-home")
++	if err := os.MkdirAll(otherHome, 0o755); err != nil {
++		t.Fatalf("mkdir other home: %v", err)
++	}
++	otherOpts := CodexHomeOptions{IsLocalDirectory: true, SessionStoreKey: filepath.Join("agent-1", "issue-2")}
++	if err := prepareCodexMemoriesDir(otherHome, sharedHome, otherOpts, testLogger()); err != nil {
++		t.Fatalf("other issue prepare: %v", err)
++	}
++	if _, err := os.Stat(filepath.Join(otherHome, "memories", "raw_memories.md")); !os.IsNotExist(err) {
++		t.Fatalf("other issue must not see issue 1 native memory, err=%v", err)
++	}
++}
++
+ // A managed home migrated on a prior reuse already links the per-issue store; a
+ // subsequent reuse must treat that link as authoritative and not re-migrate it.
+ func TestPrepareCodexSessionsDir_ReusedStoreLinkIsAuthoritative(t *testing.T) {
+Index: multica/server/internal/daemon/execenv/codex_memory.go
+===================================================================
+--- multica.orig/server/internal/daemon/execenv/codex_memory.go
++++ multica/server/internal/daemon/execenv/codex_memory.go
+@@ -33,19 +33,17 @@ import (
+ //     `D:\Project\MoHaYu\WowChat` (a host-local project) injected into a
+ //     brand-new Multica issue's first Codex turn.
+ //
+-// Mitigation: write a managed block into the per-task `config.toml` that
+-// disables both the `features.memories` flag and the `memories.*`
+-// generation/consumption switches. Codex then neither writes nor reads
+-// from its memory subsystem, eliminating both leak paths regardless of
+-// where the residual files sit on disk. The user's global
+-// `~/.codex/config.toml` is never modified.
++// Multica now keeps the native store isolated before enabling it: for
++// local-directory tasks, `codex-home/memories/` is linked to the same
++// per-(daemon profile, agent, issue) durable store as the task's scoped
++// Codex sessions. That prevents both leak paths above: no task sees the
++// user's `~/.codex/memories/`, and no two issues share a native store.
++// The user's global `~/.codex/config.toml` is never modified.
+ //
+-// Users who explicitly want Codex native memory inside a Multica task
+-// (and accept the leak risk) can keep the feature enabled by setting
+-// `MULTICA_CODEX_MEMORY=1` in the daemon environment. The long-term
+-// answer for durable agent context is a Multica-owned, user-visible,
+-// project- or issue-scoped memory store — not re-enabling Codex's
+-// hidden auto-memory.
++// Platform memories deliberately do NOT get written into this store. Codex
++// owns its native summaries; the platform's global/project library remains
++// visible and editable in Multica and is retrieved on demand through
++// `multica memory list/get`. See the Odoo project-context renderer.
+ //
+ // Layout note
+ //
+@@ -54,20 +52,21 @@ import (
+ // adapt to the user's existing config. Two independent managed blocks
+ // are written:
+ //
+-//   1. memory-feature: disables `features.memories`. If the user's
++//   1. memory-feature: controls `features.memories`. If the user's
+ //      config contains a top-level `[features]` table, the override is
+ //      injected inside that table; otherwise it goes at the file root
+ //      in dotted-key form.
+-//   2. memory-config: disables `memories.generate_memories` and
++//   2. memory-config: controls `memories.generate_memories` and
+ //      `memories.use_memories`. If the user's config contains a
+ //      top-level `[memories]` table, the overrides are injected inside
+ //      that table; otherwise they go at the file root in dotted-key
+ //      form.
+ 
+-// MulticaCodexMemoryEnv is the env var users can set to keep Codex
+-// native memory enabled inside daemon-managed tasks. Anything truthy
+-// (1, true, yes, on; case-insensitive) keeps the feature on; everything
+-// else (including unset) disables it.
++// MulticaCodexMemoryEnv is the env var users can set to disable Codex native
++// memory inside daemon-managed tasks. Native memory is on by default, but
++// setting this to any conventional false value (0, false, no, off;
++// case-insensitive) keeps the managed task fully stateless. Truthy values are
++// accepted for compatibility with the old opt-in spelling.
+ const MulticaCodexMemoryEnv = "MULTICA_CODEX_MEMORY"
+ 
+ const (
+@@ -104,28 +103,29 @@ var (
+ 	rootDottedMemoriesUseRe      = regexp.MustCompile(`^\s*memories\s*\.\s*use_memories\s*=`)
+ )
+ 
+-// codexMemoryEnabled reports whether the user opted into keeping Codex
+-// native memory on for daemon-managed tasks.
++// codexMemoryEnabled reports whether native Codex memory is enabled for this
++// daemon-managed task. It defaults to true because prepareCodexMemoriesDir
++// scopes the state to one agent and one issue before Codex starts.
+ func codexMemoryEnabled() bool {
+ 	raw := strings.TrimSpace(os.Getenv(MulticaCodexMemoryEnv))
+ 	switch strings.ToLower(raw) {
+-	case "1", "true", "yes", "on":
+-		return true
++	case "0", "false", "no", "off":
++		return false
+ 	}
+-	return false
++	return true
+ }
+ 
+ // renderMulticaMemoryFeatureBlock returns the daemon-managed memory-feature
+-// block. The body uses `memories = false` when injected inside a
+-// `[features]` table, and `features.memories = false` otherwise.
+-func renderMulticaMemoryFeatureBlock(inFeaturesTable bool) string {
++// block. The body uses `memories = <enabled>` when injected inside a
++// `[features]` table, and `features.memories = <enabled>` otherwise.
++func renderMulticaMemoryFeatureBlock(inFeaturesTable, enabled bool) string {
+ 	var b strings.Builder
+ 	b.WriteString(multicaMemoryFeatureBeginMarker)
+ 	b.WriteString("\n")
+ 	if inFeaturesTable {
+-		b.WriteString("memories = false\n")
++		fmt.Fprintf(&b, "memories = %t\n", enabled)
+ 	} else {
+-		b.WriteString("features.memories = false\n")
++		fmt.Fprintf(&b, "features.memories = %t\n", enabled)
+ 	}
+ 	b.WriteString(multicaMemoryFeatureEndMarker)
+ 	b.WriteString("\n")
+@@ -135,16 +135,16 @@ func renderMulticaMemoryFeatureBlock(inF
+ // renderMulticaMemoryConfigBlock returns the daemon-managed memory-config
+ // block. The body uses bare keys when injected inside a `[memories]` table
+ // and dotted-key form otherwise.
+-func renderMulticaMemoryConfigBlock(inMemoriesTable bool) string {
++func renderMulticaMemoryConfigBlock(inMemoriesTable, enabled bool) string {
+ 	var b strings.Builder
+ 	b.WriteString(multicaMemoryConfigBeginMarker)
+ 	b.WriteString("\n")
+ 	if inMemoriesTable {
+-		b.WriteString("generate_memories = false\n")
+-		b.WriteString("use_memories = false\n")
++		fmt.Fprintf(&b, "generate_memories = %t\n", enabled)
++		fmt.Fprintf(&b, "use_memories = %t\n", enabled)
+ 	} else {
+-		b.WriteString("memories.generate_memories = false\n")
+-		b.WriteString("memories.use_memories = false\n")
++		fmt.Fprintf(&b, "memories.generate_memories = %t\n", enabled)
++		fmt.Fprintf(&b, "memories.use_memories = %t\n", enabled)
+ 	}
+ 	b.WriteString(multicaMemoryConfigEndMarker)
+ 	b.WriteString("\n")
+@@ -223,8 +223,8 @@ func hasRootMemoriesTable(content string
+ // memory-feature block immediately after the first `[features]` header
+ // line. Caller must have already stripped any prior managed block and any
+ // user-set `memories` directive from inside the table.
+-func injectMemoryFeatureBlockIntoFeaturesTable(content string) string {
+-	return injectAfterHeader(content, rootFeaturesTableHeaderRe, renderMulticaMemoryFeatureBlock(true))
++func injectMemoryFeatureBlockIntoFeaturesTable(content string, enabled bool) string {
++	return injectAfterHeader(content, rootFeaturesTableHeaderRe, renderMulticaMemoryFeatureBlock(true, enabled))
+ }
+ 
+ // injectMemoryConfigBlockIntoMemoriesTable inserts the in-table
+@@ -232,8 +232,8 @@ func injectMemoryFeatureBlockIntoFeature
+ // line. Caller must have already stripped any prior managed block and any
+ // user-set `generate_memories` / `use_memories` directive from inside the
+ // table.
+-func injectMemoryConfigBlockIntoMemoriesTable(content string) string {
+-	return injectAfterHeader(content, rootMemoriesTableHeaderRe, renderMulticaMemoryConfigBlock(true))
++func injectMemoryConfigBlockIntoMemoriesTable(content string, enabled bool) string {
++	return injectAfterHeader(content, rootMemoriesTableHeaderRe, renderMulticaMemoryConfigBlock(true, enabled))
+ }
+ 
+ // injectAfterHeader inserts block right after the first line matching
+@@ -269,23 +269,11 @@ func injectAfterHeader(content string, h
+ }
+ 
+ // ensureCodexMemoryConfig writes the daemon-managed memory blocks into the
+-// per-task config.toml so Codex native memory stays disabled. Idempotent:
+-// running it twice produces the same file.
+-//
+-// When MULTICA_CODEX_MEMORY is set to a truthy value, the function is a
+-// no-op — the user has explicitly opted into Codex native memory and
+-// accepts the leak risk. Toggling the env var across prepare runs is not
+-// supported: the per-task config is short-lived (recreated per task), so
+-// users should set the var once at daemon start.
++// per-task config.toml so Codex native memory follows the daemon policy.
++// Idempotent: running it twice produces the same file. The default is enabled
++// only after the task home has been isolated from the global Codex home.
+ func ensureCodexMemoryConfig(configPath string, logger *slog.Logger) error {
+-	if codexMemoryEnabled() {
+-		if logger != nil {
+-			logger.Info("codex memory: leaving Codex native memory untouched per MULTICA_CODEX_MEMORY",
+-				"config_path", configPath,
+-			)
+-		}
+-		return nil
+-	}
++	enabled := codexMemoryEnabled()
+ 
+ 	data, err := os.ReadFile(configPath)
+ 	if err != nil && !os.IsNotExist(err) {
+@@ -307,19 +295,19 @@ func ensureCodexMemoryConfig(configPath
+ 	// In-table injections happen first so the root-prepended blocks land
+ 	// at the very top of the file (above any user tables).
+ 	if hasFeatures {
+-		existing = injectMemoryFeatureBlockIntoFeaturesTable(existing)
++		existing = injectMemoryFeatureBlockIntoFeaturesTable(existing, enabled)
+ 	}
+ 	if hasMemories {
+-		existing = injectMemoryConfigBlockIntoMemoriesTable(existing)
++		existing = injectMemoryConfigBlockIntoMemoriesTable(existing, enabled)
+ 	}
+ 
+ 	// Build the root-form blocks (if any) and prepend them.
+ 	var prepend strings.Builder
+ 	if !hasFeatures {
+-		prepend.WriteString(renderMulticaMemoryFeatureBlock(false))
++		prepend.WriteString(renderMulticaMemoryFeatureBlock(false, enabled))
+ 	}
+ 	if !hasMemories {
+-		prepend.WriteString(renderMulticaMemoryConfigBlock(false))
++		prepend.WriteString(renderMulticaMemoryConfigBlock(false, enabled))
+ 	}
+ 	prependStr := prepend.String()
+ 
+Index: multica/server/internal/daemon/execenv/codex_memory_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/execenv/codex_memory_test.go
++++ multica/server/internal/daemon/execenv/codex_memory_test.go
+@@ -7,10 +7,9 @@ import (
+ 	"testing"
+ )
+ 
+-// requireMemoryDisabled asserts that the parsed config has Codex memory
+-// effectively turned off: features.memories = false, plus
+-// memories.generate_memories = false and memories.use_memories = false.
+-func requireMemoryDisabled(t *testing.T, parsed map[string]any) {
++// requireMemoryEnabled asserts that the parsed config enables every part of
++// Codex native memory. The task home itself is separately scoped per issue.
++func requireMemoryEnabled(t *testing.T, parsed map[string]any) {
+ 	t.Helper()
+ 
+ 	features, ok := parsed["features"].(map[string]any)
+@@ -21,8 +20,8 @@ func requireMemoryDisabled(t *testing.T,
+ 	if !ok {
+ 		t.Fatalf("expected features.memories to be a bool, got: %#v", features["memories"])
+ 	}
+-	if v {
+-		t.Errorf("expected features.memories = false, got true")
++	if !v {
++		t.Errorf("expected features.memories = true, got false")
+ 	}
+ 
+ 	memories, ok := parsed["memories"].(map[string]any)
+@@ -33,15 +32,30 @@ func requireMemoryDisabled(t *testing.T,
+ 	if !ok {
+ 		t.Fatalf("expected memories.generate_memories to be a bool, got: %#v", memories["generate_memories"])
+ 	}
+-	if gen {
+-		t.Errorf("expected memories.generate_memories = false, got true")
++	if !gen {
++		t.Errorf("expected memories.generate_memories = true, got false")
+ 	}
+ 	use, ok := memories["use_memories"].(bool)
+ 	if !ok {
+ 		t.Fatalf("expected memories.use_memories to be a bool, got: %#v", memories["use_memories"])
+ 	}
+-	if use {
+-		t.Errorf("expected memories.use_memories = false, got true")
++	if !use {
++		t.Errorf("expected memories.use_memories = true, got false")
++	}
++}
++
++func requireMemoryDisabled(t *testing.T, parsed map[string]any) {
++	t.Helper()
++	features, _ := parsed["features"].(map[string]any)
++	memories, _ := parsed["memories"].(map[string]any)
++	if value, ok := features["memories"].(bool); !ok || value {
++		t.Errorf("expected features.memories = false, got %#v", features["memories"])
++	}
++	if value, ok := memories["generate_memories"].(bool); !ok || value {
++		t.Errorf("expected memories.generate_memories = false, got %#v", memories["generate_memories"])
++	}
++	if value, ok := memories["use_memories"].(bool); !ok || value {
++		t.Errorf("expected memories.use_memories = false, got %#v", memories["use_memories"])
+ 	}
+ }
+ 
+@@ -173,9 +187,9 @@ func TestEnsureCodexMemoryConfigEmptyFil
+ 	}
+ 	got := string(data)
+ 	for _, want := range []string{
+-		"features.memories = false",
+-		"memories.generate_memories = false",
+-		"memories.use_memories = false",
++		"features.memories = true",
++		"memories.generate_memories = true",
++		"memories.use_memories = true",
+ 		multicaMemoryFeatureBeginMarker,
+ 		multicaMemoryFeatureEndMarker,
+ 		multicaMemoryConfigBeginMarker,
+@@ -185,7 +199,7 @@ func TestEnsureCodexMemoryConfigEmptyFil
+ 			t.Errorf("expected %q in output, got:\n%s", want, got)
+ 		}
+ 	}
+-	requireMemoryDisabled(t, parseTOML(t, got))
++	requireMemoryEnabled(t, parseTOML(t, got))
+ }
+ 
+ func TestEnsureCodexMemoryConfigDottedKey(t *testing.T) {
+@@ -211,19 +225,16 @@ model = "o3"
+ 
+ 	data, _ := os.ReadFile(configPath)
+ 	got := string(data)
+-	for _, banned := range []string{
+-		"features.memories = true",
+-		"memories.generate_memories = true",
+-		"memories.use_memories = true",
+-	} {
+-		if strings.Contains(got, banned) {
+-			t.Errorf("expected user %q stripped, got:\n%s", banned, got)
+-		}
++	// The managed values are intentionally also true, so verify ownership via
++	// their markers and validity below rather than text absence.
++	if !strings.Contains(got, multicaMemoryFeatureBeginMarker) ||
++		!strings.Contains(got, multicaMemoryConfigBeginMarker) {
++		t.Errorf("expected managed memory blocks, got:\n%s", got)
+ 	}
+ 	if !strings.Contains(got, `[profiles.default]`) || !strings.Contains(got, `model = "o3"`) {
+ 		t.Errorf("expected unrelated content preserved, got:\n%s", got)
+ 	}
+-	requireMemoryDisabled(t, parseTOML(t, got))
++	requireMemoryEnabled(t, parseTOML(t, got))
+ }
+ 
+ func TestEnsureCodexMemoryConfigFeaturesTable(t *testing.T) {
+@@ -249,13 +260,12 @@ model = "o3"
+ 	data, _ := os.ReadFile(configPath)
+ 	got := string(data)
+ 
+-	// User's `memories = true` inside [features] must be gone.
++	// The managed `memories = true` must be INSIDE [features], not as a root
++	// dotted key (which would redefine the table and break the strict TOML
++	// parser).
+ 	// Managed override must be INSIDE [features], not as a root dotted key
+ 	// (which would redefine the table and break the strict TOML parser).
+-	if strings.Contains(got, "memories = true") {
+-		t.Errorf("expected user memories = true to be stripped, got:\n%s", got)
+-	}
+-	if strings.Contains(got, "features.memories = false") {
++	if strings.Contains(got, "features.memories = true") {
+ 		t.Errorf("managed memory-feature block must NOT use root dotted-key form when [features] table exists (would redefine the table); got:\n%s", got)
+ 	}
+ 	if !strings.Contains(got, "[features]") {
+@@ -266,14 +276,14 @@ model = "o3"
+ 	}
+ 
+ 	// memory-config side still root-form because no [memories] table existed.
+-	if !strings.Contains(got, "memories.generate_memories = false") {
+-		t.Errorf("expected memories.generate_memories = false at root, got:\n%s", got)
++	if !strings.Contains(got, "memories.generate_memories = true") {
++		t.Errorf("expected memories.generate_memories = true at root, got:\n%s", got)
+ 	}
+-	if !strings.Contains(got, "memories.use_memories = false") {
+-		t.Errorf("expected memories.use_memories = false at root, got:\n%s", got)
++	if !strings.Contains(got, "memories.use_memories = true") {
++		t.Errorf("expected memories.use_memories = true at root, got:\n%s", got)
+ 	}
+ 
+-	requireMemoryDisabled(t, parseTOML(t, got))
++	requireMemoryEnabled(t, parseTOML(t, got))
+ }
+ 
+ func TestEnsureCodexMemoryConfigMemoriesTable(t *testing.T) {
+@@ -300,13 +310,7 @@ model = "o3"
+ 	data, _ := os.ReadFile(configPath)
+ 	got := string(data)
+ 
+-	if strings.Contains(got, "generate_memories = true") {
+-		t.Errorf("expected user generate_memories = true to be stripped, got:\n%s", got)
+-	}
+-	if strings.Contains(got, "use_memories = true") {
+-		t.Errorf("expected user use_memories = true to be stripped, got:\n%s", got)
+-	}
+-	if strings.Contains(got, "memories.generate_memories = false") {
++	if strings.Contains(got, "memories.generate_memories = true") {
+ 		t.Errorf("managed memory-config block must NOT use root dotted-key form when [memories] table exists (would redefine the table); got:\n%s", got)
+ 	}
+ 	if !strings.Contains(got, `storage_path = "/somewhere"`) {
+@@ -314,11 +318,11 @@ model = "o3"
+ 	}
+ 
+ 	// memory-feature side still root-form because no [features] table existed.
+-	if !strings.Contains(got, "features.memories = false") {
+-		t.Errorf("expected features.memories = false at root, got:\n%s", got)
++	if !strings.Contains(got, "features.memories = true") {
++		t.Errorf("expected features.memories = true at root, got:\n%s", got)
+ 	}
+ 
+-	requireMemoryDisabled(t, parseTOML(t, got))
++	requireMemoryEnabled(t, parseTOML(t, got))
+ }
+ 
+ func TestEnsureCodexMemoryConfigBothTables(t *testing.T) {
+@@ -347,10 +351,10 @@ storage_path = "/somewhere"
+ 	got := string(data)
+ 
+ 	// No root dotted-key forms when both tables exist.
+-	if strings.Contains(got, "features.memories = false") {
++	if strings.Contains(got, "features.memories = true") {
+ 		t.Errorf("managed block must NOT use root dotted-key form when [features] table exists; got:\n%s", got)
+ 	}
+-	if strings.Contains(got, "memories.generate_memories = false") {
++	if strings.Contains(got, "memories.generate_memories = true") {
+ 		t.Errorf("managed block must NOT use root dotted-key form when [memories] table exists; got:\n%s", got)
+ 	}
+ 
+@@ -362,7 +366,7 @@ storage_path = "/somewhere"
+ 		t.Errorf("expected storage_path preserved, got:\n%s", got)
+ 	}
+ 
+-	requireMemoryDisabled(t, parseTOML(t, got))
++	requireMemoryEnabled(t, parseTOML(t, got))
+ }
+ 
+ func TestEnsureCodexMemoryConfigFeaturesSubtableOnly(t *testing.T) {
+@@ -386,12 +390,12 @@ thinking = true
+ 
+ 	data, _ := os.ReadFile(configPath)
+ 	got := string(data)
+-	if !strings.Contains(got, "features.memories = false") {
++	if !strings.Contains(got, "features.memories = true") {
+ 		t.Errorf("expected root dotted-key form when only sub-tables exist, got:\n%s", got)
+ 	}
+ 
+ 	parsed := parseTOML(t, got)
+-	requireMemoryDisabled(t, parsed)
++	requireMemoryEnabled(t, parsed)
+ 	features := parsed["features"].(map[string]any)
+ 	exp, _ := features["experimental"].(map[string]any)
+ 	if v, _ := exp["thinking"].(bool); !v {
+@@ -453,12 +457,12 @@ use_memories = true
+ 			if !infoSecond.ModTime().Equal(infoFirst.ModTime()) {
+ 				t.Errorf("expected no rewrite on second pass (file was touched)")
+ 			}
+-			requireMemoryDisabled(t, parseTOML(t, string(second)))
++			requireMemoryEnabled(t, parseTOML(t, string(second)))
+ 		})
+ 	}
+ }
+ 
+-func TestEnsureCodexMemoryConfigEscapeHatch(t *testing.T) {
++func TestEnsureCodexMemoryConfigOptOut(t *testing.T) {
+ 	// Cannot run in parallel: mutates process env.
+ 	dir := t.TempDir()
+ 	configPath := filepath.Join(dir, "config.toml")
+@@ -469,7 +473,7 @@ features.memories = true
+ 		t.Fatalf("write fixture: %v", err)
+ 	}
+ 
+-	t.Setenv(MulticaCodexMemoryEnv, "1")
++	t.Setenv(MulticaCodexMemoryEnv, "0")
+ 
+ 	if err := ensureCodexMemoryConfig(configPath, nil); err != nil {
+ 		t.Fatalf("ensureCodexMemoryConfig failed: %v", err)
+@@ -477,9 +481,10 @@ features.memories = true
+ 
+ 	data, _ := os.ReadFile(configPath)
+ 	got := string(data)
+-	if got != original {
+-		t.Errorf("expected file untouched when escape hatch set\n--- got ---\n%s\n--- want ---\n%s", got, original)
++	if strings.Contains(got, "features.memories = true") {
++		t.Errorf("expected user setting replaced by managed opt-out, got:\n%s", got)
+ 	}
++	requireMemoryDisabled(t, parseTOML(t, got))
+ }
+ 
+ func TestCodexMemoryEnabledTruthy(t *testing.T) {
+@@ -494,7 +499,7 @@ func TestCodexMemoryEnabledTruthy(t *tes
+ }
+ 
+ func TestCodexMemoryEnabledFalsy(t *testing.T) {
+-	for _, v := range []string{"", "0", "false", "no", "off", "anything else"} {
++	for _, v := range []string{"0", "false", "no", "off"} {
+ 		t.Run(v, func(t *testing.T) {
+ 			t.Setenv(MulticaCodexMemoryEnv, v)
+ 			if codexMemoryEnabled() {
+@@ -504,6 +509,17 @@ func TestCodexMemoryEnabledFalsy(t *test
+ 	}
+ }
+ 
++func TestCodexMemoryEnabledByDefault(t *testing.T) {
++	for _, v := range []string{"", "anything else"} {
++		t.Run(v, func(t *testing.T) {
++			t.Setenv(MulticaCodexMemoryEnv, v)
++			if !codexMemoryEnabled() {
++				t.Errorf("expected %q to keep default enabled", v)
++			}
++		})
++	}
++}
++
+ func TestEnsureCodexMemoryConfigCoexistsWithSandboxAndMultiAgent(t *testing.T) {
+ 	t.Parallel()
+ 
+@@ -540,16 +556,14 @@ features.multi_agent = true
+ 			t.Errorf("expected marker %q in combined output, got:\n%s", marker, got)
+ 		}
+ 	}
+-	if strings.Contains(got, "features.memories = true") {
+-		t.Errorf("expected user features.memories = true stripped, got:\n%s", got)
+-	}
+ 	if strings.Contains(got, "features.multi_agent = true") {
+ 		t.Errorf("expected user features.multi_agent = true stripped, got:\n%s", got)
+ 	}
+ 
+-	// File must parse as valid TOML with everything disabled.
++	// File must parse as valid TOML with native memory enabled and native
++	// multi-agent disabled.
+ 	parsed := parseTOML(t, got)
+-	requireMemoryDisabled(t, parsed)
++	requireMemoryEnabled(t, parsed)
+ 	requireMultiAgentDisabled(t, parsed)
+ 
+ 	// Re-running all three must be idempotent.
+@@ -594,7 +608,7 @@ storage_path = "/somewhere"
+ 
+ 	data, _ := os.ReadFile(configPath)
+ 	parsed := parseTOML(t, string(data))
+-	requireMemoryDisabled(t, parsed)
++	requireMemoryEnabled(t, parsed)
+ 
+ 	features := parsed["features"].(map[string]any)
+ 	if v, _ := features["experimental_thinking"].(bool); !v {
+Index: multica/server/cmd/multica/cmd_memory.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_memory.go
++++ multica/server/cmd/multica/cmd_memory.go
+@@ -31,9 +31,10 @@ import (
+ // 404 — surfaced with a pointed error instead of a bare status code.
+ //
+ // Why this exists at all: an agent's only sanctioned channel to the backend is
+-// this CLI (no curl). Memories are injected into the task brief as an INDEX
+-// (name/type/one-line description); the body is fetched on demand with
+-// `memory get`, which is exactly what this command is for.
++// this CLI (no curl). Most runtimes receive a memory index in task context;
++// Codex receives only user/feedback hard rules and uses `memory list --query`
++// to recall project/reference entries on demand. In both cases, the body is
++// fetched with `memory get`, which is exactly what this command is for.
+ 
+ // memoryContentMaxRunes mirrors _MEMORY_CONTENT_MAX_LEN on the Odoo model.
+ // Checked client-side too so `memory import` can report which file is too long
+@@ -66,9 +67,11 @@ type memoryListResponse struct {
+ var memoryCmd = &cobra.Command{
+ 	Use:   "memory",
+ 	Short: "Read and write cross-session memories (project or workspace scoped)",
+-	Long: `Memories are facts that outlive a single run: conventions, gotchas, pointers
+-to external resources. Project memories are injected into every task brief for
+-that project; global (workspace) memories into every project's brief.
++Long: `Memories are facts that outlive a single run: conventions, gotchas, pointers
++to external resources. Most runtimes receive project-memory indexes in their task
++briefs. Codex receives only user/feedback hard rules; search the current project's
++visible library with 'memory list --query' when a task calls for a fact. Global
++(workspace) memories are visible to every project's lookup.
+ 
+ The brief carries only the INDEX (name, type, one-line description) — read a
+ body with 'memory get <name>' instead of guessing from the summary.
+Index: multica/server/internal/daemon/execenv/execenv_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/execenv/execenv_test.go
++++ multica/server/internal/daemon/execenv/execenv_test.go
+@@ -3421,8 +3421,8 @@ func TestPrepareCodexHomeSkipsMissingFil
+ 		t.Fatalf("prepareCodexHome failed: %v", err)
+ 	}
+ 
+-	// Directory should contain task-local sessions, the model-cache config
+-	// binding, and auto-generated config.toml.
++	// Directory should contain task-local sessions and native memories, the
++	// model-cache config binding, and auto-generated config.toml.
+ 	entries, err := os.ReadDir(codexHome)
+ 	if err != nil {
+ 		t.Fatalf("failed to read codex-home: %v", err)
+@@ -3434,6 +3434,9 @@ func TestPrepareCodexHomeSkipsMissingFil
+ 	if !entryNames["sessions"] {
+ 		t.Error("expected sessions directory")
+ 	}
++	if !entryNames["memories"] {
++		t.Error("expected native Codex memories directory")
++	}
+ 	if !entryNames["config.toml"] {
+ 		t.Error("expected config.toml (auto-generated for network access)")
+ 	}
+@@ -3444,7 +3447,7 @@ func TestPrepareCodexHomeSkipsMissingFil
+ 		t.Error("expected models cache config binding")
+ 	}
+ 	for name := range entryNames {
+-		if name != "sessions" && name != "config.toml" && name != "plugins" && name != codexModelsCacheBindingFile {
++		if name != "sessions" && name != "memories" && name != "config.toml" && name != "plugins" && name != codexModelsCacheBindingFile {
+ 			t.Errorf("unexpected entry: %s", name)
+ 		}
+ 	}

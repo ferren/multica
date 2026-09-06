@@ -17,6 +17,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
+	"github.com/multica-ai/multica/server/internal/dbreader"
 	"github.com/multica-ai/multica/server/internal/dbstartup"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
@@ -366,14 +367,33 @@ func main() {
 	}
 	stopStartup()
 	slog.Info("connected to database")
-	logPoolConfig(pool)
-	ctx := context.Background()
+	logPoolConfig("primary", pool)
+
+	// The replica is an optional capacity optimization, never a startup
+	// dependency. Invalid configuration preserves primary-only behavior. New
+	// replica connections are validated as read-only by the pool configuration,
+	// while request-driven fallback and a passive circuit breaker handle runtime
+	// failures without background SQL.
+	var replicaPool *pgxpool.Pool
+	if replicaURL := strings.TrimSpace(os.Getenv("DATABASE_REPLICA_URL")); replicaURL != "" {
+		replicaPool, err = newReplicaDBPool(context.Background(), replicaURL, startupSettings.ConnectTimeout)
+		if err != nil {
+			slog.Warn("database replica configuration is invalid; using primary for reads", "error", err)
+			replicaPool = nil
+		} else {
+			defer replicaPool.Close()
+			logPoolConfig("replica", replicaPool)
+		}
+	}
 
 	bus := events.New()
 	hub := realtime.NewHub()
 	go hub.Run()
 	daemonHub := daemonws.NewHub()
-	var daemonWakeup service.TaskWakeupNotifier = daemonHub
+	var daemonWakeup interface {
+		service.TaskWakeupNotifier
+		handler.RuntimeGoneNotifier
+	} = daemonHub
 	// Nil unless a Redis relay is running: without one there is only one
 	// replica, and it both publishes the completion and holds the socket.
 	var wecomRelay WecomRelay
@@ -554,42 +574,25 @@ func main() {
 	var metricsServer *http.Server
 	var httpMetrics *obsmetrics.HTTPMetrics
 	var businessMetrics *obsmetrics.BusinessMetrics
-	var samplerPool *pgxpool.Pool
 	var channelMediaMetrics *obsmetrics.ChannelMediaReconcilerMetrics
 	var channelLeaseMetrics *obsmetrics.ChannelLeaseMetrics
-	var seatCapacityMetrics *obsmetrics.SeatCapacityMetrics
 	var wecomMetrics *obsmetrics.WecomMetrics
+	var dbRoutingMetrics *obsmetrics.DBRoutingMetrics
 	if metricsConfig.Enabled() {
-		// Build a dedicated tiny pool for the BusinessSamplerCollector
-		// so a stalled scrape can never starve business traffic. If the
-		// pool fails to construct we log and continue without the
-		// sampler — the rest of /metrics is still useful.
-		var err error
-		samplerPool, err = newSamplerDBPool(ctx, dbURL)
-		if err != nil {
-			slog.Warn("metrics: failed to build sampler pgxpool; sampler disabled", "error", err)
-			samplerPool = nil
-		}
-
 		metricsRegistry := obsmetrics.NewRegistry(obsmetrics.RegistryOptions{
-			Pool:     pool,
-			Realtime: realtime.M,
-			DaemonWS: daemonws.M,
-			Version:  version,
-			Commit:   commit,
-			BusinessSampler: func() *obsmetrics.BusinessSamplerOptions {
-				if samplerPool == nil {
-					return nil
-				}
-				return &obsmetrics.BusinessSamplerOptions{Pool: samplerPool}
-			}(),
+			Pool:        pool,
+			ReplicaPool: replicaPool,
+			Realtime:    realtime.M,
+			DaemonWS:    daemonws.M,
+			Version:     version,
+			Commit:      commit,
 		})
 		httpMetrics = metricsRegistry.HTTP
 		businessMetrics = metricsRegistry.Business
 		channelMediaMetrics = metricsRegistry.ChannelMedia
 		channelLeaseMetrics = metricsRegistry.ChannelLease
-		seatCapacityMetrics = metricsRegistry.SeatCapacity
 		wecomMetrics = metricsRegistry.Wecom
+		dbRoutingMetrics = metricsRegistry.DBRouting
 		// Forward inbound daemon WS frames into the per-kind counter so
 		// dashboards can split heartbeat / unknown / invalid traffic.
 		if daemonHub != nil {
@@ -603,15 +606,11 @@ func main() {
 			)
 		}
 	}
-	if samplerPool != nil {
-		defer samplerPool.Close()
-	}
-
 	// Construct the BatchedHeartbeatScheduler before the router so it can
 	// be injected into the Handler. The Run goroutine starts below
 	// alongside the sweeper, and Stop is called explicitly during graceful
 	// shutdown so any pending bumps are flushed before we exit.
-	heartbeatScheduler := handler.NewBatchedHeartbeatScheduler(queries, handler.DefaultHeartbeatBatchInterval)
+	heartbeatScheduler := handler.NewBatchedHeartbeatScheduler(queries, handler.DefaultHeartbeatBatchInterval, daemonWakeup)
 
 	// Validate the LLM retry budget before the router exists: an operator who
 	// typed a value we cannot honor should see the boot stop, the same way a
@@ -621,12 +620,15 @@ func main() {
 		slog.Error("invalid MULTICA_LLM_MAX_RETRIES", "error", err)
 		os.Exit(1)
 	}
+	var readRecorder dbreader.Recorder
+	if dbRoutingMetrics != nil {
+		readRecorder = dbRoutingMetrics
+	}
 
 	r, h := NewRouterWithOptions(pool, hub, bus, analyticsClient, storeRedis, RouterOptions{
 		HTTPMetrics:         httpMetrics,
 		BusinessMetrics:     businessMetrics,
 		ChannelLeaseMetrics: channelLeaseMetrics,
-		SeatCapacityMetrics: seatCapacityMetrics,
 		ChannelLeaseRedis:   channelLeaseRedis,
 		WecomMetrics:        wecomMetrics,
 		DaemonHub:           daemonHub,
@@ -637,6 +639,18 @@ func main() {
 		HeartbeatScheduler:  heartbeatScheduler,
 		LLMMaxRetries:       llmMaxRetries,
 	})
+	var replicaQueries *db.Queries
+	if replicaPool != nil {
+		replicaQueries = db.New(replicaPool)
+	}
+	// Reuse the handler's primary Queries handle so replica routing does not
+	// create a second wrapper around the same primary pool.
+	h.ReadSelector = dbreader.New(h.Queries, replicaQueries, readRecorder)
+
+	// Reconciled race recoveries in the batched scheduler reuse the same
+	// daemon:register refresh the sync transition path publishes. Wired before
+	// the scheduler's Run goroutine starts so the field write is race-free.
+	heartbeatScheduler.RecoveryNotifier = h
 
 	srv := newMainHTTPServer(":"+port, r)
 	profilingServer := profiling.NewServer()
@@ -674,6 +688,7 @@ func main() {
 	// work, so there is no separate queue TTL to tune: a busy runtime keeps its
 	// backlog, and a departed one retires everything it owned at once.
 	go runRuntimeSweeper(sweepCtx, queries, liveness, taskSvc, bus, runtimeReconnectGrace)
+	go runDelegatedFailureRecoverySweeper(sweepCtx, taskSvc)
 	// Seven-day runtime retention does not share the 30-second liveness tick:
 	// its bounded transactions run independently once per hour, so a slow GC
 	// round cannot delay offline detection or task recovery.
@@ -686,7 +701,10 @@ func main() {
 	if autopilotSvc.QuotaEnabled() {
 		go runAutopilotQuotaReconciler(autopilotCtx, autopilotSvc)
 	}
-	go runDBStatsLogger(sweepCtx, pool)
+	go runDBStatsLogger(sweepCtx, "primary", pool)
+	if replicaPool != nil {
+		go runDBStatsLogger(sweepCtx, "replica", replicaPool)
+	}
 	if h.WebhookDeliveryWorker != nil {
 		go h.WebhookDeliveryWorker.Run(sweepCtx)
 	}

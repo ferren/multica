@@ -700,7 +700,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv_test.go
 +++ multica/server/internal/daemon/execenv/execenv_test.go
-@@ -3421,8 +3421,8 @@ func TestPrepareCodexHomeSkipsMissingFil
+@@ -3387,8 +3387,8 @@ func TestPrepareCodexHomeSkipsMissingFil
  		t.Fatalf("prepareCodexHome failed: %v", err)
  	}
  
@@ -711,7 +711,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
  	entries, err := os.ReadDir(codexHome)
  	if err != nil {
  		t.Fatalf("failed to read codex-home: %v", err)
-@@ -3434,6 +3434,9 @@ func TestPrepareCodexHomeSkipsMissingFil
+@@ -3400,6 +3400,9 @@ func TestPrepareCodexHomeSkipsMissingFil
  	if !entryNames["sessions"] {
  		t.Error("expected sessions directory")
  	}
@@ -721,7 +721,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
  	if !entryNames["config.toml"] {
  		t.Error("expected config.toml (auto-generated for network access)")
  	}
-@@ -3444,7 +3447,7 @@ func TestPrepareCodexHomeSkipsMissingFil
+@@ -3410,7 +3413,7 @@ func TestPrepareCodexHomeSkipsMissingFil
  		t.Error("expected models cache config binding")
  	}
  	for name := range entryNames {

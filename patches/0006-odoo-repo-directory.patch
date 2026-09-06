@@ -10,7 +10,7 @@ Index: multica/server/internal/daemon/daemon.go
  	settings        json.RawMessage              // workspace settings (JSONB)
  	lastRepoSyncErr string
  	repoRefreshMu   contextLock
-@@ -3245,6 +3246,9 @@ func (d *Daemon) registerTaskRepos(works
+@@ -3257,6 +3258,9 @@ func (d *Daemon) registerTaskRepos(works
  	if taskID != "" && ws.taskRepoRefs == nil {
  		ws.taskRepoRefs = make(map[string]map[string]string)
  	}
@@ -20,7 +20,7 @@ Index: multica/server/internal/daemon/daemon.go
  	candidates := make([]repoCandidate, 0, len(repos))
  	for _, repo := range repos {
  		url := strings.TrimSpace(repo.URL)
-@@ -3263,6 +3267,12 @@ func (d *Daemon) registerTaskRepos(works
+@@ -3275,6 +3279,12 @@ func (d *Daemon) registerTaskRepos(works
  			if _, exists := ws.taskRepoRefs[taskID][url]; !exists {
  				ws.taskRepoRefs[taskID][url] = strings.TrimSpace(repo.Ref)
  			}
@@ -33,7 +33,7 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  		candidates = append(candidates, repoCandidate{
  			url:     url,
-@@ -3307,6 +3317,25 @@ func (d *Daemon) taskRepoDefaultRef(work
+@@ -3319,6 +3329,25 @@ func (d *Daemon) taskRepoDefaultRef(work
  	return strings.TrimSpace(ws.taskRepoRefs[taskID][repoURL])
  }
  
@@ -59,7 +59,7 @@ Index: multica/server/internal/daemon/daemon.go
  func (d *Daemon) clearTaskRepoRefs(workspaceID, taskID string) {
  	taskID = strings.TrimSpace(taskID)
  	if taskID == "" {
-@@ -8988,7 +9017,7 @@ func convertReposForEnv(repos []RepoData
+@@ -9462,7 +9491,7 @@ func convertReposForEnv(repos []RepoData
  	}
  	result := make([]execenv.RepoContextForEnv, len(repos))
  	for i, r := range repos {
@@ -168,7 +168,7 @@ Index: multica/server/internal/daemon/repocache/cache.go
  
  	// Once a workdir has moved to isolated metadata, keep using that safer
  	// shape even if a later task comes from an older CLI or a different runtime
-@@ -1748,6 +1761,27 @@ func excludeFromGitContext(ctx context.C
+@@ -2013,6 +2026,27 @@ func excludeFromGitContext(ctx context.C
  	return nil
  }
  

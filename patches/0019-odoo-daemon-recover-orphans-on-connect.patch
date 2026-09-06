@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -2211,6 +2211,20 @@ func (d *Daemon) connectDaemon(ctx conte
+@@ -2223,6 +2223,20 @@ func (d *Daemon) connectDaemon(ctx conte
  	}
  	d.mu.Unlock()
  

@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -298,6 +298,7 @@ type workspaceState struct {
+@@ -308,6 +308,7 @@ type workspaceState struct {
  	allowedRepoURLs map[string]struct{}
  	taskRepoURLs    map[string]struct{}
  	taskRepoRefs    map[string]map[string]string // taskID -> repo URL -> checkout ref
@@ -10,7 +10,7 @@ Index: multica/server/internal/daemon/daemon.go
  	settings        json.RawMessage              // workspace settings (JSONB)
  	lastRepoSyncErr string
  	repoRefreshMu   contextLock
-@@ -3257,6 +3258,9 @@ func (d *Daemon) registerTaskRepos(works
+@@ -3519,6 +3520,9 @@ func (d *Daemon) registerTaskRepos(works
  	if taskID != "" && ws.taskRepoRefs == nil {
  		ws.taskRepoRefs = make(map[string]map[string]string)
  	}
@@ -20,7 +20,7 @@ Index: multica/server/internal/daemon/daemon.go
  	candidates := make([]repoCandidate, 0, len(repos))
  	for _, repo := range repos {
  		url := strings.TrimSpace(repo.URL)
-@@ -3275,6 +3279,12 @@ func (d *Daemon) registerTaskRepos(works
+@@ -3537,6 +3541,12 @@ func (d *Daemon) registerTaskRepos(works
  			if _, exists := ws.taskRepoRefs[taskID][url]; !exists {
  				ws.taskRepoRefs[taskID][url] = strings.TrimSpace(repo.Ref)
  			}
@@ -33,7 +33,7 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  		candidates = append(candidates, repoCandidate{
  			url:     url,
-@@ -3319,6 +3329,25 @@ func (d *Daemon) taskRepoDefaultRef(work
+@@ -3581,6 +3591,25 @@ func (d *Daemon) taskRepoDefaultRef(work
  	return strings.TrimSpace(ws.taskRepoRefs[taskID][repoURL])
  }
  
@@ -59,7 +59,7 @@ Index: multica/server/internal/daemon/daemon.go
  func (d *Daemon) clearTaskRepoRefs(workspaceID, taskID string) {
  	taskID = strings.TrimSpace(taskID)
  	if taskID == "" {
-@@ -9462,7 +9491,7 @@ func convertReposForEnv(repos []RepoData
+@@ -10086,7 +10115,7 @@ func convertReposForEnv(repos []RepoData
  	}
  	result := make([]execenv.RepoContextForEnv, len(repos))
  	for i, r := range repos {
@@ -84,7 +84,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config_sections.go
 +++ multica/server/internal/daemon/execenv/runtime_config_sections.go
-@@ -402,11 +402,23 @@ func writeRepositories(b *strings.Builde
+@@ -404,11 +404,23 @@ func writeRepositories(b *strings.Builde
  	b.WriteString("## Repositories\n\n")
  	b.WriteString("Available in this workspace — `multica repo checkout <url> [--ref <branch-or-sha>]` to fetch (creates a repository checkout on a dedicated branch).\n\n")
  	for _, repo := range ctx.Repos {
@@ -115,7 +115,7 @@ Index: multica/server/internal/daemon/health.go
 ===================================================================
 --- multica.orig/server/internal/daemon/health.go
 +++ multica/server/internal/daemon/health.go
-@@ -472,11 +472,16 @@ func (d *Daemon) repoCheckoutHandler() h
+@@ -477,11 +477,16 @@ func (d *Daemon) repoCheckoutHandler() h
  			checkoutRef = d.taskRepoDefaultRef(req.WorkspaceID, req.TaskID, req.URL)
  		}
  
@@ -144,7 +144,7 @@ Index: multica/server/internal/daemon/repocache/cache.go
  	AgentName           string // for branch naming
  	TaskID              string // for branch naming uniqueness
  	CoAuthoredByEnabled bool   // install prepare-commit-msg hook for Co-authored-by trailer
-@@ -838,9 +839,21 @@ func (c *Cache) CreateWorktreeContext(ct
+@@ -864,9 +865,21 @@ func (c *Cache) CreateWorktreeContext(ct
  	// Build branch name: agent/{sanitized-name}/{task-id}
  	branchName := fmt.Sprintf("agent/%s/%s", sanitizeName(params.AgentName), taskKey(params.TaskID))
  
@@ -168,7 +168,7 @@ Index: multica/server/internal/daemon/repocache/cache.go
  
  	// Once a workdir has moved to isolated metadata, keep using that safer
  	// shape even if a later task comes from an older CLI or a different runtime
-@@ -2013,6 +2026,27 @@ func excludeFromGitContext(ctx context.C
+@@ -2208,6 +2221,27 @@ func excludeFromGitContext(ctx context.C
  	return nil
  }
  

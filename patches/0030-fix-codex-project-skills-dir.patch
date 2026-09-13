@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/local_skills.go
 ===================================================================
 --- multica.orig/server/internal/daemon/local_skills.go
 +++ multica/server/internal/daemon/local_skills.go
-@@ -305,8 +305,15 @@ func localSkillRootsForProvider(provider
+@@ -324,8 +324,15 @@ func hermesLocalSkillsRoot() string {
  //
  // Project-level directories mirror the user-level layout but are rooted in
  // each project's workdir rather than $HOME. For providers whose user-level
@@ -19,7 +19,7 @@ Index: multica/server/internal/daemon/local_skills.go
  func providerProjectSkillRelPath(provider string) (string, bool) {
  	switch provider {
  	case "claude":
-@@ -314,7 +321,10 @@ func providerProjectSkillRelPath(provide
+@@ -333,7 +340,10 @@ func providerProjectSkillRelPath(provide
  	case "codebuddy":
  		return ".codebuddy/skills", true
  	case "codex":
@@ -35,15 +35,15 @@ Index: multica/server/internal/daemon/local_skills_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/local_skills_test.go
 +++ multica/server/internal/daemon/local_skills_test.go
-@@ -4,6 +4,7 @@ import (
- 	"os"
+@@ -5,6 +5,7 @@ import (
  	"path/filepath"
  	"reflect"
+ 	"runtime"
 +	"strings"
  	"testing"
  )
  
-@@ -562,6 +563,154 @@ func TestListRuntimeLocalSkills_CodexUse
+@@ -694,6 +695,154 @@ func TestListRuntimeLocalSkills_CodexUse
  	}
  }
  

@@ -20,7 +20,7 @@ Index: multica/server/internal/daemon/execenv/codex_home.go
  
  	// Symlink shared files (auth).
  	for _, name := range codexSymlinkedFiles {
-@@ -306,10 +317,10 @@ func prepareCodexHomeWithOpts(codexHome
+@@ -307,10 +318,10 @@ func prepareCodexHomeWithOpts(codexHome
  		logger.Warn("execenv: codex-home ensure multi-agent config failed", "error", err)
  	}
  
@@ -35,7 +35,7 @@ Index: multica/server/internal/daemon/execenv/codex_home.go
  	if err := ensureCodexMemoryConfig(filepath.Join(codexHome, "config.toml"), logger); err != nil {
  		logger.Warn("execenv: codex-home ensure memory config failed", "error", err)
  	}
-@@ -370,6 +381,60 @@ func codexSessionStoreDir(sharedHome, ke
+@@ -371,6 +382,60 @@ func codexSessionStoreDir(sharedHome, ke
  	return filepath.Join(sharedHome, codexSessionStoreRoot, key)
  }
  

@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -7405,6 +7405,23 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -7856,6 +7856,23 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
@@ -26,7 +26,7 @@ Index: multica/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:             task.IssueID,
  		TriggerCommentID:    task.TriggerCommentID,
-@@ -7449,6 +7466,10 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -7900,6 +7917,10 @@ func (d *Daemon) runTask(ctx context.Con
  		IssueStatuses:                    convertIssueStatusesForEnv(task.IssueStatuses),
  		IssueStatusesOmitted:             task.IssueStatusesOmitted,
  		ConnectedApps:                    task.ConnectedApps,
@@ -37,7 +37,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  
  	// Mark candidate env roots as active before any env work so the GC loop
-@@ -8077,15 +8098,35 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -8538,15 +8559,35 @@ func (d *Daemon) runTask(ctx context.Con
  	// MULTICA_TOKEN is bound to (agent, task) by the server. Never fall back
  	// to the daemon's own credential here: doing so lets agent CLI writes land
  	// as the runtime owner's member actor and can retrigger the same agent.
@@ -97,7 +97,7 @@ Index: multica/server/cmd/multica/cmd_agent.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_agent.go
 +++ multica/server/cmd/multica/cmd_agent.go
-@@ -254,7 +254,8 @@ func resolveProfile(cmd *cobra.Command)
+@@ -256,7 +256,8 @@ func resolveProfile(cmd *cobra.Command)
  func newAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
  	taskContext := inDaemonManagedExecutionContext()
  	token := resolveToken(cmd)

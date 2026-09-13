@@ -2,15 +2,15 @@ Index: multica/server/internal/daemon/local_skills.go
 ===================================================================
 --- multica.orig/server/internal/daemon/local_skills.go
 +++ multica/server/internal/daemon/local_skills.go
-@@ -13,6 +13,7 @@ import (
- 
+@@ -14,6 +14,7 @@ import (
+ 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
  	"github.com/multica-ai/multica/server/internal/skill"
  	"github.com/multica-ai/multica/server/pkg/agent"
 +	"github.com/multica-ai/multica/server/pkg/skillbundle"
  )
  
  const (
-@@ -48,7 +49,32 @@ type runtimeLocalSkillSummary struct {
+@@ -49,7 +50,32 @@ type runtimeLocalSkillSummary struct {
  	Plugin     string `json:"plugin,omitempty"`
  	CanDisable bool   `json:"can_disable,omitempty"`
  	FileCount  int    `json:"file_count"`
@@ -44,7 +44,7 @@ Index: multica/server/internal/daemon/local_skills.go
  
  type runtimeLocalSkillBundle struct {
  	Name        string          `json:"name"`
-@@ -669,10 +695,26 @@ func enumerateLocalSkills(
+@@ -688,10 +714,26 @@ func enumerateLocalSkills(
  				skillName = filepath.Base(path)
  			}
  
@@ -72,7 +72,7 @@ Index: multica/server/internal/daemon/local_skills.go
  
  			// source_path is matched against local_directory.local_path on the
  			// Odoo side for project-level skills (root="project"). Odoo stores
-@@ -698,7 +740,8 @@ func enumerateLocalSkills(
+@@ -717,7 +759,8 @@ func enumerateLocalSkills(
  				// field can carry it without duplication on import). For the
  				// list summary the user expects the total file count, so add
  				// one back for SKILL.md itself.
@@ -94,7 +94,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	"os"
  	"path/filepath"
  	"reflect"
-@@ -1467,3 +1468,103 @@ func TestCollectLocalSkillFiles_ValidUTF
+@@ -1599,3 +1600,103 @@ func TestCollectLocalSkillFiles_ValidUTF
  		}
  	}
  }

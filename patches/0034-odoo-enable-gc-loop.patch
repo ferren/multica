@@ -1,0 +1,20 @@
+Index: multica/server/internal/daemon/daemon.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -2157,8 +2157,14 @@ func (d *Daemon) Run(ctx context.Context
+ 		go d.taskWakeupLoop(ctx, taskWakeups)
+ 	}
+ 	go d.heartbeatLoop(ctx)
++	// GC runs in every backend mode: what it reclaims is daemon-owned disk
++	// (regenerable Codex caches such as codex-home/.sandbox-bin, orphaned
++	// task dirs, repo caches), and the Odoo backend implements the gc-check
++	// endpoints the reclaim decisions need. GCEnabled still gates it, so
++	// operators keep the MULTICA_GC_ENABLED opt-out. Only auto-update stays
++	// Odoo-gated: Odoo deployments manage the daemon binary themselves.
++	go d.gcLoop(ctx)
+ 	if d.cfg.BackendMode != "odoo" {
+-		go d.gcLoop(ctx)
+ 		go d.autoUpdateLoop(ctx)
+ 	}
+ 	if d.cfg.BackendMode == "odoo" {

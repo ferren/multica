@@ -36,3 +36,4 @@
 0031-odoo-local-skill-content-hash.patch
 0032-odoo-memory-scan-managed-flag.patch
 0033-odoo-codex-memory-layering.patch
+0034-odoo-enable-gc-loop.patch

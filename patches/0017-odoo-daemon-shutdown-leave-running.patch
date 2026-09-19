@@ -2,9 +2,9 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -6517,6 +6517,21 @@ func (d *Daemon) reportTaskResult(ctx co
- 			taskLog.Error("fail task fallback also failed", "error", failErr)
- 		}
+@@ -6508,6 +6508,21 @@ func (d *Daemon) reportTaskResult(ctx co
+ 		// user's successful output must remain authoritative in both cases.
+ 		taskLog.Error("complete task callback not acknowledged; durable report remains queued", "error", err)
  	default:
 +		// Graceful shutdown (`multica daemon stop` → /shutdown, or SIGTERM) cancels
 +		// the daemon root ctx, aborting in-flight agent runs mid-flight. A run that
@@ -28,7 +28,7 @@ Index: multica/server/internal/daemon/daemon_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon_test.go
 +++ multica/server/internal/daemon/daemon_test.go
-@@ -4712,6 +4712,38 @@ func TestReportTaskResult_CancelledParen
+@@ -5189,6 +5189,38 @@ func TestReportTaskResult_CancelledParen
  	}
  }
  

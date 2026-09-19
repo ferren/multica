@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -4494,10 +4494,21 @@ func (d *Daemon) syncWorkspacesFromAPI(c
+@@ -4518,10 +4518,21 @@ func (d *Daemon) syncWorkspacesFromAPI(c
  			rt := d.runtimeIndex[ws.RuntimeID]
  			runtimeIDs := []string{ws.RuntimeID}
  			d.mu.Lock()

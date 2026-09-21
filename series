@@ -37,3 +37,4 @@
 0032-odoo-memory-scan-managed-flag.patch
 0033-odoo-codex-memory-layering.patch
 0034-odoo-enable-gc-loop.patch
+0035-odoo-jev-cli.patch

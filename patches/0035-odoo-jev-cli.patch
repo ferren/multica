@@ -1,0 +1,335 @@
+Index: multica/server/cmd/multica/cmd_jev.go
+===================================================================
+--- /dev/null
++++ multica/server/cmd/multica/cmd_jev.go
+@@ -0,0 +1,245 @@
++package main
++
++import (
++	"context"
++	"fmt"
++	"os"
++	"sort"
++	"strconv"
++	"strings"
++
++	"github.com/spf13/cobra"
++
++	"github.com/multica-ai/multica/server/internal/cli"
++)
++
++// multica jev — outsource micro-decisions to the Jev decision service
++// (inair_agent_jev → inair.jev.service → TypeSafe /evaluate). The decide API
++// lives on the Odoo backend under auth='openapi'
++// (inair_agent_jev/controllers/jev_api.py). In MULTICA_BACKEND_MODE=odoo the
++// shared APIClient sets the X-GALAXY-ACCESS-TOKEN / X-GALAXY-API-KEY headers,
++// so an agent running inside a daemon task calls these endpoints zero-config
++// — same auth path as issue/comment/blog.
++//
++// The endpoints are NOT under /api, so APIClient.url() leaves the path
++// untouched and the request lands on {BaseURL}/inair_agent_jev/decide.
++//
++// Decision contract (mirrors the jev_decide agent tool): Jev unavailable or
++// failing does NOT fail the CLI — the API answers 200 with value=fallback and
++// error set, and the CLI exits 0 so the caller can keep going on the
++// fallback. Transport / auth / validation errors are real errors (non-zero
++// exit). See the multica-jev skill for the full usage guide.
++
++type jevResultDTO struct {
++	Value         any                `json:"value"`
++	Probabilities map[string]float64 `json:"probabilities"`
++	Confidence    *float64           `json:"confidence"`
++	Model         *string            `json:"model"`
++	Usage         map[string]any     `json:"usage"`
++	Error         *string            `json:"error"`
++}
++
++var jevCmd = &cobra.Command{
++	Use:   "jev",
++	Short: "Outsource micro-decisions to the Jev decision service",
++	Long: `Ask Jev (inair.jev.service) for a typed micro-decision: pick between
++options, rate a context 0-10, or answer a yes/no question.
++
++Jev answers are free (they cost none of your tokens), fast, and structured —
++use them to prune branches, rank candidates, or classify items without
++burning your own context or output budget. Always pass --fallback so an
++unavailable Jev yields a usable answer instead of a null value.
++
++  multica jev choice --context "…" --option A --option "B=why B" --fallback A
++  multica jev score --context "…" --rubric "评分标准" --fallback 5
++  multica jev probability --context "…" --question "是或非？" --fallback 0.5`,
++}
++
++var jevChoiceCmd = &cobra.Command{
++	Use:   "choice",
++	Short: "Pick one option for a context",
++	Args:  exactArgs(0),
++	RunE: func(cmd *cobra.Command, _ []string) error {
++		return runJevDecide(cmd, "choice")
++	},
++}
++
++var jevScoreCmd = &cobra.Command{
++	Use:   "score",
++	Short: "Rate a context 0-10 against a rubric",
++	Args:  exactArgs(0),
++	RunE: func(cmd *cobra.Command, _ []string) error {
++		return runJevDecide(cmd, "score")
++	},
++}
++
++var jevProbabilityCmd = &cobra.Command{
++	Use:   "probability",
++	Short: "Answer a yes/no question with P(yes) in 0.0-1.0",
++	Args:  exactArgs(0),
++	RunE: func(cmd *cobra.Command, _ []string) error {
++		return runJevDecide(cmd, "probability")
++	},
++}
++
++func init() {
++	jevCmd.AddCommand(jevChoiceCmd)
++	jevCmd.AddCommand(jevScoreCmd)
++	jevCmd.AddCommand(jevProbabilityCmd)
++
++	for _, sub := range []*cobra.Command{jevChoiceCmd, jevScoreCmd, jevProbabilityCmd} {
++		sub.Flags().String("output", "table", "Output format: table or json")
++		sub.Flags().String("context", "", "Decision context text (required unless --context-file)")
++		sub.Flags().String("context-file", "", "Path to a file holding the decision context")
++		sub.Flags().String("fallback", "", "Value returned when Jev is unavailable (strongly recommended)")
++	}
++	jevChoiceCmd.Flags().StringArray("option", nil, "Option: \"Label\" or \"Label=Description\" (repeatable, >=1)")
++	jevChoiceCmd.Flags().String("instructions", "", "How to choose between the options")
++	jevScoreCmd.Flags().String("rubric", "", "Scoring standard for the 0-10 rating")
++	jevProbabilityCmd.Flags().String("question", "", "The yes/no question (required)")
++}
++
++// jevContextValue resolves --context / --context-file into the context text.
++// Unlike blog publish there is no stdin fallback: a non-interactive agent
++// reading a tty-less stdin blocks, and an explicit file is deterministic.
++func jevContextValue(cmd *cobra.Command) (string, error) {
++	contextText, _ := cmd.Flags().GetString("context")
++	if strings.TrimSpace(contextText) != "" {
++		return contextText, nil
++	}
++	path, _ := cmd.Flags().GetString("context-file")
++	if path == "" {
++		return "", fmt.Errorf("--context (or --context-file) is required")
++	}
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return "", fmt.Errorf("read --context-file %s: %w", path, err)
++	}
++	return string(data), nil
++}
++
++// jevRequest builds the /inair_agent_jev/decide body for one decision form.
++// Option syntax "Label=Description" splits on the first '='; the description
++// becomes the option's criteria entry on the Odoo side, so the wire format
++// stays [label, description] pairs only where a description was given.
++func jevRequest(decisionType, context, fallback string, options []string, instructions, rubric, question string) map[string]any {
++	body := map[string]any{
++		"decision_type": decisionType,
++		"context":       context,
++	}
++	if fallback != "" {
++		body["fallback"] = fallback
++	}
++	switch decisionType {
++	case "choice":
++		opts := make([]any, 0, len(options))
++		for _, option := range options {
++			if label, description, found := strings.Cut(option, "="); found && description != "" {
++				opts = append(opts, []string{label, description})
++			} else {
++				opts = append(opts, option)
++			}
++		}
++		body["options"] = opts
++		if instructions != "" {
++			body["instructions"] = instructions
++		}
++	case "score":
++		if rubric != "" {
++			body["rubric"] = rubric
++		}
++	case "probability":
++		if question != "" {
++			body["question"] = question
++		}
++	}
++	return body
++}
++
++func runJevDecide(cmd *cobra.Command, decisionType string) error {
++	contextText, err := jevContextValue(cmd)
++	if err != nil {
++		return err
++	}
++	options, _ := cmd.Flags().GetStringArray("option")
++	if decisionType == "choice" && len(options) == 0 {
++		return fmt.Errorf("at least one --option is required for choice")
++	}
++	question, _ := cmd.Flags().GetString("question")
++	if decisionType == "probability" && strings.TrimSpace(question) == "" {
++		return fmt.Errorf("--question is required for probability")
++	}
++	instructions, _ := cmd.Flags().GetString("instructions")
++	rubric, _ := cmd.Flags().GetString("rubric")
++	fallback, _ := cmd.Flags().GetString("fallback")
++	body := jevRequest(decisionType, contextText, fallback, options, instructions, rubric, question)
++
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		return err
++	}
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++
++	var result jevResultDTO
++	if err := client.PostJSON(ctx, "/inair_agent_jev/decide", body, &result); err != nil {
++		return fmt.Errorf("jev %s: %w", decisionType, err)
++	}
++	output, _ := cmd.Flags().GetString("output")
++	if output == "json" {
++		return cli.PrintJSON(os.Stdout, result)
++	}
++	printJevResult(os.Stdout, result)
++	return nil
++}
++
++// jevProbKeys orders probability keys numerically when every key parses as an
++// integer (score's 0-10 bands), lexically otherwise, so the table line is
++// stable and readable for both shapes.
++func jevProbKeys(probabilities map[string]float64) []string {
++	keys := make([]string, 0, len(probabilities))
++	allNumeric := true
++	for key := range probabilities {
++		keys = append(keys, key)
++		if _, err := strconv.Atoi(key); err != nil {
++			allNumeric = false
++		}
++	}
++	sort.Slice(keys, func(i, j int) bool {
++		if allNumeric {
++			a, _ := strconv.Atoi(keys[i])
++			b, _ := strconv.Atoi(keys[j])
++			return a < b
++		}
++		return keys[i] < keys[j]
++	})
++	return keys
++}
++
++func printJevResult(w *os.File, result jevResultDTO) {
++	confidence := "-"
++	if result.Confidence != nil {
++		confidence = strconv.FormatFloat(*result.Confidence, 'f', -1, 64)
++	}
++	model := "-"
++	if result.Model != nil {
++		model = *result.Model
++	}
++	errNote := "-"
++	if result.Error != nil {
++		errNote = *result.Error
++	}
++	cli.PrintTable(w, []string{"VALUE", "CONFIDENCE", "MODEL", "ERROR"}, [][]string{{
++		fmt.Sprintf("%v", result.Value),
++		confidence,
++		model,
++		errNote,
++	}})
++	if len(result.Probabilities) > 0 {
++		parts := make([]string, 0, len(result.Probabilities))
++		for _, key := range jevProbKeys(result.Probabilities) {
++			parts = append(parts, fmt.Sprintf("%s=%v", key, result.Probabilities[key]))
++		}
++		fmt.Fprintf(w, "Probabilities: %s\n", strings.Join(parts, " "))
++	}
++}
+Index: multica/server/cmd/multica/cmd_jev_test.go
+===================================================================
+--- /dev/null
++++ multica/server/cmd/multica/cmd_jev_test.go
+@@ -0,0 +1,68 @@
++package main
++
++import (
++	"reflect"
++	"testing"
++)
++
++// TestJevRequest pins the /inair_agent_jev/decide body shape per decision
++// form: shared base fields, form-specific extras only when set, and the
++// "Label=Description" option split (first '=' wins; pairs only where a
++// description was actually given — plain labels stay plain strings).
++func TestJevRequest(t *testing.T) {
++	t.Parallel()
++
++	choice := jevRequest("choice", "上下文", "SAFE", []string{"A", "B=描述 B", "C="},
++		"按部门分类", "", "")
++	wantOptions := []any{"A", []string{"B", "描述 B"}, "C="}
++	if !reflect.DeepEqual(choice["options"], wantOptions) {
++		t.Fatalf("options = %#v, want %#v", choice["options"], wantOptions)
++	}
++	if choice["decision_type"] != "choice" || choice["context"] != "上下文" {
++		t.Fatalf("base fields = %#v", choice)
++	}
++	if choice["fallback"] != "SAFE" {
++		t.Fatalf("fallback = %v, want SAFE", choice["fallback"])
++	}
++	if choice["instructions"] != "按部门分类" {
++		t.Fatalf("instructions = %v", choice["instructions"])
++	}
++	for _, absent := range []string{"rubric", "question"} {
++		if _, ok := choice[absent]; ok {
++			t.Fatalf("choice body must not carry %s", absent)
++		}
++	}
++
++	score := jevRequest("score", "ctx", "", nil, "", "评分标准", "")
++	if score["rubric"] != "评分标准" {
++		t.Fatalf("rubric = %v", score["rubric"])
++	}
++	if _, ok := score["fallback"]; ok {
++		t.Fatal("empty fallback must be omitted, so the API treats it as unset")
++	}
++	if _, ok := score["options"]; ok {
++		t.Fatal("score body must not carry options")
++	}
++
++	probability := jevRequest("probability", "ctx", "0.5", nil, "", "", "是吗？")
++	if probability["question"] != "是吗？" || probability["fallback"] != "0.5" {
++		t.Fatalf("probability body = %#v", probability)
++	}
++}
++
++// TestJevProbKeys pins the table's probability ordering: numeric for score's
++// 0-10 band keys (where lexical order would put "10" before "2"), lexical
++// otherwise.
++func TestJevProbKeys(t *testing.T) {
++	t.Parallel()
++
++	numeric := map[string]float64{"10": 0.1, "2": 0.2, "0": 0.7}
++	if got := jevProbKeys(numeric); !reflect.DeepEqual(got, []string{"0", "2", "10"}) {
++		t.Fatalf("numeric order = %v", got)
++	}
++
++	labels := map[string]float64{"yes": 0.8, "no": 0.2}
++	if got := jevProbKeys(labels); !reflect.DeepEqual(got, []string{"no", "yes"}) {
++		t.Fatalf("lexical order = %v", got)
++	}
++}
+Index: multica/server/cmd/multica/main.go
+===================================================================
+--- multica.orig/server/cmd/multica/main.go
++++ multica/server/cmd/multica/main.go
+@@ -90,6 +90,7 @@ func init() {
+ 	rootCmd.AddCommand(setupCmd)
+ 	rootCmd.AddCommand(attachmentCmd)
+ 	rootCmd.AddCommand(blogCmd)
++	rootCmd.AddCommand(jevCmd)
+ 	rootCmd.AddCommand(memoryCmd)
+ 	rootCmd.AddCommand(configCmd)
+ 	rootCmd.AddCommand(updateCmd)

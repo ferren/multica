@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -308,6 +308,7 @@ type workspaceState struct {
+@@ -309,6 +309,7 @@ type workspaceState struct {
  	allowedRepoURLs map[string]struct{}
  	taskRepoURLs    map[string]struct{}
  	taskRepoRefs    map[string]map[string]string // taskID -> repo URL -> checkout ref
@@ -10,7 +10,7 @@ Index: multica/server/internal/daemon/daemon.go
  	settings        json.RawMessage              // workspace settings (JSONB)
  	lastRepoSyncErr string
  	repoRefreshMu   contextLock
-@@ -3543,6 +3544,9 @@ func (d *Daemon) registerTaskRepos(works
+@@ -3553,6 +3554,9 @@ func (d *Daemon) registerTaskRepos(works
  	if taskID != "" && ws.taskRepoRefs == nil {
  		ws.taskRepoRefs = make(map[string]map[string]string)
  	}
@@ -20,7 +20,7 @@ Index: multica/server/internal/daemon/daemon.go
  	candidates := make([]repoCandidate, 0, len(repos))
  	for _, repo := range repos {
  		url := strings.TrimSpace(repo.URL)
-@@ -3561,6 +3565,12 @@ func (d *Daemon) registerTaskRepos(works
+@@ -3571,6 +3575,12 @@ func (d *Daemon) registerTaskRepos(works
  			if _, exists := ws.taskRepoRefs[taskID][url]; !exists {
  				ws.taskRepoRefs[taskID][url] = strings.TrimSpace(repo.Ref)
  			}
@@ -33,7 +33,7 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  		candidates = append(candidates, repoCandidate{
  			url:     url,
-@@ -3605,6 +3615,25 @@ func (d *Daemon) taskRepoDefaultRef(work
+@@ -3615,6 +3625,25 @@ func (d *Daemon) taskRepoDefaultRef(work
  	return strings.TrimSpace(ws.taskRepoRefs[taskID][repoURL])
  }
  
@@ -59,7 +59,7 @@ Index: multica/server/internal/daemon/daemon.go
  func (d *Daemon) clearTaskRepoRefs(workspaceID, taskID string) {
  	taskID = strings.TrimSpace(taskID)
  	if taskID == "" {
-@@ -10230,7 +10259,7 @@ func convertReposForEnv(repos []RepoData
+@@ -10277,7 +10306,7 @@ func convertReposForEnv(repos []RepoData
  	}
  	result := make([]execenv.RepoContextForEnv, len(repos))
  	for i, r := range repos {
@@ -84,33 +84,18 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config_sections.go
 +++ multica/server/internal/daemon/execenv/runtime_config_sections.go
-@@ -424,11 +424,23 @@ func writeRepositories(b *strings.Builde
- 	b.WriteString("## Repositories\n\n")
- 	b.WriteString("Available in this workspace — `multica repo checkout <url> [--ref <branch-or-sha>]` to fetch (creates a repository checkout on a dedicated branch).\n\n")
- 	for _, repo := range ctx.Repos {
-+		line := "- " + repo.URL
+@@ -419,6 +419,11 @@ func writeRepositories(b *strings.Builde
  		if repo.Description != "" {
--			fmt.Fprintf(b, "- %s — %s\n", repo.URL, repo.Description)
--		} else {
--			fmt.Fprintf(b, "- %s\n", repo.URL)
-+			line += " — " + repo.Description
+ 			line += " — " + repo.Description
  		}
-+		// Tell the agent exactly where this repo lands and on which ref, so it
-+		// works against the configured location instead of guessing.
-+		var hints []string
++		// Tell the agent exactly where this repo lands, so it works against
++		// the configured location instead of guessing.
 +		if dir := strings.TrimSpace(repo.Directory); dir != "" {
-+			hints = append(hints, fmt.Sprintf("checks out into `%s/` (relative to your working directory)", dir))
++			line += fmt.Sprintf(" (checks out into `%s/`, relative to your working directory)", dir)
 +		}
-+		if ref := strings.TrimSpace(repo.Ref); ref != "" {
-+			hints = append(hints, fmt.Sprintf("default ref `%s`", ref))
-+		}
-+		if len(hints) > 0 {
-+			line += " (" + strings.Join(hints, "; ") + ")"
-+		}
-+		b.WriteString(line + "\n")
- 	}
- 	b.WriteString("\n")
- }
+ 		// The ref is already applied by the daemon on checkout. It is printed
+ 		// here so the agent knows which line of work it is on without running
+ 		// `git branch` first, and — more importantly — so it can target the
 Index: multica/server/internal/daemon/health.go
 ===================================================================
 --- multica.orig/server/internal/daemon/health.go

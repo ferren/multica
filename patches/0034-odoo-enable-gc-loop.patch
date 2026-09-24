@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -2181,8 +2181,14 @@ func (d *Daemon) Run(ctx context.Context
+@@ -2190,8 +2190,14 @@ func (d *Daemon) Run(ctx context.Context
  		go d.taskWakeupLoop(ctx, taskWakeups)
  	}
  	go d.heartbeatLoop(ctx)

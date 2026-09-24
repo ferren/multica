@@ -105,16 +105,25 @@ Index: multica/server/internal/cli/client.go
  	if err != nil {
  		return err
  	}
-@@ -493,7 +512,7 @@ func (c *APIClient) UploadFile(ctx conte
- 		return "", fmt.Errorf("close multipart writer: %w", err)
+@@ -506,7 +525,7 @@ func (c *APIClient) UploadIssueAttachmen
+ 		return AttachmentResponse{}, fmt.Errorf("close multipart writer: %w", err)
  	}
  
 -	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/upload-file", &body)
 +	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url("/api/upload-file"), &body)
  	if err != nil {
- 		return "", err
+ 		return AttachmentResponse{}, err
  	}
-@@ -605,7 +624,7 @@ func (c *APIClient) UploadFileWithURL(ct
+@@ -571,7 +590,7 @@ func (c *APIClient) UploadChatAttachment
+ 		return AttachmentResponse{}, fmt.Errorf("close multipart writer: %w", err)
+ 	}
+ 
+-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/upload-file", &body)
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url("/api/upload-file"), &body)
+ 	if err != nil {
+ 		return AttachmentResponse{}, err
+ 	}
+@@ -629,7 +648,7 @@ func (c *APIClient) UploadFileWithURL(ct
  		return "", "", fmt.Errorf("close multipart writer: %w", err)
  	}
  

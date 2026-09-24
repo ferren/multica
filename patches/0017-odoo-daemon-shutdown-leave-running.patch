@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -6508,6 +6508,21 @@ func (d *Daemon) reportTaskResult(ctx co
+@@ -6524,6 +6524,21 @@ func (d *Daemon) reportTaskResult(ctx co
  		// user's successful output must remain authoritative in both cases.
  		taskLog.Error("complete task callback not acknowledged; durable report remains queued", "error", err)
  	default:

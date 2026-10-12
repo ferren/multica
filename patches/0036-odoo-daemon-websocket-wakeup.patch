@@ -1,0 +1,801 @@
+Index: multica/server/internal/daemon/daemon.go
+===================================================================
+--- multica.orig/server/internal/daemon/daemon.go
++++ multica/server/internal/daemon/daemon.go
+@@ -2186,7 +2186,9 @@ func (d *Daemon) Run(ctx context.Context
+ 	go d.agentDiscoveryLoop(ctx)
+ 
+ 	taskWakeups := make(chan taskWakeup, 256)
+-	if d.cfg.BackendMode != "odoo" {
++	if d.cfg.BackendMode == "odoo" {
++		go d.odooTaskWakeupLoop(ctx, taskWakeups)
++	} else {
+ 		go d.taskWakeupLoop(ctx, taskWakeups)
+ 	}
+ 	go d.heartbeatLoop(ctx)
+Index: multica/server/internal/daemon/odoo_wakeup.go
+===================================================================
+--- /dev/null
++++ multica/server/internal/daemon/odoo_wakeup.go
+@@ -0,0 +1,168 @@
++package daemon
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"net/http"
++	"net/url"
++	"sort"
++	"strings"
++	"time"
++
++	"github.com/gorilla/websocket"
++)
++
++var errOdooWSTokenChanged = errors.New("odoo websocket credentials changed")
++
++// This connection only carries hints. Never attach wsRPC: the persistent
++// Odoo queue and the existing serialized REST claim poller own task delivery.
++func (d *Daemon) odooTaskWakeupLoop(ctx context.Context, taskWakeups chan<- taskWakeup) {
++	runtimeChanges, unsubscribe := d.runtimeSet.Subscribe()
++	defer unsubscribe()
++	backoff := time.Second
++	for ctx.Err() == nil {
++		runtimeIDs := d.allRuntimeIDs()
++		var connectedFor time.Duration
++		var err error
++		if len(runtimeIDs) != 0 {
++			connectedFor, err = d.runOdooWakeupConnection(ctx, runtimeIDs, taskWakeups, runtimeChanges)
++		}
++		if ctx.Err() != nil {
++			return
++		}
++		if errors.Is(err, errRuntimeSetChanged) || errors.Is(err, errOdooWSTokenChanged) {
++			backoff = time.Second
++			continue
++		}
++		if shouldResetTaskWakeupBackoff(connectedFor) {
++			backoff = time.Second
++		}
++		if err != nil {
++			d.logger.Debug("odoo websocket unavailable; REST polling remains active", "error", err, "retry_in", backoff)
++		}
++		if sleepWithContextOrRuntimeChange(ctx, jitterDuration(backoff), runtimeChanges) != nil {
++			return
++		}
++		backoff *= 2
++		if backoff > taskWakeupMaxBackoff {
++			backoff = taskWakeupMaxBackoff
++		}
++	}
++}
++
++func odooWakeupURL(baseURL, dbName, daemonID string, runtimeIDs []string) (string, string, error) {
++	u, err := url.Parse(baseURL)
++	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
++		return "", "", fmt.Errorf("invalid Odoo server URL")
++	}
++	origin := u.Scheme + "://" + u.Host
++	if u.Scheme == "https" {
++		u.Scheme = "wss"
++	} else {
++		u.Scheme = "ws"
++	}
++	u.Path = strings.TrimRight(u.Path, "/") + "/multica/daemon/ws"
++	u.RawPath = ""
++	q := u.Query()
++	q.Set("daemon_id", daemonID)
++	ids := append([]string(nil), runtimeIDs...)
++	sort.Strings(ids)
++	q.Set("runtime_ids", strings.Join(ids, ","))
++	if dbName != "" {
++		q.Set("db", dbName)
++	}
++	u.RawQuery = q.Encode()
++	return u.String(), origin, nil
++}
++
++func (d *Daemon) runOdooWakeupConnection(ctx context.Context, runtimeIDs []string, wakeups chan<- taskWakeup, runtimeChanges <-chan struct{}) (time.Duration, error) {
++	wsURL, origin, err := odooWakeupURL(d.cfg.ServerBaseURL, d.cfg.DBName, d.cfg.DaemonID, runtimeIDs)
++	if err != nil {
++		return 0, err
++	}
++	accessToken, apiKey := d.client.OdooCredentials()
++	headers := make(http.Header)
++	headers.Set("Origin", origin)
++	headers.Set("X-GALAXY-ACCESS-TOKEN", "Bearer "+accessToken)
++	headers.Set("X-GALAXY-API-KEY", apiKey)
++	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second, Proxy: http.ProxyFromEnvironment}
++	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
++	if resp != nil && resp.Body != nil {
++		resp.Body.Close()
++	}
++	if err != nil {
++		if resp != nil && resp.StatusCode == http.StatusUnauthorized && d.client.onTokenError != nil {
++			d.client.onTokenError()
++		}
++		return 0, err
++	}
++	connectedAt := time.Now()
++	conn.SetReadLimit(4096)
++	conn.SetReadDeadline(time.Now().Add(45 * time.Second))
++	conn.SetPongHandler(func(string) error {
++		return conn.SetReadDeadline(time.Now().Add(45 * time.Second))
++	})
++	readDone := make(chan error, 1)
++	go func() {
++		for {
++			var message struct {
++				Type string `json:"type"`
++			}
++			if err := conn.ReadJSON(&message); err != nil {
++				readDone <- err
++				return
++			}
++			conn.SetReadDeadline(time.Now().Add(45 * time.Second))
++			switch message.Type {
++			case "ready", "task_available":
++				// The ready frame follows server-side subscription. An immediate
++				// REST claim recovers work queued during the connection gap.
++				signalTaskWakeup(wakeups, "")
++			case "pong":
++			default:
++				readDone <- fmt.Errorf("unsupported Odoo websocket message")
++				return
++			}
++		}
++	}()
++	readerJoined := false
++	defer func() {
++		conn.Close()
++		if !readerJoined {
++			<-readDone
++		}
++	}()
++	d.logger.Info("odoo task notification websocket connected", "runtimes", len(runtimeIDs))
++	// The writer stays in this goroutine. A cheap credential check causes
++	// reconnect within one second of token rotation, including REST 401 refresh.
++	ticker := time.NewTicker(time.Second)
++	defer ticker.Stop()
++	nextPing := time.Now().Add(15 * time.Second)
++	for {
++		select {
++		case <-ctx.Done():
++			return time.Since(connectedAt), ctx.Err()
++		case <-runtimeChanges:
++			return time.Since(connectedAt), errRuntimeSetChanged
++		case err := <-readDone:
++			readerJoined = true
++			if websocket.IsCloseError(err, websocket.ClosePolicyViolation) && d.client.onTokenError != nil {
++				d.client.onTokenError()
++			}
++			return time.Since(connectedAt), err
++		case now := <-ticker.C:
++			newToken, newKey := d.client.OdooCredentials()
++			if newToken != accessToken || newKey != apiKey {
++				return time.Since(connectedAt), errOdooWSTokenChanged
++			}
++			if !now.Before(nextPing) {
++				conn.SetWriteDeadline(now.Add(5 * time.Second))
++				if err := conn.WriteJSON(map[string]string{"type": "ping"}); err != nil {
++					return time.Since(connectedAt), err
++				}
++				nextPing = now.Add(15 * time.Second)
++			}
++		}
++	}
++}
+Index: multica/server/internal/daemon/odoo_wakeup_test.go
+===================================================================
+--- /dev/null
++++ multica/server/internal/daemon/odoo_wakeup_test.go
+@@ -0,0 +1,219 @@
++package daemon
++
++import (
++	"context"
++	"errors"
++	"log/slog"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/gorilla/websocket"
++)
++
++func TestOdooWakeupURL(t *testing.T) {
++	u, origin, err := odooWakeupURL("https://example.com/base", "odoo_db", "daemon-a", []string{"2", "1"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	parsed, _ := url.Parse(u)
++	if parsed.Scheme != "wss" || parsed.Path != "/base/multica/daemon/ws" || origin != "https://example.com" || parsed.Query().Get("runtime_ids") != "1,2" || parsed.Query().Get("db") != "odoo_db" {
++		t.Fatalf("unexpected URL: %s, origin %s", u, origin)
++	}
++	if _, _, err := odooWakeupURL("file:///tmp/test", "", "", nil); err == nil {
++		t.Fatal("accepted invalid server URL")
++	}
++}
++
++func newOdooWakeupTestDaemon(t *testing.T, baseURL string) *Daemon {
++	t.Helper()
++	d := New(Config{BackendMode: "odoo", ServerBaseURL: baseURL, DaemonID: "daemon-test", WorkspacesRoot: t.TempDir(), MaxConcurrentTasks: 1, PollInterval: time.Hour}, slog.New(slog.NewTextHandler(noopWriter{}, nil)))
++	d.client.accessToken, d.client.apiKey = "access-test", "key-test"
++	d.oursRuntimeIDs["1"] = true
++	return d
++}
++
++func TestOdooWakeupReadyHintsAndTokenRotation(t *testing.T) {
++	release := make(chan struct{})
++	serverDone := make(chan struct{})
++	upgrader := websocket.Upgrader{}
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		defer close(serverDone)
++		if r.URL.Path != "/multica/daemon/ws" || r.Header.Get("X-GALAXY-ACCESS-TOKEN") != "Bearer access-test" || r.Header.Get("X-GALAXY-API-KEY") != "key-test" || r.Header.Get("Cookie") != "" {
++			t.Error("incorrect handshake credentials or cookie")
++		}
++		conn, err := upgrader.Upgrade(w, r, nil)
++		if err != nil {
++			return
++		}
++		defer conn.Close()
++		conn.WriteJSON(map[string]string{"type": "ready"})
++		<-release
++		conn.WriteJSON(map[string]string{"type": "task_available"})
++		for {
++			if _, _, err := conn.ReadMessage(); err != nil {
++				return
++			}
++		}
++	}))
++	defer srv.Close()
++	d := newOdooWakeupTestDaemon(t, srv.URL)
++	wakeups := make(chan taskWakeup, 1)
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++	done := make(chan error, 1)
++	go func() { _, err := d.runOdooWakeupConnection(ctx, []string{"1"}, wakeups, nil); done <- err }()
++	select {
++	case <-wakeups:
++	case <-ctx.Done():
++		t.Fatal("ready did not wake REST claim")
++	}
++	close(release)
++	select {
++	case <-wakeups:
++	case <-ctx.Done():
++		t.Fatal("task hint did not wake REST claim")
++	}
++	d.client.tokenMu.Lock()
++	d.client.accessToken = "rotated"
++	d.client.tokenMu.Unlock()
++	if err := <-done; !errors.Is(err, errOdooWSTokenChanged) {
++		t.Fatalf("rotation did not reconnect: %v", err)
++	}
++	<-serverDone
++}
++
++func TestOdooWakeupReconnectAndConcurrentPolling(t *testing.T) {
++	var claims atomic.Int32
++	connections := make(chan *websocket.Conn, 4)
++	serverDone := make(chan struct{}, 4)
++	upgrader := websocket.Upgrader{}
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path == "/multica/daemon/tasks/claim" {
++			claims.Add(1)
++			w.Header().Set("Content-Type", "application/json")
++			w.Write([]byte(`{"tasks":[]}`))
++			return
++		}
++		conn, err := upgrader.Upgrade(w, r, nil)
++		if err != nil {
++			return
++		}
++		defer func() { conn.Close(); serverDone <- struct{}{} }()
++		conn.WriteJSON(map[string]string{"type": "ready"})
++		connections <- conn
++		for {
++			if _, _, err := conn.ReadMessage(); err != nil {
++				return
++			}
++		}
++	}))
++	defer srv.Close()
++	d := newOdooWakeupTestDaemon(t, srv.URL)
++	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
++	defer cancel()
++	wakeups := make(chan taskWakeup, 256)
++	wsDone, pollDone := make(chan struct{}), make(chan struct{})
++	go func() { defer close(wsDone); d.odooTaskWakeupLoop(ctx, wakeups) }()
++	go func() { defer close(pollDone); d.pollLoop(ctx, wakeups) }()
++	var conn *websocket.Conn
++	select {
++	case conn = <-connections:
++	case <-ctx.Done():
++		t.Fatal("no connection")
++	}
++	deadline := time.Now().Add(2 * time.Second)
++	for claims.Load() == 0 && time.Now().Before(deadline) {
++		time.Sleep(time.Millisecond)
++	}
++	before := claims.Load()
++	for i := 0; i < 20; i++ {
++		conn.WriteJSON(map[string]string{"type": "task_available"})
++	}
++	deadline = time.Now().Add(2 * time.Second)
++	for claims.Load() <= before && time.Now().Before(deadline) {
++		time.Sleep(time.Millisecond)
++	}
++	if claims.Load() <= before {
++		t.Error("hints did not wake existing REST poller")
++	}
++	before = claims.Load()
++	conn.Close()
++	select {
++	case <-connections:
++	case <-ctx.Done():
++		t.Fatal("no reconnect")
++	}
++	deadline = time.Now().Add(2 * time.Second)
++	for claims.Load() <= before && time.Now().Before(deadline) {
++		time.Sleep(time.Millisecond)
++	}
++	if claims.Load() <= before {
++		t.Error("reconnect did not claim backlog")
++	}
++	cancel()
++	<-wsDone
++	<-pollDone
++	<-serverDone
++	<-serverDone
++}
++
++func TestOdooWakeupUnauthorizedRefreshAndPollingFallback(t *testing.T) {
++	var refreshes atomic.Int32
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path == "/multica/daemon/tasks/claim" {
++			w.Header().Set("Content-Type", "application/json")
++			w.Write([]byte(`{"tasks":[]}`))
++			return
++		}
++		w.WriteHeader(http.StatusUnauthorized)
++	}))
++	defer srv.Close()
++	d := newOdooWakeupTestDaemon(t, srv.URL)
++	d.client.SetOnTokenError(func() { refreshes.Add(1) })
++	_, err := d.runOdooWakeupConnection(context.Background(), []string{"1"}, make(chan taskWakeup, 1), nil)
++	if err == nil || refreshes.Load() != 1 {
++		t.Fatalf("invalid token should refresh once: %v, %d", err, refreshes.Load())
++	}
++	if _, err := d.ClaimTasksWSFirst(context.Background(), "daemon-test", []string{"1"}, 1); err != nil {
++		t.Fatalf("REST claim must remain available: %v", err)
++	}
++}
++
++func TestOdooWakeupUnavailableKeepsPeriodicClaims(t *testing.T) {
++	for _, status := range []int{http.StatusNotFound, http.StatusServiceUnavailable} {
++		t.Run(http.StatusText(status), func(t *testing.T) {
++			var claims atomic.Int32
++			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				if r.URL.Path == "/multica/daemon/tasks/claim" {
++					claims.Add(1)
++					w.Header().Set("Content-Type", "application/json")
++					w.Write([]byte(`{"tasks":[]}`))
++					return
++				}
++				w.WriteHeader(status)
++			}))
++			defer srv.Close()
++			d := newOdooWakeupTestDaemon(t, srv.URL)
++			d.cfg.PollInterval = 20 * time.Millisecond
++			ctx, cancel := context.WithCancel(context.Background())
++			wakeups := make(chan taskWakeup, 1)
++			wsDone, pollDone := make(chan struct{}), make(chan struct{})
++			go func() { defer close(wsDone); d.odooTaskWakeupLoop(ctx, wakeups) }()
++			go func() { defer close(pollDone); d.pollLoop(ctx, wakeups) }()
++			deadline := time.Now().Add(time.Second)
++			for claims.Load() < 2 && time.Now().Before(deadline) {
++				time.Sleep(time.Millisecond)
++			}
++			cancel()
++			<-wsDone
++			<-pollDone
++			if claims.Load() < 2 {
++				t.Fatalf("WS status %d stopped periodic REST claims", status)
++			}
++		})
++	}
++}
+Index: multica/server/internal/daemon/odoo_wakeup_integration_test.go
+===================================================================
+--- /dev/null
++++ multica/server/internal/daemon/odoo_wakeup_integration_test.go
+@@ -0,0 +1,384 @@
++//go:build odoointegration
++
++package daemon
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"io"
++	"log/slog"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"net/http/httputil"
++	"net/url"
++	"os"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/gorilla/websocket"
++)
++
++// This opt-in suite uses the real Odoo HTTP/gevent workers and the production
++// daemon wakeup, poller, StartTask and completion paths. Only the paid agent
++// execution is replaced. tests/daemon_ws_e2e.py owns the isolated fixture server.
++func TestOdooWebsocketIntegration(t *testing.T) {
++	helperURL := os.Getenv("MULTICA_ODOO_WS_E2E")
++	if helperURL == "" {
++		t.Skip("requires isolated daemon_ws_e2e.py environment")
++	}
++	fixtureCall := func(action string, body map[string]any, result any) {
++		t.Helper()
++		if body == nil {
++			body = map[string]any{}
++		}
++		payload, _ := json.Marshal(body)
++		resp, err := http.Post(helperURL+"/"+action, "application/json", bytes.NewReader(payload))
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer resp.Body.Close()
++		if resp.StatusCode != 200 {
++			t.Fatalf("fixture %s returned %d", action, resp.StatusCode)
++		}
++		if result != nil {
++			if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
++				t.Fatal(err)
++			}
++		}
++	}
++	type fixture struct {
++		AppID     string `json:"app_id"`
++		AppSecret string `json:"app_secret"`
++		DaemonID  string `json:"daemon_id"`
++		RuntimeID string `json:"runtime_id"`
++		DB        string `json:"db"`
++		HTTPURL   string `json:"http_url"`
++		WSURL     string `json:"ws_url"`
++	}
++	var f [2]fixture
++	for i := range f {
++		fixtureCall("fixture", map[string]any{"index": i}, &f[i])
++	}
++	httpTarget, _ := url.Parse(f[0].HTTPURL)
++	wsTarget, _ := url.Parse(f[0].WSURL)
++	var mu sync.Mutex
++	var wsConnections []net.Conn
++	var claimTimes []time.Time
++	transport := &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
++		conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
++		if err == nil && address == wsTarget.Host {
++			mu.Lock()
++			wsConnections = append(wsConnections, conn)
++			mu.Unlock()
++		}
++		return conn, err
++	}}
++	defer transport.CloseIdleConnections()
++	proxy := &httputil.ReverseProxy{Transport: transport, Director: func(r *http.Request) {
++		target := httpTarget
++		if r.URL.Path == "/multica/daemon/ws" {
++			target = wsTarget
++			if r.Header.Get("Cookie") != "" {
++				t.Error("daemon handshake sent a browser cookie")
++			}
++		}
++		if r.URL.Path == "/multica/daemon/tasks/claim" {
++			mu.Lock()
++			claimTimes = append(claimTimes, time.Now())
++			mu.Unlock()
++		}
++		r.URL.Scheme, r.URL.Host = target.Scheme, target.Host
++		r.Host = target.Host
++	}, ErrorLog: nil}
++	server := httptest.NewServer(proxy)
++	defer server.Close()
++	newDaemon := func(index int, pollInterval time.Duration) *Daemon {
++		d := New(Config{BackendMode: "odoo", ServerBaseURL: server.URL,
++			DBName: f[index].DB, DaemonID: f[index].DaemonID,
++			WorkspacesRoot: t.TempDir(), MaxConcurrentTasks: 2,
++			PollInterval: pollInterval}, slog.New(slog.NewTextHandler(io.Discard, nil)))
++		if err := d.client.FetchOdooToken(context.Background(), f[index].AppID, f[index].AppSecret, f[index].DB); err != nil {
++			t.Fatal(err)
++		}
++		d.oursRuntimeIDs[f[index].RuntimeID] = true
++		d.runtimeIndex[f[index].RuntimeID] = Runtime{ID: f[index].RuntimeID, Provider: "codex"}
++		d.client.SetOnTokenError(func() {
++			if err := d.client.FetchOdooToken(context.Background(), f[index].AppID, f[index].AppSecret, f[index].DB); err != nil {
++				t.Errorf("token refresh failed: %v", err)
++			}
++		})
++		return d
++	}
++	d := newDaemon(0, time.Hour)
++	if _, err := d.ClaimTasksWSFirst(context.Background(), f[0].DaemonID, []string{f[0].RuntimeID}, 1); err != nil {
++		t.Fatalf("no-session REST authentication failed: %v", err)
++	}
++	starts := make(chan Task, 32)
++	var executionMu sync.Mutex
++	executions := map[string]int{}
++	installRunner := func(target *Daemon) {
++		target.runner = taskRunnerFunc(func(ctx context.Context, task Task, _ string, _ int, _ *slog.Logger) (TaskResult, error) {
++			if _, err := target.client.StartTask(ctx, task); err != nil {
++				return TaskResult{}, err
++			}
++			executionMu.Lock()
++			executions[task.ID]++
++			executionMu.Unlock()
++			starts <- task
++			return TaskResult{Status: "completed"}, nil
++		})
++	}
++	installRunner(d)
++	ctx, cancel := context.WithCancel(context.Background())
++	wakeups, forwarded := make(chan taskWakeup, 256), make(chan taskWakeup, 256)
++	hints := make(chan time.Time, 256)
++	wsDone, pollDone, tapDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
++	go func() { defer close(wsDone); d.odooTaskWakeupLoop(ctx, wakeups) }()
++	go func() { defer close(pollDone); d.pollLoop(ctx, forwarded) }()
++	go func() {
++		defer close(tapDone)
++		for {
++			select {
++			case <-ctx.Done():
++				return
++			case hint := <-wakeups:
++				hints <- time.Now()
++				forwarded <- hint
++			}
++		}
++	}()
++	defer func() { cancel(); <-wsDone; <-pollDone; <-tapDone }()
++	waitHint := func() time.Time {
++		t.Helper()
++		select {
++		case at := <-hints:
++			return at
++		case <-time.After(10 * time.Second):
++			t.Fatal("no ready/task hint from Odoo")
++			return time.Time{}
++		}
++	}
++	drainHints := func() {
++		for {
++			select {
++			case <-hints:
++			default:
++				return
++			}
++		}
++	}
++	enqueue := func(index int) (string, time.Time) {
++		var result struct {
++			TaskID      string  `json:"task_id"`
++			CommittedAt float64 `json:"committed_at"`
++		}
++		fixtureCall("enqueue", map[string]any{"index": index}, &result)
++		return result.TaskID, time.Unix(0, int64(result.CommittedAt*1e9))
++	}
++	waitStarted := func(id string, after time.Time, name string) {
++		t.Helper()
++		select {
++		case task := <-starts:
++			if task.ID != id {
++				t.Fatalf("%s: got task %s, want %s", name, task.ID, id)
++			}
++			mu.Lock()
++			var claimAt time.Time
++			for _, at := range claimTimes {
++				if !at.Before(after) {
++					claimAt = at
++					break
++				}
++			}
++			mu.Unlock()
++			if claimAt.IsZero() || claimAt.Sub(after) > 2*time.Second {
++				t.Fatalf("%s: claim not within 2 seconds", name)
++			}
++			t.Logf("%s: claim %.1f ms, task start %.1f ms", name,
++				float64(claimAt.Sub(after).Microseconds())/1000, float64(time.Since(after).Microseconds())/1000)
++		case <-time.After(5 * time.Second):
++			t.Fatalf("%s: task did not start", name)
++		}
++	}
++	waitHint()
++	time.Sleep(100 * time.Millisecond)
++	drainHints()
++	id, commit := enqueue(0)
++	waitHint()
++	waitStarted(id, commit, "online enqueue")
++
++	// A different company's/daemon's task must not leak a hint or be claimed.
++	time.Sleep(100 * time.Millisecond)
++	drainHints()
++	otherID, _ := enqueue(1)
++	select {
++	case <-hints:
++		t.Fatal("cross-company/daemon notification leaked")
++	case <-time.After(250 * time.Millisecond):
++	}
++	other := newDaemon(1, time.Hour)
++	otherStarts := make(chan string, 4)
++	other.runner = taskRunnerFunc(func(ctx context.Context, task Task, _ string, _ int, _ *slog.Logger) (TaskResult, error) {
++		if _, err := other.client.StartTask(ctx, task); err != nil {
++			return TaskResult{}, err
++		}
++		executionMu.Lock()
++		executions[task.ID]++
++		executionMu.Unlock()
++		otherStarts <- task.ID
++		return TaskResult{Status: "completed"}, nil
++	})
++	otherCtx, otherCancel := context.WithCancel(context.Background())
++	otherWakeups := make(chan taskWakeup, 256)
++	otherWSDone, otherPollDone := make(chan struct{}), make(chan struct{})
++	go func() { defer close(otherWSDone); other.odooTaskWakeupLoop(otherCtx, otherWakeups) }()
++	go func() { defer close(otherPollDone); other.pollLoop(otherCtx, otherWakeups) }()
++	defer func() { otherCancel(); <-otherWSDone; <-otherPollDone }()
++	id, commit = enqueue(0)
++	waitHint()
++	waitStarted(id, commit, "concurrent daemons")
++	select {
++	case started := <-otherStarts:
++		if started != otherID {
++			t.Fatalf("other daemon started %s, want %s", started, otherID)
++		}
++	case <-time.After(5 * time.Second):
++		t.Fatal("other daemon did not independently execute its task")
++	}
++	executionMu.Lock()
++	if executions[id] != 1 || executions[otherID] != 1 {
++		t.Error("concurrent daemons duplicated task execution")
++	}
++	executionMu.Unlock()
++
++	// Postcommit bus is driven by a separate ORM process. Rollback must emit no
++	// hint and leave no queue row, even though _sendone was called during create.
++	drainHints()
++	var rolled map[string]any
++	fixtureCall("rollback", nil, &rolled)
++	select {
++	case <-hints:
++		t.Fatal("rolled back transaction emitted a hint")
++	case <-time.After(250 * time.Millisecond):
++	}
++	fixtureCall("notify", map[string]any{"count": 20}, nil)
++	waitHint()
++	time.Sleep(100 * time.Millisecond)
++	executionMu.Lock()
++	if executions[id] != 1 {
++		t.Errorf("duplicate hints executed task %s %d times", id, executions[id])
++	}
++	executionMu.Unlock()
++
++	// Close the actual backend transport; queue during the disconnect. The
++	// production reconnect loop must subscribe again and claim the backlog.
++	drainHints()
++	mu.Lock()
++	wsConnections[0].Close()
++	mu.Unlock()
++	id, commit = enqueue(0)
++	readyAt := waitHint()
++	waitStarted(id, readyAt, "WS reconnect backlog")
++
++	fixtureCall("offline", nil, nil)
++	id, _ = enqueue(0)
++	time.Sleep(100 * time.Millisecond)
++	drainHints()
++	var recovered struct {
++		CommittedAt float64 `json:"committed_at"`
++	}
++	fixtureCall("online", nil, &recovered)
++	waitHint()
++	waitStarted(id, time.Unix(0, int64(recovered.CommittedAt*1e9)), "runtime recovery")
++
++	// Token rotation and expiry use the real OpenAPI issuer, not a mocked pair.
++	oldToken, _ := d.client.OdooCredentials()
++	if err := d.client.FetchOdooToken(ctx, f[0].AppID, f[0].AppSecret, f[0].DB); err != nil {
++		t.Fatal(err)
++	}
++	newToken, _ := d.client.OdooCredentials()
++	if oldToken == newToken {
++		t.Fatal("issuer did not rotate credentials")
++	}
++	drainHints()
++	waitHint()
++	fixtureCall("expire", nil, nil)
++	fixtureCall("notify", nil, nil)
++	waitHint() // reconnect after policy close invokes the real token refresh
++	id, commit = enqueue(0)
++	waitStarted(id, commit, "token refresh")
++
++	// Unauthorized and foreign runtime handshakes never upgrade.
++	wsURL, origin, _ := odooWakeupURL(server.URL, f[0].DB, f[0].DaemonID, []string{f[1].RuntimeID})
++	token, apiKey := d.client.OdooCredentials()
++	headers := http.Header{"Origin": {origin}, "X-GALAXY-ACCESS-TOKEN": {"Bearer " + token}, "X-GALAXY-API-KEY": {apiKey}}
++	for _, invalidToken := range []bool{false, true} {
++		if invalidToken {
++			headers.Set("X-GALAXY-ACCESS-TOKEN", "Bearer invalid-token")
++		}
++		conn, resp, err := websocket.DefaultDialer.DialContext(ctx, wsURL, headers)
++		if conn != nil {
++			conn.Close()
++		}
++		if err == nil || resp == nil || (resp.StatusCode != 401 && resp.StatusCode != 403) {
++			t.Fatalf("invalid handshake upgraded or had unexpected status: %v", err)
++		}
++		resp.Body.Close()
++	}
++
++	// Disabling the endpoint retains periodic REST claim with no task loss.
++	fixtureCall("enabled", map[string]any{"enabled": false}, nil)
++	fixtureCall("notify", nil, nil)
++	time.Sleep(200 * time.Millisecond)
++	fallback := newDaemon(0, 750*time.Millisecond)
++	installRunner(fallback)
++	fallbackCtx, fallbackCancel := context.WithCancel(context.Background())
++	fallbackDone := make(chan struct{})
++	go func() { defer close(fallbackDone); fallback.pollLoop(fallbackCtx, nil) }()
++	defer func() { fallbackCancel(); <-fallbackDone }()
++	id, commit = enqueue(0)
++	select {
++	case task := <-starts:
++		if task.ID != id {
++			t.Fatalf("polling fallback claimed %s, want %s", task.ID, id)
++		}
++		t.Logf("WS disabled polling fallback (750ms test interval): task start %.1f ms", float64(time.Since(commit).Microseconds())/1000)
++	case <-time.After(5 * time.Second):
++		t.Fatal("WS disabled polling did not recover queued task")
++	}
++	fixtureCall("enabled", map[string]any{"enabled": true}, nil)
++	deadline := time.Now().Add(3 * time.Second)
++	for {
++		complete := true
++		for index := range f {
++			var snapshot struct {
++				Tasks map[string]string `json:"tasks"`
++			}
++			fixtureCall("tasks", map[string]any{"index": index}, &snapshot)
++			if _, exists := snapshot.Tasks[rolled["task_id"].(string)]; exists {
++				t.Fatal("rolled back queue row persisted")
++			}
++			for _, status := range snapshot.Tasks {
++				complete = complete && status == "completed"
++			}
++		}
++		if complete {
++			break
++		}
++		if time.Now().After(deadline) {
++			t.Fatal("claimed tasks did not reach durable completed state")
++		}
++		time.Sleep(20 * time.Millisecond)
++	}
++	executionMu.Lock()
++	for id, count := range executions {
++		if count != 1 {
++			t.Errorf("task %s executed %d times", id, count)
++		}
++	}
++	executionMu.Unlock()
++	t.Log("PASS: real HTTP/gevent/daemon loop; separate-process bus, rollback, isolation, duplicate hints, reconnect, recovery, expiry and fallback")
++}

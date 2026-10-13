@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -7951,6 +7951,23 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -8009,6 +8009,23 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
@@ -26,7 +26,7 @@ Index: multica/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:             task.IssueID,
  		TriggerCommentID:    task.TriggerCommentID,
-@@ -7995,6 +8012,10 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -8053,6 +8070,10 @@ func (d *Daemon) runTask(ctx context.Con
  		IssueStatuses:                    convertIssueStatusesForEnv(task.IssueStatuses),
  		IssueStatusesOmitted:             task.IssueStatusesOmitted,
  		ConnectedApps:                    task.ConnectedApps,
@@ -36,8 +36,8 @@ Index: multica/server/internal/daemon/daemon.go
 +		OdooAPIKey:                       apiKey,
  	}
  
- 	// Mark candidate env roots as active before any env work so the GC loop
-@@ -8646,15 +8667,35 @@ func (d *Daemon) runTask(ctx context.Con
+ 	// A local_directory task gets a fresh CODEX_HOME but mounts the same
+@@ -8734,15 +8755,35 @@ func (d *Daemon) runTask(ctx context.Con
  	// MULTICA_TOKEN is bound to (agent, task) by the server. Never fall back
  	// to the daemon's own credential here: doing so lets agent CLI writes land
  	// as the runtime owner's member actor and can retrigger the same agent.
@@ -65,7 +65,7 @@ Index: multica/server/internal/daemon/daemon.go
 +		}
 +		agentToken = tok
  	}
- 	agentEnv := taskMulticaEnvironment(task, agentName, agentToken, env.MulticaConfigRoot, d.cfg.WorkspacesRoot, d.cfg.ServerBaseURL, d.cfg.HealthPort, slot, taskTempDir)
+ 	agentEnv := taskMulticaEnvironment(task, provider, agentName, agentToken, env.MulticaConfigRoot, d.cfg.WorkspacesRoot, d.cfg.ServerBaseURL, d.cfg.HealthPort, slot, taskTempDir)
  	if checkoutMode := repoCheckoutModeFor(provider, runtime.GOOS); checkoutMode != "" {
  		agentEnv[repoCheckoutModeEnv] = checkoutMode
  	}

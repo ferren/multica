@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -309,6 +309,7 @@ type workspaceState struct {
+@@ -338,6 +338,7 @@ type workspaceState struct {
  	allowedRepoURLs map[string]struct{}
  	taskRepoURLs    map[string]struct{}
  	taskRepoRefs    map[string]map[string]string // taskID -> repo URL -> checkout ref
@@ -10,7 +10,7 @@ Index: multica/server/internal/daemon/daemon.go
  	settings        json.RawMessage              // workspace settings (JSONB)
  	lastRepoSyncErr string
  	repoRefreshMu   contextLock
-@@ -3553,6 +3554,9 @@ func (d *Daemon) registerTaskRepos(works
+@@ -3596,6 +3597,9 @@ func (d *Daemon) registerTaskRepos(works
  	if taskID != "" && ws.taskRepoRefs == nil {
  		ws.taskRepoRefs = make(map[string]map[string]string)
  	}
@@ -20,7 +20,7 @@ Index: multica/server/internal/daemon/daemon.go
  	candidates := make([]repoCandidate, 0, len(repos))
  	for _, repo := range repos {
  		url := strings.TrimSpace(repo.URL)
-@@ -3571,6 +3575,12 @@ func (d *Daemon) registerTaskRepos(works
+@@ -3614,6 +3618,12 @@ func (d *Daemon) registerTaskRepos(works
  			if _, exists := ws.taskRepoRefs[taskID][url]; !exists {
  				ws.taskRepoRefs[taskID][url] = strings.TrimSpace(repo.Ref)
  			}
@@ -33,7 +33,7 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  		candidates = append(candidates, repoCandidate{
  			url:     url,
-@@ -3615,6 +3625,25 @@ func (d *Daemon) taskRepoDefaultRef(work
+@@ -3658,6 +3668,25 @@ func (d *Daemon) taskRepoDefaultRef(work
  	return strings.TrimSpace(ws.taskRepoRefs[taskID][repoURL])
  }
  
@@ -59,7 +59,7 @@ Index: multica/server/internal/daemon/daemon.go
  func (d *Daemon) clearTaskRepoRefs(workspaceID, taskID string) {
  	taskID = strings.TrimSpace(taskID)
  	if taskID == "" {
-@@ -10279,7 +10308,7 @@ func convertReposForEnv(repos []RepoData
+@@ -10381,7 +10410,7 @@ func convertReposForEnv(repos []RepoData
  	}
  	result := make([]execenv.RepoContextForEnv, len(repos))
  	for i, r := range repos {
@@ -84,7 +84,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config_sections.go
 +++ multica/server/internal/daemon/execenv/runtime_config_sections.go
-@@ -419,6 +419,11 @@ func writeRepositories(b *strings.Builde
+@@ -425,6 +425,11 @@ func writeRepositories(b *strings.Builde
  		if repo.Description != "" {
  			line += " — " + repo.Description
  		}
@@ -100,7 +100,7 @@ Index: multica/server/internal/daemon/health.go
 ===================================================================
 --- multica.orig/server/internal/daemon/health.go
 +++ multica/server/internal/daemon/health.go
-@@ -492,11 +492,16 @@ func (d *Daemon) repoCheckoutHandler() h
+@@ -512,11 +512,16 @@ func (d *Daemon) repoCheckoutHandler() h
  			checkoutRef = d.taskRepoDefaultRef(req.WorkspaceID, req.TaskID, req.URL)
  		}
  

@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -10687,6 +10687,7 @@ func convertSkillsForEnv(skills []SkillD
+@@ -10789,6 +10789,7 @@ func convertSkillsForEnv(skills []SkillD
  			Name:        s.Name,
  			Description: s.Description,
  			Content:     s.Content,

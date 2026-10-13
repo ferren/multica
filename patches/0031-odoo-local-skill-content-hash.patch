@@ -94,7 +94,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	"os"
  	"path/filepath"
  	"reflect"
-@@ -1599,3 +1600,103 @@ func TestCollectLocalSkillFiles_ValidUTF
+@@ -1598,3 +1599,103 @@ func TestCollectLocalSkillFiles_ValidUTF
  		}
  	}
  }

@@ -43,7 +43,7 @@ Index: multica/server/internal/daemon/local_skills_test.go
  	"testing"
  )
  
-@@ -694,6 +695,154 @@ func TestListRuntimeLocalSkills_CodexUse
+@@ -693,6 +694,154 @@ func TestListRuntimeLocalSkills_CodexUse
  	}
  }
  

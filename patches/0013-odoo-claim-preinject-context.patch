@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -8030,6 +8030,9 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -8088,6 +8088,9 @@ func (d *Daemon) runTask(ctx context.Con
  		CommentReplyTargets: commentReplyThreads(task),
  		NewCommentCount:     task.NewCommentCount,
  		NewCommentsSince:    task.NewCommentsSince,
@@ -12,7 +12,7 @@ Index: multica/server/internal/daemon/daemon.go
  		PriorSessionResumed: task.PriorSessionID != "",
  		// MUL-5305: the server sets this when a more recent Codex session was
  		// withheld (rollout missing) and PriorSessionID is an older fallback (or
-@@ -10335,6 +10338,29 @@ func convertProjectResourcesForEnv(resou
+@@ -10437,6 +10440,29 @@ func convertProjectResourcesForEnv(resou
  		}
  	}
  	return result
@@ -251,7 +251,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/runtime_config_sections.go
 +++ multica/server/internal/daemon/execenv/runtime_config_sections.go
-@@ -649,6 +649,91 @@ func writeWorkflowAutopilot(b *strings.B
+@@ -655,6 +655,91 @@ func writeWorkflowAutopilot(b *strings.B
  	b.WriteString("- " + AutopilotIssueCommandsGuard + "\n\n")
  }
  
@@ -343,7 +343,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
  // writeWorkflowIssue emits the single issue workflow used by every
  // issue-bound run, whatever triggered it.
  //
-@@ -763,10 +848,10 @@ func writeWorkflowAutopilot(b *strings.B
+@@ -769,10 +854,10 @@ func writeWorkflowAutopilot(b *strings.B
  func writeWorkflowIssue(b *strings.Builder, ctx TaskContextForEnv) {
  	b.WriteString("**Every issue turn runs the same workflow.** The per-turn user message carries what triggered this run — an assignment handoff, or a triggering comment with its id and your `--parent` value — plus this issue's real id and ready-to-run context-read commands; assemble other calls from `## Available Commands`.\n\n")
  
@@ -356,7 +356,7 @@ Index: multica/server/internal/daemon/execenv/runtime_config_sections.go
  	b.WriteString("3. If any part of what this turn will produce is what the issue itself asks for, set `in_progress` FIRST (skip when the issue is already `in_progress`, or when your Agent Identity forbids status writes): the board should show the issue being worked while you work, not only after. The kind of activity — research, design, planning, review — never decides this; only whether the output is part of THIS issue's ask. Then complete the task within your Agent Identity boundaries (`## Instruction Precedence` lists the actions Agent Identity can forbid). If your role is delegation-only, perform the allowed delegation work and stop once that outcome is delivered. Before assigning work, check the target issue's current assignee and comment history. Do not repeat an assignment for work that has already been handed off or is being handled by the intended assignee.\n")
  	if ctx.IsSquadLeader {
  		b.WriteString("4. **Post your final results as a comment** (unless your outcome is `no_action` — see the no_action rule in your Squad Operating Protocol): post it with `multica issue comment add` using the platform-correct non-inline mode from ## Comment Formatting (never inline `--content`). When the per-turn user message carries a triggering comment, reply in its thread with the `--parent` value it gives you for THIS turn (never one from an earlier turn); when it lists several threads, post one reply per thread. With no triggering comment, post a new top-level comment. Your results are only visible to the user if posted via this CLI call; text in your terminal or run logs is NOT delivered.\n")
-@@ -1088,6 +1173,15 @@ func buildMetaSkillContentSlim(provider
+@@ -1084,6 +1169,15 @@ func buildMetaSkillContentSlim(provider
  		writeInstructionPrecedence(&b)
  	}
  

@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -4890,7 +4890,7 @@ func (d *Daemon) handleHeartbeatActions(
+@@ -4801,7 +4801,7 @@ func (d *Daemon) handleHeartbeatActions(
  	}
  	if resp.PendingLocalSkills != nil {
  		if rt := d.findRuntime(runtimeID); rt != nil {
@@ -11,7 +11,7 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  	}
  	if resp.PendingMemoryScan != nil {
-@@ -5183,11 +5183,12 @@ func (d *Daemon) handleModelList(ctx con
+@@ -5094,11 +5094,12 @@ func (d *Daemon) handleModelList(ctx con
  	})
  }
  
@@ -27,7 +27,7 @@ Index: multica/server/internal/daemon/daemon.go
  		d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
  			"status": "failed",
  			"error":  err.Error(),
-@@ -5201,6 +5202,7 @@ func (d *Daemon) handleLocalSkillList(ct
+@@ -5112,6 +5113,7 @@ func (d *Daemon) handleLocalSkillList(ct
  		mcpSupported = false
  	}
  
@@ -35,7 +35,7 @@ Index: multica/server/internal/daemon/daemon.go
  	d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
  		"status":        "completed",
  		"skills":        skills,
-@@ -5317,7 +5319,7 @@ func (d *Daemon) reportMemoryWriteResult
+@@ -5228,7 +5230,7 @@ func (d *Daemon) reportMemoryWriteResult
  func (d *Daemon) handleLocalSkillImport(ctx context.Context, rt Runtime, pending PendingLocalSkillImport) {
  	d.logger.Info("runtime local skill import requested", "runtime_id", rt.ID, "request_id", pending.ID, "provider", rt.Provider, "skill_key", pending.SkillKey)
  
@@ -100,7 +100,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	home, err := os.UserHomeDir()
  	if err != nil {
  		return nil, false, fmt.Errorf("resolve user home: %w", err)
-@@ -255,6 +265,22 @@ func localSkillRootsForProvider(provider
+@@ -261,6 +271,22 @@ func localSkillRootsForProvider(provider
  	if providerRoot != "" {
  		roots = append(roots, localSkillRoot{path: providerRoot, kind: localSkillRootProvider})
  	}
@@ -123,7 +123,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	roots = append(roots, localSkillRoot{path: filepath.Join(home, ".agents", "skills"), kind: localSkillRootUniversal})
  	if provider == "claude" {
  		for _, plugin := range listEnabledClaudePlugins(home) {
-@@ -292,6 +318,55 @@ func hermesLocalSkillsRoot() string {
+@@ -298,6 +324,55 @@ func hermesLocalSkillsRoot() string {
  	return filepath.Join(res.SourceHome, "skills")
  }
  
@@ -179,7 +179,7 @@ Index: multica/server/internal/daemon/local_skills.go
  func isIgnoredLocalSkillEntry(name string) bool {
  	if name == "" {
  		return true
-@@ -475,8 +550,8 @@ func collectLocalSkillFiles(skillDir str
+@@ -481,8 +556,8 @@ func collectLocalSkillFiles(skillDir str
  	return files, nil
  }
  
@@ -190,7 +190,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	if err != nil || !supported {
  		return nil, supported, err
  	}
-@@ -608,11 +683,21 @@ func enumerateLocalSkills(
+@@ -614,11 +689,21 @@ func enumerateLocalSkills(
  				continue
  			}
  
@@ -213,7 +213,7 @@ Index: multica/server/internal/daemon/local_skills.go
  				Provider:    provider,
  				Root:        root.kind,
  				Plugin:      root.plugin,
-@@ -632,8 +717,8 @@ func enumerateLocalSkills(
+@@ -638,8 +723,8 @@ func enumerateLocalSkills(
  	}
  }
  
@@ -597,3 +597,21 @@ Index: multica/server/pkg/protocol/messages.go
  }
  
  // DaemonHeartbeatPendingMemoryScan describes a request to inventory the
+Index: multica/server/internal/daemon/muse_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/muse_test.go
++++ multica/server/internal/daemon/muse_test.go
+@@ -24,11 +24,11 @@ func TestMuseLocalSkillsUseConfigAndUniv
+ 			writeTestLocalSkill(t, filepath.Join(home, ".agents", "skills"), "shared", map[string]string{
+ 				"SKILL.md": "---\nname: Shared\ndescription: Cross-agent skill\n---\n",
+ 			})
+-			skills, supported, err := listRuntimeLocalSkills("muse")
++			skills, supported, err := listRuntimeLocalSkills("muse", nil)
+ 			if err != nil || !supported || len(skills) != 2 {
+ 				t.Fatalf("supported=%v skills=%v err=%v", supported, skills, err)
+ 			}
+-			_, supported, err = loadRuntimeLocalSkillBundle("muse", "personal")
++			_, supported, err = loadRuntimeLocalSkillBundle("muse", "personal", nil)
+ 			if err != nil || !supported {
+ 				t.Fatalf("personal skill cannot be imported: %v", err)
+ 			}

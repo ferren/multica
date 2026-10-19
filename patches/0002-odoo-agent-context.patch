@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -8009,6 +8009,23 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -7921,6 +7921,23 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
@@ -26,7 +26,7 @@ Index: multica/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:             task.IssueID,
  		TriggerCommentID:    task.TriggerCommentID,
-@@ -8053,6 +8070,10 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -7965,6 +7982,10 @@ func (d *Daemon) runTask(ctx context.Con
  		IssueStatuses:                    convertIssueStatusesForEnv(task.IssueStatuses),
  		IssueStatusesOmitted:             task.IssueStatusesOmitted,
  		ConnectedApps:                    task.ConnectedApps,
@@ -37,7 +37,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  
  	// A local_directory task gets a fresh CODEX_HOME but mounts the same
-@@ -8734,15 +8755,35 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -8651,15 +8672,35 @@ func (d *Daemon) runTask(ctx context.Con
  	// MULTICA_TOKEN is bound to (agent, task) by the server. Never fall back
  	// to the daemon's own credential here: doing so lets agent CLI writes land
  	// as the runtime owner's member actor and can retrigger the same agent.

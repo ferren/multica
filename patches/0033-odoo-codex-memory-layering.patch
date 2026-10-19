@@ -159,65 +159,7 @@ Index: multica/server/internal/daemon/execenv/codex_memory.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/codex_memory.go
 +++ multica/server/internal/daemon/execenv/codex_memory.go
-@@ -33,19 +33,17 @@ import (
- //     `D:\Project\MoHaYu\WowChat` (a host-local project) injected into a
- //     brand-new Multica issue's first Codex turn.
- //
--// Mitigation: write a managed block into the per-task `config.toml` that
--// disables both the `features.memories` flag and the `memories.*`
--// generation/consumption switches. Codex then neither writes nor reads
--// from its memory subsystem, eliminating both leak paths regardless of
--// where the residual files sit on disk. The user's global
--// `~/.codex/config.toml` is never modified.
-+// Multica now keeps the native store isolated before enabling it: for
-+// local-directory tasks, `codex-home/memories/` is linked to the same
-+// per-(daemon profile, agent, issue) durable store as the task's scoped
-+// Codex sessions. That prevents both leak paths above: no task sees the
-+// user's `~/.codex/memories/`, and no two issues share a native store.
-+// The user's global `~/.codex/config.toml` is never modified.
- //
--// Users who explicitly want Codex native memory inside a Multica task
--// (and accept the leak risk) can keep the feature enabled by setting
--// `MULTICA_CODEX_MEMORY=1` in the daemon environment. The long-term
--// answer for durable agent context is a Multica-owned, user-visible,
--// project- or issue-scoped memory store — not re-enabling Codex's
--// hidden auto-memory.
-+// Platform memories deliberately do NOT get written into this store. Codex
-+// owns its native summaries; the platform's global/project library remains
-+// visible and editable in Multica and is retrieved on demand through
-+// `multica memory list/get`. See the Odoo project-context renderer.
- //
- // Layout note
- //
-@@ -54,20 +52,21 @@ import (
- // adapt to the user's existing config. Two independent managed blocks
- // are written:
- //
--//   1. memory-feature: disables `features.memories`. If the user's
-+//   1. memory-feature: controls `features.memories`. If the user's
- //      config contains a top-level `[features]` table, the override is
- //      injected inside that table; otherwise it goes at the file root
- //      in dotted-key form.
--//   2. memory-config: disables `memories.generate_memories` and
-+//   2. memory-config: controls `memories.generate_memories` and
- //      `memories.use_memories`. If the user's config contains a
- //      top-level `[memories]` table, the overrides are injected inside
- //      that table; otherwise they go at the file root in dotted-key
- //      form.
- 
--// MulticaCodexMemoryEnv is the env var users can set to keep Codex
--// native memory enabled inside daemon-managed tasks. Anything truthy
--// (1, true, yes, on; case-insensitive) keeps the feature on; everything
--// else (including unset) disables it.
-+// MulticaCodexMemoryEnv is the env var users can set to disable Codex native
-+// memory inside daemon-managed tasks. Native memory is on by default, but
-+// setting this to any conventional false value (0, false, no, off;
-+// case-insensitive) keeps the managed task fully stateless. Truthy values are
-+// accepted for compatibility with the old opt-in spelling.
- const MulticaCodexMemoryEnv = "MULTICA_CODEX_MEMORY"
- 
- const (
-@@ -104,28 +103,29 @@ var (
+@@ -56,28 +56,29 @@ var (
  	rootDottedMemoriesUseRe      = regexp.MustCompile(`^\s*memories\s*\.\s*use_memories\s*=`)
  )
  
@@ -257,7 +199,7 @@ Index: multica/server/internal/daemon/execenv/codex_memory.go
  	}
  	b.WriteString(multicaMemoryFeatureEndMarker)
  	b.WriteString("\n")
-@@ -135,16 +135,16 @@ func renderMulticaMemoryFeatureBlock(inF
+@@ -87,16 +88,16 @@ func renderMulticaMemoryFeatureBlock(inF
  // renderMulticaMemoryConfigBlock returns the daemon-managed memory-config
  // block. The body uses bare keys when injected inside a `[memories]` table
  // and dotted-key form otherwise.
@@ -279,7 +221,7 @@ Index: multica/server/internal/daemon/execenv/codex_memory.go
  	}
  	b.WriteString(multicaMemoryConfigEndMarker)
  	b.WriteString("\n")
-@@ -223,8 +223,8 @@ func hasRootMemoriesTable(content string
+@@ -175,8 +176,8 @@ func hasRootMemoriesTable(content string
  // memory-feature block immediately after the first `[features]` header
  // line. Caller must have already stripped any prior managed block and any
  // user-set `memories` directive from inside the table.
@@ -290,7 +232,7 @@ Index: multica/server/internal/daemon/execenv/codex_memory.go
  }
  
  // injectMemoryConfigBlockIntoMemoriesTable inserts the in-table
-@@ -232,8 +232,8 @@ func injectMemoryFeatureBlockIntoFeature
+@@ -184,8 +185,8 @@ func injectMemoryFeatureBlockIntoFeature
  // line. Caller must have already stripped any prior managed block and any
  // user-set `generate_memories` / `use_memories` directive from inside the
  // table.
@@ -301,7 +243,7 @@ Index: multica/server/internal/daemon/execenv/codex_memory.go
  }
  
  // injectAfterHeader inserts block right after the first line matching
-@@ -269,23 +269,11 @@ func injectAfterHeader(content string, h
+@@ -221,23 +222,11 @@ func injectAfterHeader(content string, h
  }
  
  // ensureCodexMemoryConfig writes the daemon-managed memory blocks into the
@@ -329,7 +271,7 @@ Index: multica/server/internal/daemon/execenv/codex_memory.go
  
  	data, err := os.ReadFile(configPath)
  	if err != nil && !os.IsNotExist(err) {
-@@ -307,19 +295,19 @@ func ensureCodexMemoryConfig(configPath
+@@ -259,19 +248,19 @@ func ensureCodexMemoryConfig(configPath
  	// In-table injections happen first so the root-prepended blocks land
  	// at the very top of the file (above any user tables).
  	if hasFeatures {

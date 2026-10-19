@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -5947,7 +5947,12 @@ func shouldInterruptAgent(status string,
+@@ -5858,7 +5858,12 @@ func shouldInterruptAgent(status string,
  	if err != nil {
  		return isTaskNotFoundError(err)
  	}

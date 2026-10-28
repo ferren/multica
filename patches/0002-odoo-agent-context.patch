@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -7921,6 +7921,23 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -7996,6 +7996,23 @@ func (d *Daemon) runTask(ctx context.Con
  	// Prepare isolated execution environment.
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
@@ -26,9 +26,9 @@ Index: multica/server/internal/daemon/daemon.go
  	taskCtx := execenv.TaskContextForEnv{
  		IssueID:             task.IssueID,
  		TriggerCommentID:    task.TriggerCommentID,
-@@ -7965,6 +7982,10 @@ func (d *Daemon) runTask(ctx context.Con
- 		IssueStatuses:                    convertIssueStatusesForEnv(task.IssueStatuses),
+@@ -8041,6 +8058,10 @@ func (d *Daemon) runTask(ctx context.Con
  		IssueStatusesOmitted:             task.IssueStatusesOmitted,
+ 		HasProjectWorkflow:               taskHasProjectWorkflow(task),
  		ConnectedApps:                    task.ConnectedApps,
 +		BackendMode:                      d.cfg.BackendMode,
 +		OdooURL:                          d.cfg.ServerBaseURL,
@@ -37,7 +37,7 @@ Index: multica/server/internal/daemon/daemon.go
  	}
  
  	// A local_directory task gets a fresh CODEX_HOME but mounts the same
-@@ -8651,15 +8672,35 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -8744,15 +8765,35 @@ func (d *Daemon) runTask(ctx context.Con
  	// MULTICA_TOKEN is bound to (agent, task) by the server. Never fall back
  	// to the daemon's own credential here: doing so lets agent CLI writes land
  	// as the runtime owner's member actor and can retrigger the same agent.
@@ -81,7 +81,7 @@ Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
 +++ multica/server/internal/daemon/execenv/execenv.go
-@@ -226,6 +226,11 @@ type TaskContextForEnv struct {
+@@ -232,6 +232,11 @@ type TaskContextForEnv struct {
  	// context and the agent stays anonymous-user mode.
  	RequestingUserName               string
  	RequestingUserProfileDescription string

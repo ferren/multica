@@ -89,7 +89,7 @@ Index: multica/server/internal/daemon/client.go
 ===================================================================
 --- multica.orig/server/internal/daemon/client.go
 +++ multica/server/internal/daemon/client.go
-@@ -379,19 +379,19 @@ func (c *Client) OdooExpiresIn() int {
+@@ -380,19 +380,19 @@ func (c *Client) OdooExpiresIn() int {
  }
  
  // MintAgentToken exchanges the daemon's shared Odoo credentials for a fresh
@@ -118,7 +118,7 @@ Index: multica/server/internal/daemon/client_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/client_test.go
 +++ multica/server/internal/daemon/client_test.go
-@@ -890,8 +890,14 @@ func TestClient_FetchOdooToken_NoAPIKeyE
+@@ -894,8 +894,14 @@ func TestClient_FetchOdooToken_NoAPIKeyE
  // /openapi/token) and parses the resulting access_token/api_key/expires_in.
  func TestClient_MintAgentToken_PostsToAgentScopedEndpoint(t *testing.T) {
  	var gotPath string
@@ -133,7 +133,7 @@ Index: multica/server/internal/daemon/client_test.go
  		w.Header().Set("Content-Type", "application/json")
  		json.NewEncoder(w).Encode(map[string]any{
  			"access_token": "agent-tok",
-@@ -903,7 +909,7 @@ func TestClient_MintAgentToken_PostsToAg
+@@ -907,7 +913,7 @@ func TestClient_MintAgentToken_PostsToAg
  
  	c := NewClient(srv.URL)
  	c.SetPathPrefix("/multica")
@@ -142,7 +142,7 @@ Index: multica/server/internal/daemon/client_test.go
  	if err != nil {
  		t.Fatalf("MintAgentToken: %v", err)
  	}
-@@ -913,4 +919,7 @@ func TestClient_MintAgentToken_PostsToAg
+@@ -917,4 +923,7 @@ func TestClient_MintAgentToken_PostsToAg
  	if want := "/multica/daemon/agents/42/token"; gotPath != want {
  		t.Fatalf("path = %q, want %q", gotPath, want)
  	}
@@ -154,7 +154,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -8138,18 +8138,18 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -8213,18 +8213,18 @@ func (d *Daemon) runTask(ctx context.Con
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
  	accessToken, apiKey := d.client.OdooCredentials()

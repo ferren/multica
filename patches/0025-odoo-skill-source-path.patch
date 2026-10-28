@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -10716,6 +10716,7 @@ func convertSkillsForEnv(skills []SkillD
+@@ -10953,6 +10953,7 @@ func convertSkillsForEnv(skills []SkillD
  			Name:        s.Name,
  			Description: s.Description,
  			Content:     s.Content,
@@ -37,7 +37,7 @@ Index: multica/server/internal/daemon/execenv/context.go
  					return fmt.Errorf("write skill files: %w", err)
  				}
  			}
-@@ -937,6 +944,63 @@ func sanitizeSkillName(name string) stri
+@@ -939,6 +946,63 @@ func sanitizeSkillName(name string) stri
  // overwrite user bytes (the bug PR #3444 review caught) or skip the
  // skill entirely (which would silently drop a Multica skill the agent
  // expects to see).
@@ -105,7 +105,7 @@ Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
 +++ multica/server/internal/daemon/execenv/execenv.go
-@@ -284,6 +284,11 @@ type SkillContextForEnv struct {
+@@ -290,6 +290,11 @@ type SkillContextForEnv struct {
  	Description string
  	Content     string
  	Files       []SkillFileContextForEnv
@@ -121,7 +121,7 @@ Index: multica/server/internal/daemon/types.go
 ===================================================================
 --- multica.orig/server/internal/daemon/types.go
 +++ multica/server/internal/daemon/types.go
-@@ -268,6 +268,13 @@ type SkillData struct {
+@@ -273,6 +273,13 @@ type SkillData struct {
  	SizeBytes   int64           `json:"size_bytes,omitempty"`
  	Content     string          `json:"content"`
  	Files       []SkillFileData `json:"files,omitempty"`

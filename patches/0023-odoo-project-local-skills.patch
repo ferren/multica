@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -4801,7 +4801,7 @@ func (d *Daemon) handleHeartbeatActions(
+@@ -4790,7 +4790,7 @@ func (d *Daemon) handleHeartbeatActions(
  	}
  	if resp.PendingLocalSkills != nil {
  		if rt := d.findRuntime(runtimeID); rt != nil {
@@ -11,7 +11,7 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  	}
  	if resp.PendingMemoryScan != nil {
-@@ -5094,11 +5094,12 @@ func (d *Daemon) handleModelList(ctx con
+@@ -5083,11 +5083,12 @@ func (d *Daemon) handleModelList(ctx con
  	})
  }
  
@@ -27,7 +27,7 @@ Index: multica/server/internal/daemon/daemon.go
  		d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
  			"status": "failed",
  			"error":  err.Error(),
-@@ -5112,6 +5113,7 @@ func (d *Daemon) handleLocalSkillList(ct
+@@ -5101,6 +5102,7 @@ func (d *Daemon) handleLocalSkillList(ct
  		mcpSupported = false
  	}
  
@@ -35,7 +35,7 @@ Index: multica/server/internal/daemon/daemon.go
  	d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
  		"status":        "completed",
  		"skills":        skills,
-@@ -5228,7 +5230,7 @@ func (d *Daemon) reportMemoryWriteResult
+@@ -5217,7 +5219,7 @@ func (d *Daemon) reportMemoryWriteResult
  func (d *Daemon) handleLocalSkillImport(ctx context.Context, rt Runtime, pending PendingLocalSkillImport) {
  	d.logger.Info("runtime local skill import requested", "runtime_id", rt.ID, "request_id", pending.ID, "provider", rt.Provider, "skill_key", pending.SkillKey)
  
@@ -48,7 +48,7 @@ Index: multica/server/internal/daemon/local_skills.go
 ===================================================================
 --- multica.orig/server/internal/daemon/local_skills.go
 +++ multica/server/internal/daemon/local_skills.go
-@@ -75,6 +75,12 @@ const (
+@@ -76,6 +76,12 @@ const (
  	// localSkillRootProvider marks a runtime's own skill directory (e.g.
  	// ~/.claude/skills). These take priority over the universal root.
  	localSkillRootProvider = "provider"
@@ -61,7 +61,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	// localSkillRootUniversal marks the cross-tool ~/.agents/skills root,
  	// a convention shared by Codex, Gemini CLI, Augment and others as a
  	// universal home-level skill store. It is always searched last so a
-@@ -87,17 +93,21 @@ const (
+@@ -88,17 +94,21 @@ const (
  	localSkillRootPlugin = "plugin"
  )
  
@@ -91,7 +91,7 @@ Index: multica/server/internal/daemon/local_skills.go
  //
  // Keep the provider roots in sync with upstream docs / conventions:
  //   - GitHub Copilot: https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills
-@@ -125,7 +135,7 @@ const (
+@@ -126,7 +136,7 @@ const (
  // Longer-term this mapping would be better colocated with the provider
  // definitions under server/pkg/agent so adding a new runtime can't silently
  // miss the local-skills surface.
@@ -100,9 +100,9 @@ Index: multica/server/internal/daemon/local_skills.go
  	home, err := os.UserHomeDir()
  	if err != nil {
  		return nil, false, fmt.Errorf("resolve user home: %w", err)
-@@ -261,6 +271,22 @@ func localSkillRootsForProvider(provider
- 	if providerRoot != "" {
- 		roots = append(roots, localSkillRoot{path: providerRoot, kind: localSkillRootProvider})
+@@ -268,6 +278,22 @@ func localSkillRootsForProvider(provider
+ 	for _, path := range additionalProviderRoots {
+ 		roots = append(roots, localSkillRoot{path: path, kind: localSkillRootProvider})
  	}
 +	// Project-level roots: scan per-project .<provider>/skills/ directories
 +	// for each local_directory the server included in the heartbeat ack.
@@ -123,7 +123,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	roots = append(roots, localSkillRoot{path: filepath.Join(home, ".agents", "skills"), kind: localSkillRootUniversal})
  	if provider == "claude" {
  		for _, plugin := range listEnabledClaudePlugins(home) {
-@@ -298,6 +324,55 @@ func hermesLocalSkillsRoot() string {
+@@ -324,6 +350,55 @@ func hermesLocalSkillsRoot() string {
  	return filepath.Join(res.SourceHome, "skills")
  }
  
@@ -179,7 +179,7 @@ Index: multica/server/internal/daemon/local_skills.go
  func isIgnoredLocalSkillEntry(name string) bool {
  	if name == "" {
  		return true
-@@ -481,8 +556,8 @@ func collectLocalSkillFiles(skillDir str
+@@ -507,8 +582,8 @@ func collectLocalSkillFiles(skillDir str
  	return files, nil
  }
  
@@ -190,7 +190,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	if err != nil || !supported {
  		return nil, supported, err
  	}
-@@ -614,11 +689,21 @@ func enumerateLocalSkills(
+@@ -640,11 +715,21 @@ func enumerateLocalSkills(
  				continue
  			}
  
@@ -213,7 +213,7 @@ Index: multica/server/internal/daemon/local_skills.go
  				Provider:    provider,
  				Root:        root.kind,
  				Plugin:      root.plugin,
-@@ -638,8 +723,8 @@ func enumerateLocalSkills(
+@@ -664,8 +749,8 @@ func enumerateLocalSkills(
  	}
  }
  
@@ -574,7 +574,7 @@ Index: multica/server/pkg/protocol/messages.go
 ===================================================================
 --- multica.orig/server/pkg/protocol/messages.go
 +++ multica/server/pkg/protocol/messages.go
-@@ -461,6 +461,11 @@ type DaemonHeartbeatPendingModelList str
+@@ -471,6 +471,11 @@ type DaemonHeartbeatPendingModelList str
  // local-skill inventory.
  type DaemonHeartbeatPendingLocalSkills struct {
  	ID string `json:"id"`
@@ -586,7 +586,7 @@ Index: multica/server/pkg/protocol/messages.go
  }
  
  // DaemonHeartbeatPendingLocalSkillImport describes a request to import a
-@@ -468,6 +473,10 @@ type DaemonHeartbeatPendingLocalSkills s
+@@ -478,6 +483,10 @@ type DaemonHeartbeatPendingLocalSkills s
  type DaemonHeartbeatPendingLocalSkillImport struct {
  	ID       string `json:"id"`
  	SkillKey string `json:"skill_key"`
@@ -615,3 +615,22 @@ Index: multica/server/internal/daemon/muse_test.go
  			if err != nil || !supported {
  				t.Fatalf("personal skill cannot be imported: %v", err)
  			}
+Index: multica/server/internal/daemon/local_skills_devin_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_skills_devin_test.go
++++ multica/server/internal/daemon/local_skills_devin_test.go
+@@ -48,12 +48,12 @@ func TestDevinLocalSkillsMergeAndImportP
+ 		writeTestLocalSkill(t, root, "duplicate", map[string]string{"SKILL.md": "---\nname: " + names[i] + "\n---\n"})
+ 		writeTestLocalSkill(t, root, keys[i], map[string]string{"SKILL.md": "---\nname: Unique\n---\n"})
+ 	}
+-	skills, supported, err := listRuntimeLocalSkills("devin")
++	skills, supported, err := listRuntimeLocalSkills("devin", nil)
+ 	if err != nil || !supported || len(skills) != len(roots)+1 {
+ 		t.Fatalf("list = %+v supported=%v err=%v", skills, supported, err)
+ 	}
+ 	for _, key := range append([]string{"duplicate"}, keys...) {
+-		bundle, supported, err := loadRuntimeLocalSkillBundle("devin", key)
++		bundle, supported, err := loadRuntimeLocalSkillBundle("devin", key, nil)
+ 		if err != nil || !supported {
+ 			t.Fatalf("import %s: supported=%v err=%v", key, supported, err)
+ 		}

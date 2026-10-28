@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/local_skills.go
 ===================================================================
 --- multica.orig/server/internal/daemon/local_skills.go
 +++ multica/server/internal/daemon/local_skills.go
-@@ -330,8 +330,15 @@ func hermesLocalSkillsRoot() string {
+@@ -356,8 +356,15 @@ func hermesLocalSkillsRoot() string {
  //
  // Project-level directories mirror the user-level layout but are rooted in
  // each project's workdir rather than $HOME. For providers whose user-level
@@ -19,7 +19,7 @@ Index: multica/server/internal/daemon/local_skills.go
  func providerProjectSkillRelPath(provider string) (string, bool) {
  	switch provider {
  	case "claude":
-@@ -339,7 +346,10 @@ func providerProjectSkillRelPath(provide
+@@ -365,7 +372,10 @@ func providerProjectSkillRelPath(provide
  	case "codebuddy":
  		return ".codebuddy/skills", true
  	case "codex":

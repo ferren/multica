@@ -121,7 +121,7 @@ export function createJaDict(
           {
             title: "初回起動時に自動検出",
             description:
-              "Multica は Antigravity、Claude Code、CodeBuddy、CodeArts、Codex、Copilot、Cursor、DeepSeek Harness、DevEco Code、Devin CLI、Dim、Grok、Hermes、Kimi、Kiro CLI、MiniMax Code、Muse Code、Oh-My-Pi、OpenClaw、OpenCode、Pi、Qoder、Qoder CN、Qwen Code、QwenPaw、Reasonix、Trae CLI、ZeroClaw という28種類の対応ツールをスキャンし、見つかったものをそれぞれランタイムとして登録します。",
+              "Multica は Antigravity、Claude Code、CodeBuddy、CodeArts、Codex、Copilot、Cursor、DeepSeek Harness、DevEco Code、Devin CLI、Dim、Grok、Hermes、Kimi、Kiro CLI、MiniMax Code、Muse Code、Oh-My-Pi、OpenClaw、OpenCode、Pi、Qoder、Qoder CN、Qwen Code、QwenPaw、Reasonix、Trae CLI、ZeroClaw、ZCode という29種類の対応ツールをスキャンし、見つかったものをそれぞれランタイムとして登録します。",
           },
         ],
       },
@@ -142,7 +142,7 @@ export function createJaDict(
         {
           title: "CLI をインストールしてマシンを接続",
           description:
-            "multica setup を実行すると、OAuth の手順を案内し、デーモンを起動し、28種類の対応コーディングツール(Antigravity、Claude Code、CodeBuddy、CodeArts、Codex、Copilot、Cursor、DeepSeek Harness、DevEco Code、Devin CLI、Dim、Grok、Hermes、Kimi、Kiro CLI、MiniMax Code、Muse Code、Oh-My-Pi、OpenClaw、OpenCode、Pi、Qoder、Qoder CN、Qwen Code、QwenPaw、Reasonix、Trae CLI、ZeroClaw)をスキャンします。すでにインストール済みのものは、自動的にランタイムとして登録されます。",
+            "multica setup を実行すると、OAuth の手順を案内し、デーモンを起動し、29種類の対応コーディングツール(Antigravity、Claude Code、CodeBuddy、CodeArts、Codex、Copilot、Cursor、DeepSeek Harness、DevEco Code、Devin CLI、Dim、Grok、Hermes、Kimi、Kiro CLI、MiniMax Code、Muse Code、Oh-My-Pi、OpenClaw、OpenCode、Pi、Qoder、Qoder CN、Qwen Code、QwenPaw、Reasonix、Trae CLI、ZeroClaw, ZCode)をスキャンします。すでにインストール済みのものは、自動的にランタイムとして登録されます。",
         },
         {
           title: "最初のエージェントを作成",
@@ -197,7 +197,7 @@ export function createJaDict(
         {
           question: "Multica はどのコーディングエージェントに対応していますか?",
           answer:
-            "Multica は、Antigravity、Claude Code、CodeBuddy、CodeArts、Codex、Copilot、Cursor、DeepSeek Harness、DevEco Code、Devin CLI、Dim、Grok、Hermes、Kimi、Kiro CLI、MiniMax Code、Muse Code、Oh-My-Pi、OpenClaw、OpenCode、Pi、Qoder、Qoder CN、Qwen Code、QwenPaw、Reasonix、Trae CLI、ZeroClaw の28種類のコーディングツールに標準対応しています。デーモンが、すでにインストール済みの CLI を自動検出し、それぞれをランタイムとして登録します。ソースコードが公開されているので、独自のバックエンドを追加することもできます。 セルフホストでは、Qoder PAT と Qoder Cloud Agents の既存エージェントを使い、タスク実行用のマネージドリモートランタイムとして Qoder Cloud Agents を設定できます。",
+            "Multica は、Antigravity、Claude Code、CodeBuddy、CodeArts、Codex、Copilot、Cursor、DeepSeek Harness、DevEco Code、Devin CLI、Dim、Grok、Hermes、Kimi、Kiro CLI、MiniMax Code、Muse Code、Oh-My-Pi、OpenClaw、OpenCode、Pi、Qoder、Qoder CN、Qwen Code、QwenPaw、Reasonix、Trae CLI、ZeroClaw, ZCode の29種類のコーディングツールに標準対応しています。デーモンが、すでにインストール済みの CLI を自動検出し、それぞれをランタイムとして登録します。ソースコードが公開されているので、独自のバックエンドを追加することもできます。 セルフホストでは、Qoder PAT と Qoder Cloud Agents の既存エージェントを使い、タスク実行用のマネージドリモートランタイムとして Qoder Cloud Agents を設定できます。",
         },
         {
           question: "セルフホストが必須ですか、それともクラウド版もありますか?",
@@ -279,6 +279,58 @@ export function createJaDict(
         fixes: "バグ修正",
       },
       entries: [
+        {
+          version: "0.7.2",
+          date: "2026-10-30",
+          title: "新しい ⌘K コマンドバー、実行中のエージェント同士の情報補足、プロパティの選択肢が 200 個に",
+          changes: [],
+          features: [
+            "⌘K がコマンドバーになりました。サブメニューから今のページの操作を実行し、選んだ Issue をまとめて変更し、ワークスペース全体を検索し、Issue を作ってそのままエージェントに任せられます。Shift+Enter で通常の検索に戻ります。",
+            "エージェントがコマンドラインから、別のエージェントの実行中の作業に訂正や不足していた情報を送れます。元の依頼者の権限と、1 回の実行あたりの上限の範囲内です。",
+            "rerun-task で特定の過去の実行を再実行でき、Issue の担当が変わったあとでも使えます。--fresh を付けると新しいセッションと作業フォルダーで始めます。",
+            "単一選択・複数選択のカスタムプロパティに最大 200 個の選択肢を設定でき、テキストやピンインで絞り込めます。1 つの Issue で選べる値は引き続き最大 50 個です。",
+            "モバイルで、完了・失敗・取り消し済みの実行を開き、出力、思考、ツールの呼び出し、エラーを確認できます。",
+            "幅の狭い画面では、ボタンでタイムラインの最新の動きに移動できます。デスクトップは右側のナビゲーションのままです。",
+          ],
+          improvements: [
+            "アプリ全体で Multica 独自のアイコンを使い、メニューの間隔と文字サイズをそろえました。",
+            "全文のツールチップは、ラベルが途切れているときだけ少し遅れて表示され、マウスを動かしたときに出にくくなりました。",
+            "実行をクリックすると記録全体が開きます。実行ログは待機中の実行を折りたたみ、履歴と費用をコンパクトに表示し、実行中の作業と停止ボタンは見えたままです。",
+            "ワークフローの一覧で、プロジェクトでの使用状況が 1 行にまとまり、クリックで全件を確認できます。引き継ぎのステップには担当者の名前が表示されます。",
+            "組み込みの HTML 図表のガイドで、固定の明るい背景には固定の暗い文字を組み合わせるようにしたため、新しく作る図表はダークモードでも読みやすくなります。",
+          ],
+          fixes: [
+            "エージェントとのチャットは始めた本人だけが見られ、ワークスペースのほかのメンバーには内容が届かなくなりました。",
+            "コンピューターがスリープから復帰すると、デーモンが切れた接続を立て直し、オンライン表示のまま準備中で止まらなくなりました。",
+            "OpenCode が長いツールの呼び出しやサブエージェントの動きを報告するため、アイドルと判定されて止められなくなりました。OpenCode 2.x の MCP サーバーに対応し、無効にしたものは表示だけでタスクには追加されません。",
+            "Hermes のツールのコマンドがタスクの ID を保ち、新旧の Hermes で動き、state.db の所有者の問題で失敗しなくなりました。Go の x/net のセキュリティ更新も含みます。",
+            "Oh-My-Pi は、選んだプロファイルのスキルだけを一覧・インポートします。",
+            "DSH では公式の @multica-ai/dsh-runtime の読み込みが必須になりました。古い bridge の設定は移行手順とともに拒否され、実行内容が失われません。",
+            "Claude Code のセッションや週の上限に達すると利用上限のエラーとして表示され、エラーのあと実行がすぐ終わります。",
+            "Kiro が一時的なネットワークエラーで自動的に再試行し、同じセッションを続けます。",
+            "OpenClaw の状態フォルダーが別のインスタンスに使われているとき、エラーで復旧方法を案内します。",
+            "Codex の GPT-6.1 Terra で、$0 ではなく費用の見積もりが表示されます。",
+            "デスクトップ版は終了前にデーモンの後片付けを待ち、失敗したら知らせるため、タスクが動いたまま残りません。",
+            "デスクトップ版で、スペルの誤りを右クリックすると候補が表示され、辞書に追加できます。",
+            "Lark の返信で Issue への参照がワークスペースのリンクになり、接続確認に失敗すると Lark の接続がつなぎ直されます。",
+            "WeCom で対応していないメッセージには、連携したユーザーの言語か、デプロイの既定の言語で返信します。Docker Compose も既定の言語の設定を渡します。",
+            "WeCom の連携が取り消されると、待機中の返信は送られなくなりました。",
+            "WeCom でファイルのアップロード中に接続が切り替わると、1 回だけ送り直します。",
+            "Google Cloud Storage で、添付ファイルのアップロード、表示、削除が正しく動きます。",
+            "すべての PR がマージされたとき、Issue はプロジェクトのワークフローにあるステータスにだけ移り、それ以外はそのままです。",
+            "許可されていないエージェントのメンションには、コメントの下に理由を説明する返信が付きます。",
+            "設定のプロパティ行で、編集ボタンが画面外に押し出されなくなりました。",
+            "プロジェクトのリソースを同時に複数削除しても、削除したものが戻らなくなりました。",
+            "コンピューターの追加は、新しくオンラインで準備ができたコンピューターのときだけ成功と表示され、設定の編集や再接続では表示されません。",
+            "モバイルで停止した実行は、ステータスが同期されるまで、停止中・失敗・再試行として表示されたままです。",
+            "データの読み込み中に、ページの表示がずれにくくなりました。",
+            "タッチ端末では、ホバーしなくても実行の操作ボタンが表示されます。",
+            "Issue のメニューで「子 Issue を作成」が「名前を変更」の後ろに移り、詳細ページと一覧で同じ並びになりました。",
+            "簡体字と繁体字の中国語で、レビュー依頼の文言がそろいました。",
+            "コメントのトリガーのプレビューで、汎用アイコンではなく正しいアバターが表示されます。",
+            "Issue のページやサイドのプレビューから、アーカイブした通知を受信トレイに戻せます。",
+          ],
+        },
         {
           version: "0.7.1",
           date: "2026-10-27",

@@ -1,18 +1,11 @@
 "use client";
 
 import { useMemo } from "react";
+import { NOTIFICATION_ROUTE_KINDS } from "@multica/core/notification-preferences/routes";
 import { useT } from "../../i18n";
 import type { SettingsSearchEntry } from "./settings-search";
 import { CHANNEL_INTEGRATIONS } from "./settings-navigation";
-
-const NOTIFICATION_GROUPS = [
-  "assignments",
-  "status_changes",
-  "comments",
-  "mentions",
-  "updates",
-  "agent_activity",
-] as const;
+import { browserNotificationSettingAvailable } from "./browser-notification-setting";
 
 export interface SettingsSearchPage {
   value: string;
@@ -25,7 +18,8 @@ export type SettingsSearchIndexEntry = SettingsSearchEntry;
  * The searchable settings for the pages currently in the navigation. Anchors
  * here must match the `anchor` props on the corresponding `SettingsSection` /
  * `SettingsRow`; entries for hidden pages (feature flags, desktop-only) are
- * dropped so a result never lands on a page the user cannot open.
+ * dropped so a result never lands on a page the user cannot open, and rows
+ * that only render on some platforms are indexed under the same condition.
  */
 export function useSettingsSearchIndex(
   pages: readonly SettingsSearchPage[],
@@ -89,22 +83,33 @@ export function useSettingsSearchIndex(
         title: t(($) => $.preferences.issue_fields_title),
         description: t(($) => $.issue.description),
       },
-      ...NOTIFICATION_GROUPS.map((group) => ({
+      {
         tab: "notifications",
-        anchor: group,
-        title: t(($) => $.notifications.groups[group].label),
-        description: t(($) => $.notifications.groups[group].description),
+        anchor: "inbox",
+        title: t(($) => $.notifications.title),
+        description: t(($) => $.notifications.description),
+      },
+      ...NOTIFICATION_ROUTE_KINDS.map(({ key }) => ({
+        tab: "notifications",
+        anchor: key,
+        title: t(($) => $.notifications.kinds[key].label),
+        description: t(($) => $.notifications.kinds[key].description),
       })),
       {
         tab: "notifications",
         anchor: "system",
         title: t(($) => $.notifications.system.label),
       },
-      {
-        tab: "notifications",
-        anchor: "browser",
-        title: t(($) => $.notifications.browser.label),
-      },
+      // Web-only row: absent on desktop and without the Notification API.
+      ...(browserNotificationSettingAvailable()
+        ? [
+            {
+              tab: "notifications",
+              anchor: "browser",
+              title: t(($) => $.notifications.browser.label),
+            },
+          ]
+        : []),
       {
         tab: "tokens",
         title: t(($) => $.page.tabs.tokens),

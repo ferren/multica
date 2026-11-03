@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -341,8 +342,19 @@ var issueCommentListCmd = &cobra.Command{
 var issueCommentAddCmd = &cobra.Command{
 	Use:   "add <issue-id>",
 	Short: "Add a comment to an issue",
-	Args:  exactArgs(1),
-	RunE:  runIssueCommentAdd,
+	Long: "Add a comment to an issue.\n\n" +
+		"A plain comment reaches a busy agent only after its current run ends. To add the message to a run " +
+		"that is in progress instead, pass --steer <run-id> (repeatable; from `multica issue runs <issue-id> --active`) " +
+		"or --steer-active for every running agent on the issue you may steer. You may steer an agent's run " +
+		"exactly when your comment could start that agent; an agent never steers its own run, and one agent can " +
+		"add at most 3 messages to a run (10 from all agents). The steered agents are mentioned in the comment. " +
+		"Only a run that accepts additional messages can be steered (`can_supplement: true` in " +
+		"`multica issue runs <issue-id> --active --output json`). A run that cannot take the message gets the " +
+		"normal trigger; the command reports per run whether it was steered or queued, coalesced, deferred or " +
+		"blocked. If a steered run ends before reading an agent's message, the message is handled in a follow-up " +
+		"run. Steering cannot carry attachments.",
+	Args: exactArgs(1),
+	RunE: runIssueCommentAdd,
 }
 
 var issueCommentUpdateCmd = &cobra.Command{
@@ -656,6 +668,7 @@ func init() {
 	issueCreateCmd.Flags().String("priority", "", "Issue priority")
 	issueCreateCmd.Flags().String("assignee", "", "Assignee name (member, agent, or squad; fuzzy match)")
 	issueCreateCmd.Flags().String("assignee-id", "", "Assignee UUID — member, agent, or squad (mutually exclusive with --assignee)")
+	issueCreateCmd.Flags().Bool("assignee-picker", false, "Assign to the agent or squad selected in Quick Create (requires quick-create task context; mutually exclusive with --assignee and --assignee-id)")
 	issueCreateCmd.Flags().String("parent", "", "Parent issue ID")
 	issueCreateCmd.Flags().Int("stage", 0, "Stage ordinal (>=1) grouping this sub-issue into an ordered barrier group under its parent; omit for unstaged. The parent assignee is woken only when every sub-issue in a stage finishes.")
 	issueCreateCmd.Flags().String("project", "", "Project ID")
@@ -663,7 +676,7 @@ func init() {
 	issueCreateCmd.Flags().String("due-date", "", "Due date (calendar day, YYYY-MM-DD)")
 	issueCreateCmd.Flags().Bool("allow-duplicate", false, "Allow creating an issue even when an active duplicate exists")
 	issueCreateCmd.Flags().String("output", "json", "Output format: table or json")
-	issueCreateCmd.Flags().StringSlice("attachment", nil, "File path(s) to attach (can be specified multiple times). Each file is uploaded and its markdown reference is appended to the description, which is what makes it render on the issue page")
+	issueCreateCmd.Flags().StringArray("attachment", nil, "File path to attach (one literal path per flag; repeat --attachment for multiple files). Each file is uploaded and its markdown reference is appended to the description, which is what makes it render on the issue page")
 	issueCreateCmd.Flags().StringSlice("attachment-id", nil, "Existing attachment UUID(s) to bind to the created issue (can be specified multiple times)")
 	issueCreateCmd.Flags().StringArray("property", nil, `Set a custom property atomically with creation as "Name=Value" (repeatable, one distinct property per flag). Multi-value properties use comma-separated values; multi_text/multi_url also accept JSON arrays (required for commas in entries or values starting with "["). Property and option/member names are case-insensitive; UUIDs are accepted. Filter-only __none__, >=, <=, and != forms are rejected.`)
 
@@ -673,7 +686,7 @@ func init() {
 	issueUpdateCmd.Flags().Bool("description-stdin", false, "Read new description from stdin (preserves multi-line content verbatim)")
 	issueUpdateCmd.Flags().String("description-file", "", "Read new description from a UTF-8 file (preserves multi-line content verbatim; use this on Windows when stdin piping mangles non-ASCII bytes). The path must be inside the current working directory unless --allow-external-file is set.")
 	issueUpdateCmd.Flags().Bool("allow-external-file", false, "Allow --description-file / --attachment to read a path outside the current working directory. Off by default so a stale temp file from another run/environment can't be picked up (MUL-4252).")
-	issueUpdateCmd.Flags().StringSlice("attachment", nil, "Local file path(s) to attach to the issue description (repeatable); references are appended to the end of the description")
+	issueUpdateCmd.Flags().StringArray("attachment", nil, "Local file path to attach (one literal path per flag; repeat --attachment for multiple files); references are appended to the end of the description")
 	issueUpdateCmd.Flags().String("status", "", "New status")
 	issueUpdateCmd.Flags().String("priority", "", "New priority")
 	issueUpdateCmd.Flags().String("assignee", "", "New assignee name (member, agent, or squad; fuzzy match)")
@@ -745,7 +758,9 @@ func init() {
 	issueCommentAddCmd.Flags().String("content-file", "", "Read comment content from a UTF-8 file (preserves multi-line content verbatim; use this on Windows when stdin piping mangles non-ASCII bytes). The path must be inside the current working directory unless --allow-external-file is set.")
 	issueCommentAddCmd.Flags().Bool("allow-external-file", false, "Allow --content-file / --attachment to read a path outside the current working directory. Off by default so a stale file from another run/environment can't be picked up (MUL-4252).")
 	issueCommentAddCmd.Flags().String("parent", "", "Parent comment ID to reply under. A comment-triggered agent run must reply under its trigger comment; omitting --parent to post a top-level comment is rejected")
-	issueCommentAddCmd.Flags().StringSlice("attachment", nil, "File path(s) to attach (can be specified multiple times). Non-image files, HTML included, show as file cards that open in the viewer; to render a chart inside the comment, put a ```html or ```mermaid block in the content instead")
+	issueCommentAddCmd.Flags().StringArray("attachment", nil, "File path to attach (one literal path per flag; repeat --attachment for multiple files). Non-image files, HTML included, show as file cards that open in the viewer; to render a chart inside the comment, put a ```html or ```mermaid block in the content instead")
+	issueCommentAddCmd.Flags().StringSlice("steer", nil, "Run ID (full UUID or short prefix) whose in-progress turn should receive this comment instead of a follow-up run (repeatable)")
+	issueCommentAddCmd.Flags().Bool("steer-active", false, "Add this comment to the running turn of every agent on this issue you may steer, and of any other recipient that is running")
 	issueCommentAddCmd.Flags().String("output", "json", "Output format: table or json")
 
 	// issue comment update
@@ -1379,6 +1394,20 @@ func collectLocalAttachments(cmd *cobra.Command, attachments []string) ([]pendin
 	return pending, nil
 }
 
+func issueAttachmentPaths(cmd *cobra.Command) ([]string, error) {
+	flag := cmd.Flags().Lookup("attachment")
+	if flag == nil {
+		return nil, errors.New("--attachment flag is not registered")
+	}
+	paths, ok := flag.Value.(pflag.SliceValue)
+	if !ok {
+		return nil, errors.New("--attachment flag does not contain a path array")
+	}
+	// GetStringArray round-trips through CSV and loses a single empty string.
+	// Read the stored values so an explicit empty path reaches file validation.
+	return paths.GetSlice(), nil
+}
+
 // appendAttachmentReferences appends the markdown snippet of every uploaded
 // attachment to an issue description, so the file renders on the issue page
 // instead of only existing as a stored row. Each snippet goes in its own
@@ -1451,6 +1480,30 @@ func quickCreateAttachmentIDsFromEnv() ([]string, error) {
 	return appendUniqueStrings(nil, ids...), nil
 }
 
+func pickIssueCreateAssignee(ctx context.Context, client *cli.APIClient, cmd *cobra.Command) (string, string, bool, error) {
+	if cmd.Flags().Changed("assignee-picker") && (cmd.Flags().Changed("assignee") || cmd.Flags().Changed("assignee-id")) {
+		return "", "", false, errors.New("--assignee-picker, --assignee, and --assignee-id are mutually exclusive")
+	}
+	picker, _ := cmd.Flags().GetBool("assignee-picker")
+	if !picker {
+		return pickAssigneeFromFlags(ctx, client, cmd, "assignee", "assignee-id", issueAssigneeKinds)
+	}
+	if strings.TrimSpace(os.Getenv("MULTICA_QUICK_CREATE_TASK_ID")) == "" {
+		return "", "", false, errors.New("--assignee-picker requires a quick-create task context")
+	}
+	aType := os.Getenv("MULTICA_QUICK_CREATE_DEFAULT_ASSIGNEE_TYPE")
+	if aType != "agent" && aType != "squad" {
+		return "", "", false, errors.New("invalid picker assignee type: MULTICA_QUICK_CREATE_DEFAULT_ASSIGNEE_TYPE must be agent or squad")
+	}
+	aID := strings.TrimSpace(os.Getenv("MULTICA_QUICK_CREATE_DEFAULT_ASSIGNEE_ID"))
+	if !uuidRegexp.MatchString(aID) {
+		return "", "", false, errors.New("MULTICA_QUICK_CREATE_DEFAULT_ASSIGNEE_ID must contain a canonical UUID")
+	}
+	// The server validates workspace membership, archive state and invocation
+	// permissions for this typed pair, just as it does for explicit assignees.
+	return aType, aID, true, nil
+}
+
 func runIssueCreate(cmd *cobra.Command, _ []string) error {
 	title, _ := cmd.Flags().GetString("title")
 	if title == "" {
@@ -1476,7 +1529,10 @@ func runIssueCreate(cmd *cobra.Command, _ []string) error {
 
 	// Use a longer timeout when attachments are present (file uploads can be slow).
 	timeout := cli.APITimeout()
-	attachments, _ := cmd.Flags().GetStringSlice("attachment")
+	attachments, err := issueAttachmentPaths(cmd)
+	if err != nil {
+		return err
+	}
 	if len(attachments) > 0 {
 		timeout = cli.AtLeastAPITimeout(60 * time.Second)
 	}
@@ -1548,7 +1604,7 @@ func runIssueCreate(cmd *cobra.Command, _ []string) error {
 	if v, _ := cmd.Flags().GetBool("allow-duplicate"); v {
 		body["allow_duplicate"] = true
 	}
-	aType, aID, hasAssignee, resolveErr := pickAssigneeFromFlags(ctx, client, cmd, "assignee", "assignee-id", issueAssigneeKinds)
+	aType, aID, hasAssignee, resolveErr := pickIssueCreateAssignee(ctx, client, cmd)
 	if resolveErr != nil {
 		return fmt.Errorf("resolve assignee: %w", resolveErr)
 	}
@@ -1683,7 +1739,10 @@ func activeDuplicateIssueCreateMessage(err error) (string, bool) {
 }
 
 func runIssueUpdate(cmd *cobra.Command, args []string) error {
-	attachmentPaths, _ := cmd.Flags().GetStringSlice("attachment")
+	attachmentPaths, err := issueAttachmentPaths(cmd)
+	if err != nil {
+		return err
+	}
 	noStart, _ := cmd.Flags().GetBool("no-start")
 	statusChanged := cmd.Flags().Changed("status")
 	statusFlag, _ := cmd.Flags().GetString("status")
@@ -2551,7 +2610,15 @@ func runIssueCommentAdd(cmd *cobra.Command, args []string) error {
 
 	// Use a longer timeout when attachments are present (file uploads can be slow).
 	timeout := cli.APITimeout()
-	attachments, _ := cmd.Flags().GetStringSlice("attachment")
+	attachments, err := issueAttachmentPaths(cmd)
+	if err != nil {
+		return err
+	}
+	steerInputs, _ := cmd.Flags().GetStringSlice("steer")
+	steerActive, _ := cmd.Flags().GetBool("steer-active")
+	if (len(steerInputs) > 0 || steerActive) && len(attachments) > 0 {
+		return fmt.Errorf("--steer / --steer-active cannot be combined with --attachment: a running turn takes text only; post the files in a separate comment")
+	}
 	if len(attachments) > 0 {
 		timeout = cli.AtLeastAPITimeout(60 * time.Second)
 	}
@@ -2563,6 +2630,11 @@ func runIssueCommentAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve issue: %w", err)
 	}
 	issueID := issueRef.ID
+
+	steerTargets, err := resolveSteerTargets(ctx, client, issueID, steerInputs, steerActive)
+	if err != nil {
+		return err
+	}
 
 	// Validate and read ALL attachments before uploading any. URLs are skipped
 	// with a warning — `--attachment` only accepts local file paths. Reading
@@ -2585,6 +2657,19 @@ func runIssueCommentAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	body := map[string]any{"content": content}
+	if len(steerTargets) > 0 {
+		steerTaskIDs := make([]string, len(steerTargets))
+		for i, target := range steerTargets {
+			steerTaskIDs[i] = target.TaskID
+		}
+		body["content"] = withSteerMentions(content, steerTargets)
+		body["steer_task_ids"] = steerTaskIDs
+	}
+	if steerActive {
+		// The server also steers a recipient whose run started after the
+		// listing above.
+		body["steer"] = true
+	}
 	if parentID, _ := cmd.Flags().GetString("parent"); parentID != "" {
 		body["parent_id"] = parentID
 	}
@@ -2597,6 +2682,7 @@ func runIssueCommentAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "Comment added to issue %s.\n", issueRef.Display)
+	reportSteerOutcomes(os.Stderr, steerTargets, result)
 
 	output, _ := cmd.Flags().GetString("output")
 	if output == "table" {

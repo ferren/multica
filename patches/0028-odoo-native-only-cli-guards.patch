@@ -29,7 +29,7 @@ Index: multica/server/internal/cli/client.go
 ===================================================================
 --- multica.orig/server/internal/cli/client.go
 +++ multica/server/internal/cli/client.go
-@@ -784,7 +784,9 @@ func (c *APIClient) UploadPrivatePlugin(
+@@ -790,7 +790,9 @@ func (c *APIClient) UploadPrivatePlugin(
  		return fmt.Errorf("close Plugin artifact upload: %w", err)
  	}
  
@@ -44,7 +44,7 @@ Index: multica/server/cmd/multica/cmd_skill_test.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_skill_test.go
 +++ multica/server/cmd/multica/cmd_skill_test.go
-@@ -519,6 +519,40 @@ func TestRunSkillRefreshPostsToRefreshEn
+@@ -637,6 +637,40 @@ func TestRunSkillRefreshPostsToRefreshEn
  	}
  }
  
@@ -89,7 +89,7 @@ Index: multica/server/internal/daemon/client.go
 ===================================================================
 --- multica.orig/server/internal/daemon/client.go
 +++ multica/server/internal/daemon/client.go
-@@ -380,19 +380,19 @@ func (c *Client) OdooExpiresIn() int {
+@@ -377,19 +377,19 @@ func (c *Client) OdooExpiresIn() int {
  }
  
  // MintAgentToken exchanges the daemon's shared Odoo credentials for a fresh
@@ -154,7 +154,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -8213,18 +8213,18 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -8328,18 +8328,18 @@ func (d *Daemon) runTask(ctx context.Con
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
  	accessToken, apiKey := d.client.OdooCredentials()

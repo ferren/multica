@@ -44,7 +44,7 @@ Index: multica/server/internal/daemon/local_skills.go
  
  type runtimeLocalSkillBundle struct {
  	Name        string          `json:"name"`
-@@ -720,10 +746,26 @@ func enumerateLocalSkills(
+@@ -722,10 +748,26 @@ func enumerateLocalSkills(
  				skillName = filepath.Base(path)
  			}
  
@@ -72,7 +72,7 @@ Index: multica/server/internal/daemon/local_skills.go
  
  			// source_path is matched against local_directory.local_path on the
  			// Odoo side for project-level skills (root="project"). Odoo stores
-@@ -749,7 +791,8 @@ func enumerateLocalSkills(
+@@ -751,7 +793,8 @@ func enumerateLocalSkills(
  				// field can carry it without duplication on import). For the
  				// list summary the user expects the total file count, so add
  				// one back for SKILL.md itself.

@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -358,6 +358,7 @@ type workspaceState struct {
+@@ -366,6 +366,7 @@ type workspaceState struct {
  	allowedRepoURLs map[string]struct{}
  	taskRepoURLs    map[string]struct{}
  	taskRepoRefs    map[string]map[string]string // taskID -> repo URL -> checkout ref
@@ -10,7 +10,7 @@ Index: multica/server/internal/daemon/daemon.go
  	settings        json.RawMessage              // workspace settings (JSONB)
  	repoRefreshMu   contextLock
  	// coAuthorPublishMu serializes publication of the Co-authored-by verdict
-@@ -3492,6 +3493,9 @@ func (d *Daemon) registerTaskRepos(works
+@@ -3518,6 +3519,9 @@ func (d *Daemon) registerTaskRepos(works
  	if taskID != "" && ws.taskRepoRefs == nil {
  		ws.taskRepoRefs = make(map[string]map[string]string)
  	}
@@ -20,7 +20,7 @@ Index: multica/server/internal/daemon/daemon.go
  	candidates := make([]repoCandidate, 0, len(repos))
  	for _, repo := range repos {
  		url := strings.TrimSpace(repo.URL)
-@@ -3510,6 +3514,12 @@ func (d *Daemon) registerTaskRepos(works
+@@ -3536,6 +3540,12 @@ func (d *Daemon) registerTaskRepos(works
  			if _, exists := ws.taskRepoRefs[taskID][url]; !exists {
  				ws.taskRepoRefs[taskID][url] = strings.TrimSpace(repo.Ref)
  			}
@@ -33,7 +33,7 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  		candidates = append(candidates, repoCandidate{
  			url:     url,
-@@ -3554,6 +3564,25 @@ func (d *Daemon) taskRepoDefaultRef(work
+@@ -3580,6 +3590,25 @@ func (d *Daemon) taskRepoDefaultRef(work
  	return strings.TrimSpace(ws.taskRepoRefs[taskID][repoURL])
  }
  
@@ -59,7 +59,7 @@ Index: multica/server/internal/daemon/daemon.go
  func (d *Daemon) clearTaskRepoRefs(workspaceID, taskID string) {
  	taskID = strings.TrimSpace(taskID)
  	if taskID == "" {
-@@ -10545,7 +10574,7 @@ func convertReposForEnv(repos []RepoData
+@@ -10792,7 +10821,7 @@ func convertReposForEnv(repos []RepoData
  	}
  	result := make([]execenv.RepoContextForEnv, len(repos))
  	for i, r := range repos {
@@ -121,7 +121,7 @@ Index: multica/server/internal/daemon/repocache/cache.go
 ===================================================================
 --- multica.orig/server/internal/daemon/repocache/cache.go
 +++ multica/server/internal/daemon/repocache/cache.go
-@@ -741,6 +741,7 @@ type WorktreeParams struct {
+@@ -743,6 +743,7 @@ type WorktreeParams struct {
  	RepoURL             string // remote URL to look up in the cache
  	WorkDir             string // parent directory for the worktree (e.g. task workdir)
  	Ref                 string // optional branch, tag, or commit to base the worktree on
@@ -129,7 +129,7 @@ Index: multica/server/internal/daemon/repocache/cache.go
  	AgentName           string // for branch naming
  	TaskID              string // for branch naming uniqueness
  	CoAuthoredByEnabled bool   // install prepare-commit-msg hook for Co-authored-by trailer
-@@ -884,9 +885,21 @@ func (c *Cache) CreateWorktreeContext(ct
+@@ -892,9 +893,21 @@ func (c *Cache) CreateWorktreeContext(ct
  	// Build branch name: agent/{sanitized-name}/{task-id}
  	branchName := fmt.Sprintf("agent/%s/%s", sanitizeName(params.AgentName), taskKey(params.TaskID))
  
@@ -153,7 +153,7 @@ Index: multica/server/internal/daemon/repocache/cache.go
  
  	// Once a workdir has moved to isolated metadata, keep using that safer
  	// shape even if a later task comes from an older CLI or a different runtime
-@@ -2246,6 +2259,27 @@ func excludeFromGitContext(ctx context.C
+@@ -2257,6 +2270,27 @@ func excludeFromGitContext(ctx context.C
  	return nil
  }
  

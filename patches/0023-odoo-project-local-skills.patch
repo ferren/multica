@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -4790,7 +4790,7 @@ func (d *Daemon) handleHeartbeatActions(
+@@ -4816,7 +4816,7 @@ func (d *Daemon) handleHeartbeatActions(
  	}
  	if resp.PendingLocalSkills != nil {
  		if rt := d.findRuntime(runtimeID); rt != nil {
@@ -11,7 +11,7 @@ Index: multica/server/internal/daemon/daemon.go
  		}
  	}
  	if resp.PendingMemoryScan != nil {
-@@ -5083,11 +5083,12 @@ func (d *Daemon) handleModelList(ctx con
+@@ -5109,10 +5109,10 @@ func (d *Daemon) handleModelList(ctx con
  	})
  }
  
@@ -20,14 +20,12 @@ Index: multica/server/internal/daemon/daemon.go
 +func (d *Daemon) handleLocalSkillList(ctx context.Context, rt Runtime, requestID string, projectDirs []string) {
 +	d.logger.Info("runtime local skills requested", "runtime_id", rt.ID, "request_id", requestID, "provider", rt.Provider, "project_dirs", len(projectDirs))
  
--	skills, supported, err := listRuntimeLocalSkills(rt.Provider)
-+	skills, supported, err := listRuntimeLocalSkills(rt.Provider, projectDirs)
+-	skills, supported, err := d.listLocalSkills(ctx, rt)
++	skills, supported, err := d.listLocalSkills(ctx, rt, projectDirs)
  	if err != nil {
-+		d.logger.Error("runtime local skills scan failed", "runtime_id", rt.ID, "request_id", requestID, "error", err)
  		d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
  			"status": "failed",
- 			"error":  err.Error(),
-@@ -5101,6 +5102,7 @@ func (d *Daemon) handleLocalSkillList(ct
+@@ -5127,6 +5127,7 @@ func (d *Daemon) handleLocalSkillList(ct
  		mcpSupported = false
  	}
  
@@ -35,12 +33,12 @@ Index: multica/server/internal/daemon/daemon.go
  	d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
  		"status":        "completed",
  		"skills":        skills,
-@@ -5217,7 +5219,7 @@ func (d *Daemon) reportMemoryWriteResult
+@@ -5243,7 +5244,7 @@ func (d *Daemon) reportMemoryWriteResult
  func (d *Daemon) handleLocalSkillImport(ctx context.Context, rt Runtime, pending PendingLocalSkillImport) {
  	d.logger.Info("runtime local skill import requested", "runtime_id", rt.ID, "request_id", pending.ID, "provider", rt.Provider, "skill_key", pending.SkillKey)
  
--	skill, supported, err := loadRuntimeLocalSkillBundle(rt.Provider, pending.SkillKey)
-+	skill, supported, err := loadRuntimeLocalSkillBundle(rt.Provider, pending.SkillKey, pending.ProjectDirs)
+-	skill, supported, err := d.loadLocalSkillBundle(ctx, rt, pending.SkillKey)
++	skill, supported, err := d.loadLocalSkillBundle(ctx, rt, pending.SkillKey, pending.ProjectDirs)
  	if err != nil {
  		d.reportLocalSkillImportResult(ctx, rt, pending.ID, map[string]any{
  			"status": "failed",
@@ -100,7 +98,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	home, err := os.UserHomeDir()
  	if err != nil {
  		return nil, false, fmt.Errorf("resolve user home: %w", err)
-@@ -268,6 +278,22 @@ func localSkillRootsForProvider(provider
+@@ -270,6 +280,22 @@ func localSkillRootsForProvider(provider
  	for _, path := range additionalProviderRoots {
  		roots = append(roots, localSkillRoot{path: path, kind: localSkillRootProvider})
  	}
@@ -123,7 +121,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	roots = append(roots, localSkillRoot{path: filepath.Join(home, ".agents", "skills"), kind: localSkillRootUniversal})
  	if provider == "claude" {
  		for _, plugin := range listEnabledClaudePlugins(home) {
-@@ -324,6 +350,55 @@ func hermesLocalSkillsRoot() string {
+@@ -326,6 +352,55 @@ func hermesLocalSkillsRoot() string {
  	return filepath.Join(res.SourceHome, "skills")
  }
  
@@ -179,7 +177,7 @@ Index: multica/server/internal/daemon/local_skills.go
  func isIgnoredLocalSkillEntry(name string) bool {
  	if name == "" {
  		return true
-@@ -507,8 +582,8 @@ func collectLocalSkillFiles(skillDir str
+@@ -509,8 +584,8 @@ func collectLocalSkillFiles(skillDir str
  	return files, nil
  }
  
@@ -190,7 +188,7 @@ Index: multica/server/internal/daemon/local_skills.go
  	if err != nil || !supported {
  		return nil, supported, err
  	}
-@@ -640,11 +715,21 @@ func enumerateLocalSkills(
+@@ -642,11 +717,21 @@ func enumerateLocalSkills(
  				continue
  			}
  
@@ -213,7 +211,7 @@ Index: multica/server/internal/daemon/local_skills.go
  				Provider:    provider,
  				Root:        root.kind,
  				Plugin:      root.plugin,
-@@ -664,8 +749,8 @@ func enumerateLocalSkills(
+@@ -666,8 +751,8 @@ func enumerateLocalSkills(
  	}
  }
  
@@ -574,7 +572,7 @@ Index: multica/server/pkg/protocol/messages.go
 ===================================================================
 --- multica.orig/server/pkg/protocol/messages.go
 +++ multica/server/pkg/protocol/messages.go
-@@ -471,6 +471,11 @@ type DaemonHeartbeatPendingModelList str
+@@ -483,6 +483,11 @@ type DaemonHeartbeatPendingModelList str
  // local-skill inventory.
  type DaemonHeartbeatPendingLocalSkills struct {
  	ID string `json:"id"`
@@ -586,7 +584,7 @@ Index: multica/server/pkg/protocol/messages.go
  }
  
  // DaemonHeartbeatPendingLocalSkillImport describes a request to import a
-@@ -478,6 +483,10 @@ type DaemonHeartbeatPendingLocalSkills s
+@@ -490,6 +495,10 @@ type DaemonHeartbeatPendingLocalSkills s
  type DaemonHeartbeatPendingLocalSkillImport struct {
  	ID       string `json:"id"`
  	SkillKey string `json:"skill_key"`
@@ -634,3 +632,71 @@ Index: multica/server/internal/daemon/local_skills_devin_test.go
  		if err != nil || !supported {
  			t.Fatalf("import %s: supported=%v err=%v", key, supported, err)
  		}
+Index: multica/server/internal/daemon/local_skills_omp_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_skills_omp_test.go
++++ multica/server/internal/daemon/local_skills_omp_test.go
+@@ -50,7 +50,7 @@ func TestOmpLocalSkillsListAndImportUseS
+ 				}
+ 				return []agent.OmpSkill{{Name: "review", Description: "Resolved skill", Path: filepath.Join(tc.dir, "SKILL.md")}}, nil
+ 			}
+-			d.handleLocalSkillList(t.Context(), rt, "list-request")
++			d.handleLocalSkillList(t.Context(), rt, "list-request", nil)
+ 			if report.Status != "completed" || len(report.Skills) != 1 || report.Skills[0].Key != "review" || report.Skills[0].SourcePath != relativizeHomePath(tc.dir) {
+ 				t.Fatalf("wrong inventory: %+v", report)
+ 			}
+@@ -61,7 +61,7 @@ func TestOmpLocalSkillsListAndImportUseS
+ 			if tc.profile == "a" && (report.Skills[0].FileCount != 2 || len(report.Skill.Files) != 1 || report.Skill.Files[0].Content != "A reference") {
+ 				t.Fatalf("supporting files lost: %+v", report.Skill)
+ 			}
+-			if _, _, err := d.loadLocalSkillBundle(t.Context(), rt, "excluded"); err == nil {
++			if _, _, err := d.loadLocalSkillBundle(t.Context(), rt, "excluded", nil); err == nil {
+ 				t.Fatal("import accepted a shared skill excluded by the profile")
+ 			}
+ 		})
+@@ -86,7 +86,7 @@ func TestOmpLocalSkillsDoNotFallBackOnDi
+ 	discoverOmpSkills = func(context.Context, agent.Command) ([]agent.OmpSkill, error) {
+ 		return nil, errors.New("inventory unavailable")
+ 	}
+-	d.handleLocalSkillList(t.Context(), rt, "list")
++	d.handleLocalSkillList(t.Context(), rt, "list", nil)
+ 	d.handleLocalSkillImport(t.Context(), rt, PendingLocalSkillImport{ID: "import", SkillKey: "review"})
+ 	delete(d.profileLaunchSpecs, rt.ProfileID)
+ 	if _, err := d.ompSkills(t.Context(), rt); err == nil {
+@@ -106,7 +106,7 @@ func TestOmpLocalSkillsUseConfiguredBuil
+ 		}
+ 		return []agent.OmpSkill{}, nil
+ 	}
+-	skills, supported, err := d.listLocalSkills(t.Context(), Runtime{ID: "builtin", Provider: "omp"})
++	skills, supported, err := d.listLocalSkills(t.Context(), Runtime{ID: "builtin", Provider: "omp"}, nil)
+ 	if err != nil || !supported || skills == nil || len(skills) != 0 {
+ 		t.Fatalf("empty effective roster: %v %v %v", skills, supported, err)
+ 	}
+Index: multica/server/internal/daemon/local_skills_omp.go
+===================================================================
+--- multica.orig/server/internal/daemon/local_skills_omp.go
++++ multica/server/internal/daemon/local_skills_omp.go
+@@ -29,9 +29,9 @@ func (d *Daemon) ompSkills(ctx context.C
+ 	return discoverOmpSkills(ctx, agent.NewCommand(entry.Path, nil))
+ }
+ 
+-func (d *Daemon) listLocalSkills(ctx context.Context, rt Runtime) ([]runtimeLocalSkillSummary, bool, error) {
++func (d *Daemon) listLocalSkills(ctx context.Context, rt Runtime, projectDirs []string) ([]runtimeLocalSkillSummary, bool, error) {
+ 	if rt.Provider != "omp" {
+-		return listRuntimeLocalSkills(rt.Provider)
++		return listRuntimeLocalSkills(rt.Provider, projectDirs)
+ 	}
+ 	resolved, err := d.ompSkills(ctx, rt)
+ 	if err != nil {
+@@ -61,9 +61,9 @@ func (d *Daemon) listLocalSkills(ctx con
+ 	return skills, true, nil
+ }
+ 
+-func (d *Daemon) loadLocalSkillBundle(ctx context.Context, rt Runtime, skillKey string) (*runtimeLocalSkillBundle, bool, error) {
++func (d *Daemon) loadLocalSkillBundle(ctx context.Context, rt Runtime, skillKey string, projectDirs []string) (*runtimeLocalSkillBundle, bool, error) {
+ 	if rt.Provider != "omp" {
+-		return loadRuntimeLocalSkillBundle(rt.Provider, skillKey)
++		return loadRuntimeLocalSkillBundle(rt.Provider, skillKey, projectDirs)
+ 	}
+ 	key, err := normalizeLocalSkillKey(skillKey)
+ 	if err != nil {

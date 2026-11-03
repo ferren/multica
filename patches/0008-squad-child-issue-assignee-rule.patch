@@ -17,5 +17,5 @@ Index: multica/server/internal/handler/squad_briefing.go
 +  ` + "`" + `multica issue update <child-id> --assignee <member>` + "`" + ` rather than
 +  leaving it or recreating it.`
  
- // squadOperatingProtocolFor assembles the protocol, selecting the parent-status
- // responsibility that matches this leader's actual authority over the issue
+ // squadSteerRule is added to the hard rules only for a daemon that ships a
+ // CLI with --steer (protocol.DaemonCapabilityCLICommentSteerV1): an older CLI

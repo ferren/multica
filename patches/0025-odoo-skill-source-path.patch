@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -10953,6 +10953,7 @@ func convertSkillsForEnv(skills []SkillD
+@@ -11184,6 +11184,7 @@ func convertSkillsForEnv(skills []SkillD
  			Name:        s.Name,
  			Description: s.Description,
  			Content:     s.Content,
@@ -22,22 +22,22 @@ Index: multica/server/internal/daemon/execenv/context.go
  	"os"
  	"path/filepath"
  	"regexp"
-@@ -174,7 +175,13 @@ func writeContextFiles(workDir, provider
+@@ -176,7 +177,13 @@ func writeContextFiles(workDir, provider
  			}
  			// Codex skills are written to codex-home in Prepare; skip here.
  			if provider != "codex" {
--				if err := writeSkillFiles(skillsDir, ctx.AgentSkills, manifest); err != nil {
+-				preparedSkillNames, err = writeSkillFilesWithNames(skillsDir, ctx.AgentSkills, manifest)
 +				// Drop skills whose source_path points at an existing local
 +				// skill directory the provider already discovers (Odoo sets
 +				// source_path for skills imported from this runtime's local
 +				// roots). Writing them again into the workdir would duplicate
 +				// the user's own copy. See skipLocallyPresentSkills.
 +				materialized := skipLocallyPresentSkills(ctx.AgentSkills)
-+				if err := writeSkillFiles(skillsDir, materialized, manifest); err != nil {
- 					return fmt.Errorf("write skill files: %w", err)
++				preparedSkillNames, err = writeSkillFilesWithNames(skillsDir, materialized, manifest)
+ 				if err != nil {
+ 					return nil, fmt.Errorf("write skill files: %w", err)
  				}
- 			}
-@@ -939,6 +946,63 @@ func sanitizeSkillName(name string) stri
+@@ -944,6 +951,63 @@ func sanitizeSkillName(name string) stri
  // overwrite user bytes (the bug PR #3444 review caught) or skip the
  // skill entirely (which would silently drop a Multica skill the agent
  // expects to see).
@@ -99,8 +99,8 @@ Index: multica/server/internal/daemon/execenv/context.go
 +}
 +
  func writeSkillFiles(skillsDir string, skills []SkillContextForEnv, manifest *sidecarManifest) error {
- 	if err := recordMkdirAll(skillsDir, 0o755, manifest); err != nil {
- 		return fmt.Errorf("create skills dir: %w", err)
+ 	_, err := writeSkillFilesWithNames(skillsDir, skills, manifest)
+ 	return err
 Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
@@ -121,7 +121,7 @@ Index: multica/server/internal/daemon/types.go
 ===================================================================
 --- multica.orig/server/internal/daemon/types.go
 +++ multica/server/internal/daemon/types.go
-@@ -273,6 +273,13 @@ type SkillData struct {
+@@ -287,6 +287,13 @@ type SkillData struct {
  	SizeBytes   int64           `json:"size_bytes,omitempty"`
  	Content     string          `json:"content"`
  	Files       []SkillFileData `json:"files,omitempty"`

@@ -37,3 +37,4 @@
 0034-odoo-enable-gc-loop.patch
 0035-odoo-jev-cli.patch
 0036-odoo-daemon-websocket-wakeup.patch
+0037-odoo-codex-context-compact-recovery.patch

@@ -1,0 +1,1436 @@
+Index: multica/server/pkg/agent/codex.go
+===================================================================
+--- multica.orig/server/pkg/agent/codex.go
++++ multica/server/pkg/agent/codex.go
+@@ -97,6 +97,12 @@ const (
+ 	// graceful shutdown, so killing it immediately (the prior behavior) drops
+ 	// the task's spans/metrics/logs.
+ 	codexGracefulShutdownTimeout = 10 * time.Second
++	// defaultCodexCompactWaitTimeout bounds the wait for an async
++	// thread/compact/start to finish after its RPC ack. Compaction is itself a
++	// model turn over the whole history, so it can legitimately take minutes
++	// on a large thread; the bound exists so a wedged compaction cannot pin
++	// the run open (issue 568: bounded recovery, never unbounded waiting).
++	defaultCodexCompactWaitTimeout = 10 * time.Minute
+ )
+ 
+ // codexGracefulShutdownTimeoutNanos optionally overrides
+@@ -108,6 +114,11 @@ const (
+ // the opencodeTerminateGraceNanos hook.
+ var codexGracefulShutdownTimeoutNanos atomic.Int64
+ var codexProcessWaitDelayNanos atomic.Int64
++// codexCompactWaitNanos optionally overrides defaultCodexCompactWaitTimeout
++// for tests, in nanoseconds. Zero or negative keeps the production default.
++// Compaction-recovery tests shrink it so a "compaction never completes"
++// fixture resolves in milliseconds instead of burning the real budget.
++var codexCompactWaitNanos atomic.Int64
+ var activeCodexLaunches atomic.Int64
+ var maxActiveCodexLaunchesObserved atomic.Int64
+ var codexCleanupConfirmationOverride atomic.Int32
+@@ -136,6 +147,13 @@ func codexGracefulShutdown() time.Durati
+ 	return codexGracefulShutdownTimeout
+ }
+ 
++func codexCompactWaitTimeout() time.Duration {
++	if n := codexCompactWaitNanos.Load(); n > 0 {
++		return time.Duration(n)
++	}
++	return defaultCodexCompactWaitTimeout
++}
++
+ func codexProcessWaitDelay() time.Duration {
+ 	if n := codexProcessWaitDelayNanos.Load(); n > 0 {
+ 		return time.Duration(n)
+@@ -300,6 +318,73 @@ func CodexRetiredCompactionError(errText
+ 		strings.Contains(lower, codexRetiredCompactPath)
+ }
+ 
++// codexContextCapacityInfoValue is the wire value of the typed
++// CodexErrorInfo::ContextWindowExceeded variant (codex-protocol error.rs,
++// snake_case on the wire). Codex 0.166 ships it on both terminal `error`
++// notifications and turn/completed's turn.error.codexErrorInfo.
++const codexContextCapacityInfoValue = "context_window_exceeded"
++
++// codexContextCapacityMessageMarker is the distinctive fixed prose of the
++// same failure when only the message string is available (older Codex, or a
++// custom runtime speaking the protocol without the typed field):
++//
++//	"Codex ran out of room in the model's context window. Start a new thread
++//	 or clear earlier history before retrying."
++//
++// Only the first clause is matched, and it is matched as a whole phrase: it
++// names the exact condition compaction cures, and nothing else in Codex's
++// error surface says it. Provider-raw 400 bodies are deliberately NOT
++// matched — "context length" style text appears in failures compaction
++// cannot cure (a single oversized input among them), and the Anthropic
++// invalid_request branch in internal/daemon already owns that shape.
++const codexContextCapacityMessageMarker = "ran out of room in the model's context window"
++
++// codexContextCapacityFailure reports whether a failed turn's typed error
++// info or message text identifies the context-window capacity failure — the
++// one class a thread/compact/start can cure while keeping the thread. Rate
++// limits, usage limits and session budgets stay out on purpose: compaction
++// shrinks history, it does not refill quota.
++func codexContextCapacityFailure(info, message string) bool {
++	if strings.EqualFold(strings.TrimSpace(info), codexContextCapacityInfoValue) {
++		return true
++	}
++	return strings.Contains(strings.ToLower(message), codexContextCapacityMessageMarker)
++}
++
++// The three compaction diagnostics below are appended to the surfaced error
++// text, which is persisted in agent_task_queue.error and re-scanned by the
++// resume guards (CodexResumeOverflowError, CodexRetiredCompactionError) and
++// taskfailure.Classify indefinitely. Like codexRetiredCompactionHint in
++// internal/daemon, the CONSTANT parts are worded to stay clear of every phrase
++// those match; only the provider-owned detail is variable, and a detail that
++// genuinely carries the retired-route markers is supposed to — the daemon's
++// annotation then appends the config-fix hint on top, which is the desired
++// pairing. TestCodexCompactDiagnosticsCannotChangeMachineDecisions pins the
++// constant parts against those classifiers.
++func codexCompactRefusedDiagnostic(detail string) string {
++	msg := " [multica] codex could not start compacting this conversation"
++	if d := strings.TrimSpace(detail); d != "" {
++		msg += ": " + d
++	}
++	return msg + ". The conversation is kept; this run may continue on a fresh session and the thread recovers once codex compaction is available again."
++}
++
++func codexCompactTimedOutDiagnostic(detail string, waited time.Duration) string {
++	msg := fmt.Sprintf(" [multica] codex did not finish compacting this conversation within %s", waited.Round(time.Second).String())
++	if d := strings.TrimSpace(detail); d != "" {
++		msg += ": " + d
++	}
++	return msg + ". The conversation is kept; the next run retries compaction."
++}
++
++func codexCompactFailedDiagnostic(detail string) string {
++	msg := " [multica] codex compacted this conversation and the compaction itself failed"
++	if d := strings.TrimSpace(detail); d != "" {
++		msg += ": " + d
++	}
++	return msg + ". The thread stays over the context limit with no remaining cure, so the session is dropped and the next run starts fresh."
++}
++
+ // codexModelCatalogRefreshFailureSignal matches the Codex models-manager error
+ // emitted when the model catalog could not be refreshed. Codex reports several
+ // distinct causes under this prefix ("timeout waiting for child process to
+@@ -985,6 +1070,9 @@ func (b *codexBackend) Execute(ctx conte
+ 		defer close(resCh)
+ 		session := firstSession
+ 		attemptOpts := opts
++		// compactPriorUsage carries the capacity-failed attempt's token usage
++		// into the continuation attempt's delivered result.
++		var compactPriorUsage map[string]TokenUsage
+ 		for attempt := 1; attempt <= 2; attempt++ {
+ 			if attempt > 1 {
+ 				var err error
+@@ -1035,12 +1123,24 @@ func (b *codexBackend) Execute(ctx conte
+ 				retryReason = "initialize"
+ 			case result.codexStartupRefreshRetrySafe:
+ 				retryReason = "model_catalog_refresh"
++			case result.codexContextCompactRetrySafe:
++				retryReason = "context_compact"
+ 			}
+ 			if retryReason == "" || attempt == 2 {
+ 				flushHeldPins()
++				// The compacted attempt's spend — the capacity-failed turn
++				// plus the compaction's own summarization call — is real cost
++				// on the same task; fold it into the continuation's report so
++				// the terminal usage is not reset by the relaunch.
++				if len(compactPriorUsage) > 0 {
++					result.Usage = mergeCodexUsage(compactPriorUsage, result.Usage)
++				}
+ 				resCh <- result
+ 				return
+ 			}
++			if retryReason == "context_compact" {
++				compactPriorUsage = result.Usage
++			}
+ 			// The model catalog refresh reaches the network, so give the
+ 			// transient failure a little more room than the local initialize
+ 			// handshake gets. Both stay well inside the task timeout, and
+@@ -1062,6 +1162,20 @@ func (b *codexBackend) Execute(ctx conte
+ 					attemptOpts.ResumeExpected = true
+ 				}
+ 			}
++			if retryReason == "context_compact" {
++				// The opposite of the catalog rule: the whole point of the
++				// compaction recovery is that the SAME thread continues. The
++				// failed turn consumed no input (it was rejected on capacity
++				// before any tool ran), so re-issuing the prompt on the
++				// compacted thread cannot duplicate work. Pin the resume to
++				// the thread that was just compacted — including the
++				// fresh-thread-this-run case, where the pointer was empty but
++				// the compacted thread id is real and resumable.
++				if result.SessionID != "" {
++					attemptOpts.ResumeSessionID = result.SessionID
++					attemptOpts.ResumeExpected = true
++				}
++			}
+ 			b.cfg.Logger.Warn("codex retry scheduled", "reason", retryReason, "attempt", attempt, "next_attempt", attempt+1, "backoff", backoff.String())
+ 			select {
+ 			case <-ctx.Done():
+@@ -1812,6 +1926,70 @@ func (b *codexBackend) executeOnce(ctx c
+ 			finalError = codexGuardianRateLimitError
+ 		}
+ 
++		// Context-compaction recovery (issue 568). A turn that failed because
++		// the thread is over the model's context window can be saved without
++		// losing the conversation: the app-server still holds the thread
++		// loaded, so ask it to compact, wait bounded, and hand the decision to
++		// Execute's retry loop, which relaunches and resumes the SAME thread.
++		//
++		// Gates, in order:
++		//   - failed (not aborted/timeout/cancelled): a cancelled or timed-out
++		//     run must not be revived by an async compaction; a timeout already
++		//     carries its own diagnostics.
++		//   - runCtx alive: same rule enforced before the request, not only
++		//     inside its wait.
++		//   - capacity classification: only the typed context_window_exceeded
++		//     failure (or its exact fixed message) qualifies. Rate limits,
++		//     usage limits and provider 5xx stay out — compaction cures none
++		//     of them.
++		//   - no tool use observed this attempt: re-issuing the prompt after a
++		//     turn that already ran tools would re-plan on top of its own
++		//     half-finished work — the duplicate-side-effect risk the daemon's
++		//     fresh-session fallback refuses with its tools == 0 gate. A
++		//     mid-turn overflow still self-heals on the next run: the recorded
++		//     partial turn is history, and the next attempt fails before any
++		//     new tool runs, which is exactly the gated shape.
++		//   - attempt 1 only: the Execute loop has no attempt 3, so a recovery
++		//     flag from attempt 2 would be a compaction with no continuation.
++		//     An attempt-2 capacity failure therefore lands as a plain
++		//     failure; each later run re-attempts the same bounded recovery.
++		var compactResumeRejected, compactResumeRejectedTransient bool
++		compactRetrySafe := false
++		if finalStatus == "failed" && attempt == 1 && runCtx.Err() == nil &&
++			codexContextCapacityFailure(c.getTurnErrorInfo(), finalError) &&
++			!c.toolUseObserved.Load() {
++			compact := b.runCodexContextCompaction(runCtx, c, threadID, b.cfg.Logger)
++			switch compact.kind {
++			case codexCompactSucceeded:
++				compactRetrySafe = true
++			case codexCompactRequestRefused:
++				// Compaction never ran: unknown method on an old runtime, a
++				// config fault, a thread that refuses direct input. The
++				// conversation is intact and recovers once the config is
++				// right, so the session must NOT be retired — transient
++				// evidence lets the daemon use a fresh session for this turn
++				// while keeping the pointer.
++				finalError += codexCompactRefusedDiagnostic(compact.detail)
++				compactResumeRejectedTransient = true
++			case codexCompactTimedOut:
++				// No verdict inside the bounded wait. Nothing is known about
++				// the thread; keep the pointer, allow the fresh fallback, and
++				// let the platform's next run retry compaction from scratch.
++				finalError += codexCompactTimedOutDiagnostic(compact.detail, codexCompactWaitTimeout())
++				compactResumeRejectedTransient = true
++			case codexCompactFailedTurn:
++				// Compaction ran and failed — including the case where the
++				// summarization itself hit the capacity limit. No cure remains
++				// for this thread: retire it so the next run starts fresh.
++				finalError += codexCompactFailedDiagnostic(compact.detail)
++				compactResumeRejected = true
++			case codexCompactAborted, codexCompactPending:
++				// Cancellation or process exit won. The result goes out under
++				// the caller's cancellation semantics unchanged — an async
++				// compaction must never revive a cancelled run.
++			}
++		}
++
+ 		duration := time.Since(startTime)
+ 		b.cfg.Logger.Info("codex finished", "pid", cmd.Process.Pid, "status", finalStatus, "duration", duration.Round(time.Millisecond).String())
+ 
+@@ -1922,7 +2100,10 @@ func (b *codexBackend) executeOnce(ctx c
+ 			SessionID:                    threadID,
+ 			DurationMs:                   duration.Milliseconds(),
+ 			Usage:                        usageMap,
++			ResumeRejected:              compactResumeRejected,
++			ResumeRejectedTransient:      compactResumeRejectedTransient,
+ 			codexStartupRefreshRetrySafe: startupRefreshRetrySafe,
++			codexContextCompactRetrySafe: compactRetrySafe,
+ 		}
+ 	}()
+ 
+@@ -1930,12 +2111,18 @@ func (b *codexBackend) executeOnce(ctx c
+ 		return supplementCodexTurn(supplementCtx, c, instruction)
+ 	}
+ 	supplementReady := func() bool {
+-		return c.getThreadID() != "" && c.activeTurnID() != ""
++		// Compaction runs as a non-steerable turn: admitting a supplement
++		// while it is in flight would aim turn/steer at a turn the
++		// app-server refuses to steer and lose the claimed input.
++		return c.getThreadID() != "" && c.activeTurnID() != "" && !c.isCompacting()
+ 	}
+ 	return &Session{Supplement: supplement, SupplementReady: supplementReady, Messages: msgCh, Result: resCh}, nil
+ }
+ 
+ func supplementCodexTurn(ctx context.Context, c *codexClient, instruction string) error {
++	if c.isCompacting() {
++		return errors.New("codex turn is compacting context and cannot accept additional messages")
++	}
+ 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+ 	defer cancel()
+ 	threadID := c.getThreadID()
+@@ -2471,6 +2658,21 @@ type codexClient struct {
+ 
+ 	turnErrorMu sync.Mutex
+ 	turnError   string // captured from turn/completed status=failed or terminal error notifications
++	// turnErrorInfo is the typed codexErrorInfo value (e.g.
++	// context_window_exceeded) captured alongside turnError, when the
++	// notification carried one. Empty means the failure was untyped.
++	turnErrorInfo string
++	// toolUseObserved records whether this client emitted any tool-use
++	// message. The compaction recovery refuses to continue a turn that already
++	// ran tools: re-issuing the prompt would re-plan on top of the partial
++	// work, the same duplicate-side-effect risk the daemon's fresh-session
++	// fallback guards against with its tools == 0 gate.
++	toolUseObserved atomic.Bool
++	// compactWatchMu guards compactWatch, which the lifecycle goroutine arms
++	// and disarms while the stdout reader goroutine consults it on every
++	// notification.
++	compactWatchMu sync.Mutex
++	compactWatch   *codexCompactWatch
+ }
+ 
+ type codexAgentMessageStream struct {
+@@ -2544,6 +2746,145 @@ func (g *codexTurnNotificationGate) acce
+ 	}
+ }
+ 
++// codexCompactOutcomeKind classifies how an async thread/compact/start ended.
++// The kinds map onto the recovery contract (issue 568):
++//   - succeeded: history was compacted; continuing the SAME thread is safe.
++//   - requestRefused: the app-server rejected the compact request itself —
++//     unknown method on an old runtime, a compaction config fault, a thread
++//     that refuses direct input. Compaction never ran, so the conversation is
++//     intact: recoverable by fixing the config, never by retrying now.
++//   - failedTurn: compaction ran and its turn failed (provider error, or the
++//     summarization itself hit the capacity limit). The thread stays over
++//     limit with no remaining cure — permanently unrecoverable.
++//   - timedOut / aborted: the bounded wait ended without a verdict. Nothing
++//     is known; the run gives up without a retry and the platform's next run
++//     re-attempts compaction from scratch (bounded per run).
++type codexCompactOutcomeKind int
++
++const (
++	codexCompactPending codexCompactOutcomeKind = iota
++	codexCompactSucceeded
++	codexCompactRequestRefused
++	codexCompactFailedTurn
++	codexCompactTimedOut
++	codexCompactAborted
++)
++
++type codexCompactResult struct {
++	kind   codexCompactOutcomeKind
++	detail string
++}
++
++// codexCompactWatch observes the notifications one async compaction emits,
++// from the single stdout reader goroutine, and reports a single resolved
++// outcome to the waiting lifecycle goroutine. All observe* methods are
++// reader-goroutine-only; resolved/result are synchronized for the waiter.
++//
++// The canonical completion signal on Codex 0.166 is the ContextCompaction
++// item: item/completed with item.type "contextCompaction" (app-server
++// bespoke_event_handling drops the deprecated thread/compacted notification
++// for v2 clients). The compaction turn's own lifecycle is watched too: a
++// failed compact turn or a terminal error notification resolves failure even
++// if no item ever appears. Duplicate deliveries after resolution are ignored
++// by construction — resolved gates every transition.
++type codexCompactWatch struct {
++	mu       sync.Mutex
++	resolved bool
++	result   codexCompactResult
++	itemID   string
++	ch       chan codexCompactResult // buffered 1; closed by resolve
++}
++
++func newCodexCompactWatch() *codexCompactWatch {
++	return &codexCompactWatch{ch: make(chan codexCompactResult, 1)}
++}
++
++// observe feeds one notification to the watch. It never consumes the
++// notification: the ordinary handlers keep running so existing semantics
++// (semantic-activity pings, the turnCompleted guard) are unchanged.
++func (w *codexCompactWatch) observe(method string, params map[string]any) {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	if w.resolved {
++		return
++	}
++	switch method {
++	case "item/started", "item/completed":
++		item, _ := params["item"].(map[string]any)
++		itemType, _ := item["type"].(string)
++		if itemType != "contextCompaction" {
++			return
++		}
++		id, _ := item["id"].(string)
++		if id != "" {
++			w.itemID = id
++		}
++		if method == "item/completed" {
++			w.resolveLocked(codexCompactResult{kind: codexCompactSucceeded})
++		}
++	case "thread/compacted":
++		// Deprecated pre-item signal (ContextCompactedNotification). Codex
++		// 0.166 no longer emits it for v2 clients, but a runtime that still
++		// does has unambiguously finished compacting.
++		w.resolveLocked(codexCompactResult{kind: codexCompactSucceeded})
++	case "turn/completed":
++		status := extractNestedString(params, "turn", "status")
++		switch status {
++		case "failed":
++			detail := extractNestedString(params, "turn", "error", "message")
++			w.resolveLocked(codexCompactResult{kind: codexCompactFailedTurn, detail: detail})
++		case "completed":
++			// The compact turn finished cleanly. Normally the
++			// contextCompaction item has already resolved the watch; taking
++			// this as success too covers a stream that delivered the item to
++			// history without notifying. A wrong guess is self-correcting:
++			// the continuation turn would fail capacity again and the
++			// recovery is spent, which is the bounded outcome anyway.
++			w.resolveLocked(codexCompactResult{kind: codexCompactSucceeded})
++		}
++	case "error":
++		if willRetry, _ := params["willRetry"].(bool); willRetry {
++			return
++		}
++		detail := extractNestedString(params, "error", "message")
++		if detail == "" {
++			detail = extractNestedString(params, "message")
++		}
++		w.resolveLocked(codexCompactResult{kind: codexCompactFailedTurn, detail: detail})
++	}
++}
++
++// resolveTerminal ends the watch without a protocol verdict (timeout,
++// cancellation, process exit). It races observe only via resolveLocked's
++// resolved flag, so the first verdict — protocol or terminal — wins.
++func (w *codexCompactWatch) resolveTerminal(result codexCompactResult) {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	w.resolveLocked(result)
++}
++
++func (w *codexCompactWatch) resolveLocked(result codexCompactResult) {
++	if w.resolved {
++		return
++	}
++	w.resolved = true
++	w.result = result
++	w.ch <- result
++	close(w.ch)
++}
++
++// wait blocks until the watch resolves. Terminal conditions are fed to
++// resolveTerminal by the driver's select cases, so a plain receive suffices.
++func (w *codexCompactWatch) wait() codexCompactResult {
++	return <-w.ch
++}
++
++func (w *codexCompactWatch) resolvedSnapshot() bool {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	return w.resolved
++}
++
+ func (c *codexClient) setTurnError(msg string) {
+ 	if msg == "" {
+ 		return
+@@ -2555,6 +2896,56 @@ func (c *codexClient) setTurnError(msg s
+ 	}
+ }
+ 
++// setTurnErrorInfo records the typed codexErrorInfo accompanying a failure.
++// Captured independently of setTurnError's first-message-wins rule: the
++// terminal `error` notification can arrive without the typed field while the
++// later turn/completed carries both, and vice versa. First non-empty wins so
++// a retry placeholder cannot overwrite a real classification.
++func (c *codexClient) setTurnErrorInfo(info string) {
++	if info == "" {
++		return
++	}
++	c.turnErrorMu.Lock()
++	defer c.turnErrorMu.Unlock()
++	if c.turnErrorInfo == "" {
++		c.turnErrorInfo = info
++	}
++}
++
++func (c *codexClient) getTurnErrorInfo() string {
++	c.turnErrorMu.Lock()
++	defer c.turnErrorMu.Unlock()
++	return c.turnErrorInfo
++}
++
++// armCompactWatch installs the compaction observer for this client. Exactly
++// one watch is armed per client: the recovery driver runs at most once per
++// executeOnce attempt. Disarming happens implicitly when the process goes
++// away; activeCompactWatch returns nil afterwards.
++func (c *codexClient) armCompactWatch(w *codexCompactWatch) {
++	c.compactWatchMu.Lock()
++	c.compactWatch = w
++	c.compactWatchMu.Unlock()
++}
++
++func (c *codexClient) activeCompactWatch() *codexCompactWatch {
++	c.compactWatchMu.Lock()
++	defer c.compactWatchMu.Unlock()
++	return c.compactWatch
++}
++
++// isCompacting reports whether a compaction watch is currently armed and
++// unresolved. Supplement admission checks it: a steer submitted against the
++// compaction turn would target a turn the app-server refuses to steer
++// (ActiveTurnNotSteerable), and a claimed supplement must never be lost to
++// that.
++func (c *codexClient) isCompacting() bool {
++	if w := c.activeCompactWatch(); w != nil {
++		return !w.resolvedSnapshot()
++	}
++	return false
++}
++
+ func (c *codexClient) getTurnError() string {
+ 	c.turnErrorMu.Lock()
+ 	defer c.turnErrorMu.Unlock()
+@@ -2704,6 +3095,140 @@ func interruptCodexTurn(c *codexClient,
+ 	}
+ }
+ 
++// runCodexContextCompaction performs the bounded context-compaction recovery
++// for a turn that failed on context-window capacity (issue 568): ask the live
++// app-server to compact the thread it still holds loaded, wait a bounded time
++// for the compaction to finish, and report how it ended. The caller decides
++// from the outcome whether the same thread may be continued.
++//
++// Bounded by construction: one request, one watch, one timer
++// (codexCompactWaitTimeout), and every terminal condition — cancellation,
++// process exit, timeout — resolves the watch instead of reviving the failed
++// turn. A cancelled or timed-out run never retries here.
++func (b *codexBackend) runCodexContextCompaction(runCtx context.Context, c *codexClient, threadID string, logger *slog.Logger) codexCompactResult {
++	started := time.Now()
++	w := newCodexCompactWatch()
++	c.armCompactWatch(w)
++	defer c.armCompactWatch(nil)
++
++	if logger == nil {
++		logger = slog.Default()
++	}
++	logger.Info("codex lifecycle",
++		"phase", "compact_started",
++		"task_id", b.cfg.TaskID,
++		"runtime_id", b.cfg.RuntimeID,
++		"pid", c.pid,
++		"thread_id", threadID,
++		"timeout", codexCompactWaitTimeout().String(),
++	)
++	// Keep the surface alive while the model summarizes: the compact turn
++	// emits its own turn/started, but this covers streams that go straight to
++	// the compaction model call without visible turn lifecycle.
++	if c.onMessage != nil {
++		c.onMessage(Message{Type: MessageStatus, Status: "running", SessionID: threadID})
++	}
++
++	// The RPC acks immediately (the app-server submits Op::Compact and
++	// returns {}); compaction then streams item/turn notifications. Events can
++	// race the ack, so the watch is armed before the request and the ack wait
++	// also selects on the watch.
++	type compactAck struct {
++		err error
++	}
++	ackCh := make(chan compactAck, 1)
++	go func() {
++		_, err := c.request(runCtx, "thread/compact/start", map[string]any{
++			"threadId": threadID,
++		})
++		ackCh <- compactAck{err: err}
++	}()
++
++	timer := time.NewTimer(codexCompactWaitTimeout())
++	defer stopTimer(timer)
++
++	select {
++	case r := <-w.ch:
++		b.logCompactOutcome(logger, r, started, threadID, "events_before_ack")
++		return r
++	case ack := <-ackCh:
++		if ack.err != nil {
++			kind := codexCompactRequestRefused
++			if runCtx.Err() != nil || isCodexTransportError(ack.err) {
++				kind = codexCompactAborted
++			}
++			w.resolveTerminal(codexCompactResult{kind: kind, detail: ack.err.Error()})
++			r := w.wait()
++			b.logCompactOutcome(logger, r, started, threadID, "request_failed")
++			return r
++		}
++	case <-timer.C:
++		w.resolveTerminal(codexCompactResult{kind: codexCompactTimedOut})
++		r := w.wait()
++		b.logCompactOutcome(logger, r, started, threadID, "ack_timeout")
++		return r
++	case <-runCtx.Done():
++		w.resolveTerminal(codexCompactResult{kind: codexCompactAborted, detail: runCtx.Err().Error()})
++		r := w.wait()
++		b.logCompactOutcome(logger, r, started, threadID, "cancelled")
++		return r
++	case <-c.processDone:
++		w.resolveTerminal(codexCompactResult{kind: codexCompactAborted, detail: "codex process exited during compaction"})
++		r := w.wait()
++		b.logCompactOutcome(logger, r, started, threadID, "process_exit")
++		return r
++	}
++
++	// Ack received; compaction is running. Wait for its completion events
++	// under the same bounds.
++	select {
++	case r := <-w.ch:
++		b.logCompactOutcome(logger, r, started, threadID, "completed")
++		return r
++	case <-timer.C:
++		w.resolveTerminal(codexCompactResult{kind: codexCompactTimedOut})
++		r := w.wait()
++		b.logCompactOutcome(logger, r, started, threadID, "wait_timeout")
++		return r
++	case <-runCtx.Done():
++		w.resolveTerminal(codexCompactResult{kind: codexCompactAborted, detail: runCtx.Err().Error()})
++		r := w.wait()
++		b.logCompactOutcome(logger, r, started, threadID, "cancelled")
++		return r
++	case <-c.processDone:
++		w.resolveTerminal(codexCompactResult{kind: codexCompactAborted, detail: "codex process exited during compaction"})
++		r := w.wait()
++		b.logCompactOutcome(logger, r, started, threadID, "process_exit")
++		return r
++	}
++}
++
++func (b *codexBackend) logCompactOutcome(logger *slog.Logger, r codexCompactResult, started time.Time, threadID, boundary string) {
++	outcome := "unknown"
++	switch r.kind {
++	case codexCompactSucceeded:
++		outcome = "succeeded"
++	case codexCompactRequestRefused:
++		outcome = "request_refused"
++	case codexCompactFailedTurn:
++		outcome = "failed_turn"
++	case codexCompactTimedOut:
++		outcome = "timed_out"
++	case codexCompactAborted:
++		outcome = "aborted"
++	}
++	logger.Warn("codex lifecycle",
++		"phase", "compact_finished",
++		"task_id", b.cfg.TaskID,
++		"runtime_id", b.cfg.RuntimeID,
++		"thread_id", threadID,
++		"outcome", outcome,
++		"boundary", boundary,
++		"detail", sanitizeCodexDiagnostic(r.detail),
++		"latency", time.Since(started).Round(time.Millisecond).String(),
++	)
++}
++
+ func (c *codexClient) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
+ 	if err := ctx.Err(); err != nil {
+ 		return nil, err
+@@ -3032,6 +3557,15 @@ func (c *codexClient) handleNotification
+ 	if c.isNotificationFromOtherThread(params) {
+ 		return
+ 	}
++	// A live compaction watch observes passively, ahead of the current-turn
++	// gate: the compact turn has its own turn id, so gate state keyed to the
++	// failed turn could otherwise drop the very item/completed that resolves
++	// the recovery. The ordinary handlers below still run unchanged (the
++	// compact turn's turn/completed is swallowed by the turnCompleted guard,
++	// which is fine — the watch already saw it).
++	if w := c.activeCompactWatch(); w != nil {
++		w.observe(method, params)
++	}
+ 	if c.acceptNotification != nil && !c.acceptNotification(method, params) {
+ 		if c.onDiscardedNotification != nil {
+ 			c.onDiscardedNotification(method, params)
+@@ -3431,6 +3965,7 @@ func (c *codexClient) handleEvent(msg ma
+ 	case "exec_command_begin":
+ 		callID, _ := msg["call_id"].(string)
+ 		command, _ := msg["command"].(string)
++		c.toolUseObserved.Store(true)
+ 		if c.onMessage != nil {
+ 			c.onMessage(Message{
+ 				Type:   MessageToolUse,
+@@ -3452,6 +3987,7 @@ func (c *codexClient) handleEvent(msg ma
+ 		}
+ 	case "patch_apply_begin":
+ 		callID, _ := msg["call_id"].(string)
++		c.toolUseObserved.Store(true)
+ 		if c.onMessage != nil {
+ 			c.onMessage(Message{
+ 				Type:   MessageToolUse,
+@@ -3545,6 +4081,7 @@ func (c *codexClient) handleRawNotificat
+ 				errMsg = "codex turn failed"
+ 			}
+ 			c.setTurnError(errMsg)
++			c.setTurnErrorInfo(extractNestedString(params, "turn", "error", "codexErrorInfo"))
+ 		}
+ 
+ 		// Extract usage from turn/completed if present (e.g. params.turn.usage).
+@@ -3581,6 +4118,7 @@ func (c *codexClient) handleRawNotificat
+ 			}
+ 			if !willRetry {
+ 				c.setTurnError(errMsg)
++				c.setTurnErrorInfo(extractNestedString(params, "error", "codexErrorInfo"))
+ 			}
+ 		}
+ 
+@@ -3767,6 +4305,7 @@ func (c *codexClient) handleItemNotifica
+ 
+ 	case method == "item/started" && itemType == "commandExecution":
+ 		command, _ := item["command"].(string)
++		c.toolUseObserved.Store(true)
+ 		if c.onMessage != nil {
+ 			c.onMessage(Message{
+ 				Type:   MessageToolUse,
+@@ -3788,6 +4327,7 @@ func (c *codexClient) handleItemNotifica
+ 		}
+ 
+ 	case method == "item/started" && itemType == "fileChange":
++		c.toolUseObserved.Store(true)
+ 		if c.onMessage != nil {
+ 			c.onMessage(Message{
+ 				Type:   MessageToolUse,
+@@ -3810,6 +4350,7 @@ func (c *codexClient) handleItemNotifica
+ 		}
+ 
+ 	case method == "item/started" && itemType == "mcpToolCall":
++		c.toolUseObserved.Store(true)
+ 		if c.onMessage != nil {
+ 			c.onMessage(Message{
+ 				Type:   MessageToolUse,
+@@ -4072,6 +4613,28 @@ func codexResultUsageMap(startTime time.
+ // filename, the metadata pass preserves exact ownership instead of silently
+ // dropping usage. Filtering after globbing also keeps a provider-supplied thread
+ // ID out of the glob expression.
++// mergeCodexUsage sums two per-model usage maps for the compaction retry,
++// where both attempts spent tokens on the same task.
++func mergeCodexUsage(prior, current map[string]TokenUsage) map[string]TokenUsage {
++	if len(prior) == 0 {
++		return current
++	}
++	merged := make(map[string]TokenUsage, len(prior)+len(current))
++	for model, u := range prior {
++		merged[model] = u
++	}
++	for model, u := range current {
++		base := merged[model]
++		base.InputTokens += u.InputTokens
++		base.OutputTokens += u.OutputTokens
++		base.CacheReadTokens += u.CacheReadTokens
++		base.CacheWriteTokens += u.CacheWriteTokens
++		base.CostUSDTicks += u.CostUSDTicks
++		merged[model] = base
++	}
++	return merged
++}
++
+ func findCodexSessionRollouts(root, threadID string) []string {
+ 	threadID = strings.TrimSpace(threadID)
+ 	if root == "" || threadID == "" {
+Index: multica/server/pkg/agent/codex_context_compact_test.go
+===================================================================
+--- /dev/null
++++ multica/server/pkg/agent/codex_context_compact_test.go
+@@ -0,0 +1,671 @@
++package agent
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"log/slog"
++	"os"
++	"path/filepath"
++	"runtime"
++	"strings"
++	"testing"
++	"time"
++)
++
++// This file exercises the bounded context-compaction recovery (issue 568):
++// a turn that fails on context-window capacity, after zero tool use, asks the
++// still-running app-server to compact the thread via thread/compact/start and
++// — when compaction succeeds — continues the SAME thread on the next attempt.
++//
++// The Execute-level fixtures drive a fake app-server whose script counts its
++// own invocations, so a test can assert not just the outcome but the bound:
++// exactly one compaction and at most one continuation launch. The capacity
++// failure event is emitted through a quoted heredoc because Codex's fixed
++// message contains an apostrophe ("model's"), which a single-quoted shell
++// string cannot carry.
++
++// codexCompactCapacityTurnCompleted fails the current turn with the typed
++// context-window capacity error exactly as Codex 0.166 reports it.
++const codexCompactCapacityTurnCompleted = `{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr_prior","turn":{"id":"turn-1","status":"failed","error":{"message":"Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.","codexErrorInfo":"context_window_exceeded"}}}}
++`
++
++// fakeCodexCompactHeredoc wraps a raw JSON line in a quoted heredoc so
++// apostrophes inside provider messages survive the shell.
++func fakeCodexCompactHeredoc(line string) string {
++	return "cat <<'JSONEOF'\n" + line + "JSONEOF\n"
++}
++
++// fakeCodexCompactPreamble is the shared request/response prologue: it counts
++// the invocation, then serves initialize and the thread/resume of thr_prior.
++const fakeCodexCompactPreamble = `
++DIR="$(dirname "$0")"
++INV=1
++if [ -f "$DIR/invocations" ]; then INV=$(( $(cat "$DIR/invocations") + 1 )); fi
++echo "$INV" > "$DIR/invocations"
++read line
++echo '{"jsonrpc":"2.0","id":1,"result":{}}'
++read line
++read line
++printf '%s\n' "$line" > "$DIR/resume-$INV.json"
++echo '{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"thr_prior"}}}'
++`
++
++// fakeCodexCompactSucceedingTurn completes the current turn with a final
++// agent message, ending a successful invocation.
++const fakeCodexCompactSucceedingTurn = `
++read line
++printf '%s\n' "$line" > "$DIR/turn-start-$INV.json"
++echo '{"jsonrpc":"2.0","id":3,"result":{}}'
++echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr_prior","turn":{"id":"turn-ok"}}}'
++echo '{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr_prior","turnId":"turn-ok","item":{"type":"agentMessage","id":"msg-ok","text":"Continued after compaction","phase":"final_answer"}}}'
++echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr_prior","turn":{"id":"turn-ok","status":"completed"}}}'
++`
++
++// fakeCodexCompactAcceptAndComplete serves the thread/compact/start request
++// (captured to compact-start.json) and emits the canonical completion signal:
++// the contextCompaction item lifecycle on the compact turn.
++const fakeCodexCompactAcceptAndComplete = `
++read line
++printf '%s\n' "$line" > "$DIR/compact-start.json"
++echo '{"jsonrpc":"2.0","id":4,"result":{}}'
++echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr_prior","turn":{"id":"turn-compact"}}}'
++echo '{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thr_prior","turnId":"turn-compact","item":{"type":"contextCompaction","id":"cc-1"}}}'
++echo '{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr_prior","turnId":"turn-compact","item":{"type":"contextCompaction","id":"cc-1"}}}'
++`
++
++// fakeCodexCompactStartTurnAndServeFailure reads turn/start, acks it, starts
++// the turn, and fails it on capacity.
++func fakeCodexCompactStartTurnAndServeFailure(invocationTurnID string) string {
++	return `
++read line
++echo '{"jsonrpc":"2.0","id":3,"result":{}}'
++echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr_prior","turn":{"id":"` + invocationTurnID + `"}}'}
++` + fakeCodexCompactHeredoc(codexCompactCapacityTurnCompleted)
++}
++
++func fakeCodexInvocations(t *testing.T, dir string) int {
++	t.Helper()
++	raw, err := os.ReadFile(filepath.Join(dir, "invocations"))
++	if err != nil {
++		return 0
++	}
++	var n int
++	if _, err := fmt.Sscanf(strings.TrimSpace(string(raw)), "%d", &n); err != nil {
++		t.Fatalf("parse invocations %q: %v", raw, err)
++	}
++	return n
++}
++
++func fakeCodexReadRequest(t *testing.T, dir, name string) map[string]any {
++	t.Helper()
++	raw, err := os.ReadFile(filepath.Join(dir, name))
++	if err != nil {
++		t.Fatalf("read %s: %v (request never arrived)", name, err)
++	}
++	var request struct {
++		Method string         `json:"method"`
++		Params map[string]any `json:"params"`
++	}
++	if err := json.Unmarshal(raw, &request); err != nil {
++		t.Fatalf("parse %s: %v", name, err)
++	}
++	if request.Params == nil {
++		request.Params = map[string]any{}
++	}
++	request.Params["_method"] = request.Method
++	return request.Params
++}
++
++func fakeCodexCompactOptions() ExecOptions {
++	return ExecOptions{
++		ResumeSessionID: "thr_prior",
++		ResumeExpected:  true,
++		Timeout:         30 * time.Second,
++		// Keep the semantic-inactivity watchdog far away: the compaction
++		// fixtures are silent while the recovery waits.
++		SemanticInactivityTimeout: 30 * time.Second,
++	}
++}
++
++// withCodexCompactWaitOverride shrinks the bounded compaction wait for one
++// test and restores it after. Tests that touch this global (or the graceful
++// shutdown window below) must not run in parallel: they mutate shared
++// package-level overrides.
++func withCodexCompactWaitOverride(t *testing.T, d time.Duration) {
++	t.Helper()
++	codexCompactWaitNanos.Store(int64(d))
++	t.Cleanup(func() { codexCompactWaitNanos.Store(0) })
++}
++
++// withCodexGracefulShutdownOverride shrinks the post-result shutdown grace so
++// fixtures that end in a long sleep do not pay the 10 s production window
++// before drainAndWait releases the result.
++func withCodexGracefulShutdownOverride(t *testing.T, d time.Duration) {
++	t.Helper()
++	codexGracefulShutdownTimeoutNanos.Store(int64(d))
++	t.Cleanup(func() { codexGracefulShutdownTimeoutNanos.Store(0) })
++}
++
++// TestCodexContextCompactRecoveryContinuesOriginalThread is the success
++// path: capacity failure → thread/compact/start → item/completed
++// contextCompaction → relaunch resuming the SAME thread → turn succeeds.
++func TestCodexContextCompactRecoveryContinuesOriginalThread(t *testing.T) {
++	t.Parallel()
++	if runtime.GOOS == "windows" {
++		t.Skip("shell-script fixture is POSIX-only")
++	}
++
++	fakePath := writeFakeCodexAppServer(t, fakeCodexCompactPreamble+`
++if [ "$INV" = "1" ]; then
++`+fakeCodexCompactStartTurnAndServeFailure("turn-1")+fakeCodexCompactAcceptAndComplete+`
++  read line
++else
++`+fakeCodexCompactSucceedingTurn+`
++fi
++`)
++	dir := filepath.Dir(fakePath)
++	result := executeFakeCodex(t, fakePath, fakeCodexCompactOptions())
++
++	if result.Status != "completed" {
++		t.Fatalf("expected status=completed after compaction recovery, got %+v", result)
++	}
++	if result.SessionID != "thr_prior" {
++		t.Fatalf("expected continuation on the original thread, got session %q", result.SessionID)
++	}
++	if result.Output != "Continued after compaction" {
++		t.Fatalf("expected the continuation turn's deliverable, got %q", result.Output)
++	}
++	if result.ResumeRejected || result.ResumeRejectedTransient {
++		t.Fatalf("successful recovery must not flag the session, got %+v", result)
++	}
++	if n := fakeCodexInvocations(t, dir); n != 2 {
++		t.Fatalf("expected exactly one recovery relaunch (2 invocations), got %d", n)
++	}
++	compact := fakeCodexReadRequest(t, dir, "compact-start.json")
++	if compact["_method"] != "thread/compact/start" || compact["threadId"] != "thr_prior" {
++		t.Fatalf("expected thread/compact/start on thr_prior, got %v", compact)
++	}
++	resume2 := fakeCodexReadRequest(t, dir, "resume-2.json")
++	if resume2["_method"] != "thread/resume" || resume2["threadId"] != "thr_prior" {
++		t.Fatalf("expected the continuation to resume the compacted thread, got %v", resume2)
++	}
++}
++
++// TestCodexContextCompactRecoveryDuplicateEventsResolveOnce pins the
++// duplicate-event bound: the completion signal delivered twice (plus the
++// deprecated thread/compacted notification and a late compact-turn
++// completion) still yields exactly one recovery relaunch.
++func TestCodexContextCompactRecoveryDuplicateEventsResolveOnce(t *testing.T) {
++	t.Parallel()
++	if runtime.GOOS == "windows" {
++		t.Skip("shell-script fixture is POSIX-only")
++	}
++
++	fakePath := writeFakeCodexAppServer(t, fakeCodexCompactPreamble+`
++if [ "$INV" = "1" ]; then
++`+fakeCodexCompactStartTurnAndServeFailure("turn-1")+fakeCodexCompactAcceptAndComplete+`
++echo '{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr_prior","turnId":"turn-compact","item":{"type":"contextCompaction","id":"cc-1"}}}'
++echo '{"jsonrpc":"2.0","method":"thread/compacted","params":{"threadId":"thr_prior","turnId":"turn-compact"}}'
++echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr_prior","turn":{"id":"turn-compact","status":"completed"}}}'
++  read line
++else
++`+fakeCodexCompactSucceedingTurn+`
++fi
++`)
++	dir := filepath.Dir(fakePath)
++	result := executeFakeCodex(t, fakePath, fakeCodexCompactOptions())
++
++	if result.Status != "completed" || result.SessionID != "thr_prior" {
++		t.Fatalf("expected completed continuation on thr_prior, got %+v", result)
++	}
++	if n := fakeCodexInvocations(t, dir); n != 2 {
++		t.Fatalf("duplicate completion signals must not add relaunches, got %d invocations", n)
++	}
++}
++
++// TestCodexContextCompactRequestRefusedKeepsSession covers the compaction
++// configuration-fault class: the app-server rejects thread/compact/start
++// itself (here: unknown method, as an old runtime would). The conversation is
++// intact, so the result carries transient — not permanent — evidence, and the
++// diagnostics name the refusal.
++func TestCodexContextCompactRequestRefusedKeepsSession(t *testing.T) {
++	t.Parallel()
++	if runtime.GOOS == "windows" {
++		t.Skip("shell-script fixture is POSIX-only")
++	}
++
++	fakePath := writeFakeCodexAppServer(t, fakeCodexCompactPreamble+
++		fakeCodexCompactStartTurnAndServeFailure("turn-1")+`
++read line
++printf '%s\n' "$line" > "$DIR/compact-start.json"
++echo '{"jsonrpc":"2.0","id":4,"error":{"code":-32601,"message":"Method not found"}}'
++read line
++`)
++	dir := filepath.Dir(fakePath)
++	result := executeFakeCodex(t, fakePath, fakeCodexCompactOptions())
++
++	if result.Status != "failed" {
++		t.Fatalf("expected failed result, got %+v", result)
++	}
++	if !result.ResumeRejectedTransient {
++		t.Fatalf("expected ResumeRejectedTransient for a refused compaction, got %+v", result)
++	}
++	if result.ResumeRejected {
++		t.Fatalf("a refused compaction must not retire the session, got %+v", result)
++	}
++	if !strings.Contains(result.Error, "could not start compacting") ||
++		!strings.Contains(result.Error, "ran out of room") {
++		t.Fatalf("expected capacity error plus refusal diagnostic, got %q", result.Error)
++	}
++	if n := fakeCodexInvocations(t, dir); n != 1 {
++		t.Fatalf("a refused compaction must not relaunch, got %d invocations", n)
++	}
++}
++
++// TestCodexContextCompactFailedTurnRetiresSession covers the permanently
++// unrecoverable class: compaction ran and its own turn failed. The session is
++// flagged for the daemon's fresh-session fallback and retirement.
++func TestCodexContextCompactFailedTurnRetiresSession(t *testing.T) {
++	t.Parallel()
++	if runtime.GOOS == "windows" {
++		t.Skip("shell-script fixture is POSIX-only")
++	}
++
++	fakePath := writeFakeCodexAppServer(t, fakeCodexCompactPreamble+
++		fakeCodexCompactStartTurnAndServeFailure("turn-1")+`
++read line
++printf '%s\n' "$line" > "$DIR/compact-start.json"
++echo '{"jsonrpc":"2.0","id":4,"result":{}}'
++echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr_prior","turn":{"id":"turn-compact"}}}'
++echo '{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thr_prior","turnId":"turn-compact","item":{"type":"contextCompaction","id":"cc-1"}}}'
++echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr_prior","turn":{"id":"turn-compact","status":"failed","error":{"message":"summarization model unavailable"}}}}'
++read line
++`)
++	dir := filepath.Dir(fakePath)
++	result := executeFakeCodex(t, fakePath, fakeCodexCompactOptions())
++
++	if result.Status != "failed" {
++		t.Fatalf("expected failed result, got %+v", result)
++	}
++	if !result.ResumeRejected {
++		t.Fatalf("expected ResumeRejected for a failed compaction turn, got %+v", result)
++	}
++	if !strings.Contains(result.Error, "compaction itself failed") ||
++		!strings.Contains(result.Error, "summarization model unavailable") {
++		t.Fatalf("expected compaction failure diagnostics, got %q", result.Error)
++	}
++	if n := fakeCodexInvocations(t, dir); n != 1 {
++		t.Fatalf("a failed compaction must not relaunch, got %d invocations", n)
++	}
++}
++
++// TestCodexContextCompactTimeoutKeepsSession covers the bounded wait: the
++// app-server acks the compaction but never finishes it. The recovery gives up
++// inside the (shrunken) budget without a verdict, keeps the session, and
++// reports the timeout in the diagnostics.
++func TestCodexContextCompactTimeoutKeepsSession(t *testing.T) {
++	if runtime.GOOS == "windows" {
++		t.Skip("shell-script fixture is POSIX-only")
++	}
++	withCodexCompactWaitOverride(t, 300*time.Millisecond)
++	withCodexGracefulShutdownOverride(t, 500*time.Millisecond)
++
++	fakePath := writeFakeCodexAppServer(t, fakeCodexCompactPreamble+
++		fakeCodexCompactStartTurnAndServeFailure("turn-1")+`
++read line
++echo '{"jsonrpc":"2.0","id":4,"result":{}}'
++sleep 30
++`)
++	dir := filepath.Dir(fakePath)
++	result := executeFakeCodex(t, fakePath, fakeCodexCompactOptions())
++
++	if result.Status != "failed" {
++		t.Fatalf("expected failed result, got %+v", result)
++	}
++	if !result.ResumeRejectedTransient {
++		t.Fatalf("expected ResumeRejectedTransient for a compaction timeout, got %+v", result)
++	}
++	if !strings.Contains(result.Error, "did not finish compacting") {
++		t.Fatalf("expected timeout diagnostics, got %q", result.Error)
++	}
++	if n := fakeCodexInvocations(t, dir); n != 1 {
++		t.Fatalf("a timed-out compaction must not relaunch, got %d invocations", n)
++	}
++}
++
++// TestCodexContextCompactCancellationDoesNotRevive pins the cancellation
++// boundary: cancelling the run while compaction is in flight delivers the
++// original failure without a recovery relaunch and without session flags —
++// an async compaction must never revive a cancelled run.
++func TestCodexContextCompactCancellationDoesNotRevive(t *testing.T) {
++	if runtime.GOOS == "windows" {
++		t.Skip("shell-script fixture is POSIX-only")
++	}
++	withCodexCompactWaitOverride(t, 30*time.Second)
++	withCodexGracefulShutdownOverride(t, 500*time.Millisecond)
++
++	fakePath := writeFakeCodexAppServer(t, fakeCodexCompactPreamble+
++		fakeCodexCompactStartTurnAndServeFailure("turn-1")+`
++read line
++echo '{"jsonrpc":"2.0","id":4,"result":{}}'
++sleep 30
++`)
++	dir := filepath.Dir(fakePath)
++
++	backend, err := New("codex", Config{ExecutablePath: fakePath, Logger: slog.Default()})
++	if err != nil {
++		t.Fatalf("new codex backend: %v", err)
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	session, err := backend.Execute(ctx, "prompt", fakeCodexCompactOptions())
++	if err != nil {
++		t.Fatalf("execute: %v", err)
++	}
++	resultCh := session.Result
++	go func() {
++		for range session.Messages {
++		}
++	}()
++	// Give the failure+compaction time to start, then cancel mid-compaction.
++	time.Sleep(700 * time.Millisecond)
++	cancel()
++
++	select {
++	case result, ok := <-resultCh:
++		if !ok {
++			t.Fatal("result channel closed without a value")
++		}
++		if result.Status != "failed" {
++			t.Fatalf("expected the original failure to stand, got %+v", result)
++		}
++		if result.ResumeRejected || result.ResumeRejectedTransient {
++			t.Fatalf("cancellation must not classify the session, got %+v", result)
++		}
++		if !strings.Contains(result.Error, "ran out of room") {
++			t.Fatalf("expected the capacity failure to be preserved, got %q", result.Error)
++		}
++	case <-time.After(15 * time.Second):
++		t.Fatal("timeout waiting for result")
++	}
++	// The cancelled compaction must not have scheduled a relaunch. Give a
++	// grace margin for process teardown, then read the counter.
++	time.Sleep(300 * time.Millisecond)
++	if n := fakeCodexInvocations(t, dir); n != 1 {
++		t.Fatalf("a cancelled compaction must not relaunch, got %d invocations", n)
++	}
++}
++
++// TestCodexContextCompactSkippedAfterToolUse pins the duplicate-side-effect
++// gate: a capacity failure in a turn that already ran a tool never triggers
++// the recovery, because re-issuing the prompt would re-plan on top of the
++// partial work.
++func TestCodexContextCompactSkippedAfterToolUse(t *testing.T) {
++	t.Parallel()
++	if runtime.GOOS == "windows" {
++		t.Skip("shell-script fixture is POSIX-only")
++	}
++
++	fakePath := writeFakeCodexAppServer(t, fakeCodexCompactPreamble+`
++read line
++echo '{"jsonrpc":"2.0","id":3,"result":{}}'
++echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr_prior","turn":{"id":"turn-1"}}}'
++echo '{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thr_prior","turnId":"turn-1","item":{"type":"commandExecution","id":"cmd-1","command":"make test"}}}'
++echo '{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr_prior","turnId":"turn-1","item":{"type":"commandExecution","id":"cmd-1","aggregatedOutput":"ok"}}}'
++`+fakeCodexCompactHeredoc(codexCompactCapacityTurnCompleted)+`
++read line
++`)
++	dir := filepath.Dir(fakePath)
++	result := executeFakeCodex(t, fakePath, fakeCodexCompactOptions())
++
++	if result.Status != "failed" {
++		t.Fatalf("expected failed result, got %+v", result)
++	}
++	if result.ResumeRejected || result.ResumeRejectedTransient {
++		t.Fatalf("tool-using capacity failures keep today's semantics, got %+v", result)
++	}
++	if _, err := os.Stat(filepath.Join(dir, "compact-start.json")); err == nil {
++		t.Fatal("recovery must not request compaction after observed tool use")
++	}
++	if n := fakeCodexInvocations(t, dir); n != 1 {
++		t.Fatalf("tool-using capacity failures must not relaunch, got %d invocations", n)
++	}
++}
++
++// TestCodexContextCompactRecoveryIsSpentAfterRelapse pins the per-run bound
++// from the other side: a continuation attempt that fails on capacity again
++// does not compact a second time and does not relaunch again.
++func TestCodexContextCompactRecoveryIsSpentAfterRelapse(t *testing.T) {
++	t.Parallel()
++	if runtime.GOOS == "windows" {
++		t.Skip("shell-script fixture is POSIX-only")
++	}
++
++	fakePath := writeFakeCodexAppServer(t, fakeCodexCompactPreamble+`
++read line
++printf '%s\n' "$line" > "$DIR/turn-start-$INV.json"
++echo '{"jsonrpc":"2.0","id":3,"result":{}}'
++echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr_prior","turn":{"id":"turn-1"}}}'
++`+fakeCodexCompactHeredoc(codexCompactCapacityTurnCompleted)+`
++if [ "$INV" = "1" ]; then
++`+fakeCodexCompactAcceptAndComplete+`
++  read line
++fi
++`)
++	dir := filepath.Dir(fakePath)
++	result, _ := executeFakeCodexCollectingMessages(t, fakePath, fakeCodexCompactOptions(), 30*time.Second)
++
++	if result.Status != "failed" {
++		t.Fatalf("expected failed result, got %+v", result)
++	}
++	if !strings.Contains(result.Error, "ran out of room") {
++		t.Fatalf("expected the capacity failure to surface, got %q", result.Error)
++	}
++	if n := fakeCodexInvocations(t, dir); n != 2 {
++		t.Fatalf("the recovery is spent after one continuation, got %d invocations", n)
++	}
++	// The second invocation must have started a turn (and, being attempt 2,
++	// never received a compact request: compact-start.json stays invocation
++	// 1's alone — the file's mere existence is invocation 1's, so assert the
++	// turn file instead).
++	if _, err := os.Stat(filepath.Join(dir, "turn-start-2.json")); err != nil {
++		t.Fatalf("second invocation should have started a turn: %v", err)
++	}
++}
++
++// TestCodexContextCompactNonCapacityFailuresUntouched pins the
++// classification: usage limits and neighbouring error classes never trigger
++// a compaction request.
++func TestCodexContextCompactNonCapacityFailuresUntouched(t *testing.T) {
++	t.Parallel()
++	if runtime.GOOS == "windows" {
++		t.Skip("shell-script fixture is POSIX-only")
++	}
++
++	fakePath := writeFakeCodexAppServer(t, fakeCodexCompactPreamble+`
++read line
++echo '{"jsonrpc":"2.0","id":3,"result":{}}'
++echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr_prior","turn":{"id":"turn-1"}}}'
++echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr_prior","turn":{"id":"turn-1","status":"failed","error":{"message":"You have hit your usage limit","codexErrorInfo":"usage_limit_exceeded"}}}}'
++read line
++`)
++	dir := filepath.Dir(fakePath)
++	result := executeFakeCodex(t, fakePath, fakeCodexCompactOptions())
++
++	if result.Status != "failed" {
++		t.Fatalf("expected failed result, got %+v", result)
++	}
++	if result.ResumeRejected || result.ResumeRejectedTransient {
++		t.Fatalf("usage limits keep today's semantics, got %+v", result)
++	}
++	if _, err := os.Stat(filepath.Join(dir, "compact-start.json")); err == nil {
++		t.Fatal("recovery must not request compaction for a usage limit")
++	}
++}
++
++// TestCodexContextCapacityFailure is the classifier matrix: the typed
++// context_window_exceeded value and the exact fixed message qualify;
++// neighbouring error classes stay out.
++func TestCodexContextCapacityFailure(t *testing.T) {
++	t.Parallel()
++
++	cases := []struct {
++		name    string
++		info    string
++		message string
++		want    bool
++	}{
++		{"typed", "context_window_exceeded", "", true},
++		{"typed with whitespace", " context_window_exceeded ", "", true},
++		{"fixed message", "", "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.", true},
++		{"fixed message case-insensitive", "", "CODEX RAN OUT OF ROOM IN THE MODEL'S CONTEXT WINDOW", true},
++		{"usage limit", "usage_limit_exceeded", "usage limit", false},
++		{"session budget", "session_budget_exceeded", "", false},
++		{"rate limit", "rate_limit_exceeded", "rate limit exceeded: 429", false},
++		{"untyped other", "", "internal error", false},
++		{"provider 400 without the marker", "", "unexpected status 400 Bad Request: context_length_exceeded", false},
++		{"empty", "", "", false},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			t.Parallel()
++			if got := codexContextCapacityFailure(tc.info, tc.message); got != tc.want {
++				t.Errorf("codexContextCapacityFailure(%q, %q) = %v, want %v", tc.info, tc.message, got, tc.want)
++			}
++		})
++	}
++}
++
++// TestCodexCompactDiagnosticsCannotChangeMachineDecisions pins the constant
++// parts of the three compaction diagnostics against the error-string
++// classifiers that re-scan the persisted text: a diagnostic must never flip
++// CodexResumeOverflowError or CodexRetiredCompactionError on a failure that
++// is neither. (The daemon-side annotation test pins the same property for
++// taskfailure.Classify at the report boundary.)
++func TestCodexCompactDiagnosticsCannotChangeMachineDecisions(t *testing.T) {
++	t.Parallel()
++
++	texts := []string{
++		codexCompactRefusedDiagnostic("Method not found"),
++		codexCompactRefusedDiagnostic(""),
++		codexCompactTimedOutDiagnostic("watchdog detail", 10*time.Minute),
++		codexCompactTimedOutDiagnostic("", 10*time.Minute),
++		codexCompactFailedDiagnostic("stream disconnected"),
++		codexCompactFailedDiagnostic(""),
++	}
++	for _, text := range texts {
++		if CodexResumeOverflowError(text) {
++			t.Errorf("diagnostic trips CodexResumeOverflowError: %q", text)
++		}
++		if CodexRetiredCompactionError(text) {
++			t.Errorf("diagnostic trips CodexRetiredCompactionError: %q", text)
++		}
++	}
++	// A genuinely retired-route compaction failure must still be identifiable
++	// once the provider detail is embedded — that pairing is the point of
++	// keeping the detail verbatim.
++	withRetiredRoute := codexCompactFailedDiagnostic(codexRetiredCompactionLiveError)
++	if !CodexRetiredCompactionError(withRetiredRoute) {
++		t.Errorf("embedded retired-route detail lost its classification: %q", withRetiredRoute)
++	}
++}
++
++// TestCodexCompactWatchObservation exercises the watch directly: resolution
++// precedence, duplicate delivery, foreign items, and retryable errors.
++func TestCodexCompactWatchObservation(t *testing.T) {
++	t.Parallel()
++
++	t.Run("duplicate completion resolves once", func(t *testing.T) {
++		t.Parallel()
++		w := newCodexCompactWatch()
++		w.observe("item/completed", map[string]any{
++			"threadId": "thr", "turnId": "t1",
++			"item": map[string]any{"type": "contextCompaction", "id": "cc"},
++		})
++		w.observe("item/completed", map[string]any{
++			"threadId": "thr", "turnId": "t1",
++			"item": map[string]any{"type": "contextCompaction", "id": "cc"},
++		})
++		w.observe("thread/compacted", map[string]any{"threadId": "thr", "turnId": "t1"})
++		w.observe("error", map[string]any{
++			"threadId": "thr", "turnId": "t1", "willRetry": false,
++			"error": map[string]any{"message": "late failure"},
++		})
++		if r := w.wait(); r.kind != codexCompactSucceeded {
++			t.Fatalf("expected succeeded to survive duplicates, got %+v", r)
++		}
++	})
++
++	t.Run("terminal error resolves failure", func(t *testing.T) {
++		t.Parallel()
++		w := newCodexCompactWatch()
++		w.observe("error", map[string]any{
++			"threadId": "thr", "turnId": "t1", "willRetry": true,
++			"error": map[string]any{"message": "transient"},
++		})
++		if w.resolvedSnapshot() {
++			t.Fatal("retryable error must not resolve the watch")
++		}
++		w.observe("error", map[string]any{
++			"threadId": "thr", "turnId": "t1", "willRetry": false,
++			"error": map[string]any{"message": "terminal failure"},
++		})
++		r := w.wait()
++		if r.kind != codexCompactFailedTurn || r.detail != "terminal failure" {
++			t.Fatalf("expected failed turn with detail, got %+v", r)
++		}
++	})
++
++	t.Run("foreign item types ignored", func(t *testing.T) {
++		t.Parallel()
++		w := newCodexCompactWatch()
++		w.observe("item/completed", map[string]any{
++			"threadId": "thr", "turnId": "t1",
++			"item": map[string]any{"type": "agentMessage", "id": "m1", "text": "hi"},
++		})
++		w.observe("item/started", map[string]any{
++			"threadId": "thr", "turnId": "t1",
++			"item": map[string]any{"type": "commandExecution", "id": "c1"},
++		})
++		if w.resolvedSnapshot() {
++			t.Fatal("non-compaction items must not resolve the watch")
++		}
++		w.resolveTerminal(codexCompactResult{kind: codexCompactTimedOut})
++		if r := w.wait(); r.kind != codexCompactTimedOut {
++			t.Fatalf("expected the terminal verdict, got %+v", r)
++		}
++	})
++}
++
++// TestCodexSupplementRefusedWhileCompacting pins the supplement gate: a steer
++// admitted during compaction would target a non-steerable turn.
++func TestCodexSupplementRefusedWhileCompacting(t *testing.T) {
++	t.Parallel()
++	c, _, _ := newTestCodexClient(t)
++	w := newCodexCompactWatch()
++	c.armCompactWatch(w)
++	if !c.isCompacting() {
++		t.Fatal("armed unresolved watch must report compacting")
++	}
++	if err := supplementCodexTurn(context.Background(), c, "extra"); err == nil || !strings.Contains(err.Error(), "compacting") {
++		t.Fatalf("expected supplement refusal while compacting, got %v", err)
++	}
++	w.resolveTerminal(codexCompactResult{kind: codexCompactSucceeded})
++	if c.isCompacting() {
++		t.Fatal("resolved watch must stop reporting compacting")
++	}
++}
++
++// TestCodexCompactWaitTimeoutOverride verifies the test hook itself, so the
++// shrunken budgets in the timeout tests cannot silently stop applying.
++func TestCodexCompactWaitTimeoutOverride(t *testing.T) {
++	if got := codexCompactWaitTimeout(); got != defaultCodexCompactWaitTimeout {
++		t.Fatalf("default override leaked between tests: %s", got)
++	}
++	codexCompactWaitNanos.Store(int64(1500 * time.Millisecond))
++	defer codexCompactWaitNanos.Store(0)
++	if got := codexCompactWaitTimeout(); got != 1500*time.Millisecond {
++		t.Fatalf("override not applied: %s", got)
++	}
++}
+Index: multica/server/pkg/agent/agent.go
+===================================================================
+--- multica.orig/server/pkg/agent/agent.go
++++ multica/server/pkg/agent/agent.go
+@@ -337,6 +337,13 @@ type Result struct {
+ 	// its model catalog, and that the process tree was reaped afterwards.
+ 	// Like codexInitializeRetrySafe it is not part of the public contract.
+ 	codexStartupRefreshRetrySafe bool
++	// codexContextCompactRetrySafe is provider-internal evidence that a turn
++	// failed on context-window capacity after zero tool use, and that Codex
++	// then compacted the thread successfully. Execute's retry loop relaunches
++	// and resumes the SAME thread — the conversation continues instead of
++	// falling back to a fresh session (issue 568). Like the flags above it is
++	// not part of the public contract.
++	codexContextCompactRetrySafe bool
+ }
+ 
+ // Config configures a Backend instance.

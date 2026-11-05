@@ -38,3 +38,4 @@
 0035-odoo-jev-cli.patch
 0036-odoo-daemon-websocket-wakeup.patch
 0037-odoo-codex-context-compact-recovery.patch
+0038-odoo-codex-compact-failure-classification.patch

@@ -1,0 +1,409 @@
+Index: multica/server/pkg/agent/codex.go
+===================================================================
+--- multica.orig/server/pkg/agent/codex.go
++++ multica/server/pkg/agent/codex.go
+@@ -114,6 +114,7 @@ const (
+ // the opencodeTerminateGraceNanos hook.
+ var codexGracefulShutdownTimeoutNanos atomic.Int64
+ var codexProcessWaitDelayNanos atomic.Int64
++
+ // codexCompactWaitNanos optionally overrides defaultCodexCompactWaitTimeout
+ // for tests, in nanoseconds. Zero or negative keeps the production default.
+ // Compaction-recovery tests shrink it so a "compaction never completes"
+@@ -319,10 +320,10 @@ func CodexRetiredCompactionError(errText
+ }
+ 
+ // codexContextCapacityInfoValue is the wire value of the typed
+-// CodexErrorInfo::ContextWindowExceeded variant (codex-protocol error.rs,
+-// snake_case on the wire). Codex 0.166 ships it on both terminal `error`
++// CodexErrorInfo::ContextWindowExceeded variant in app-server v2 (camelCase
++// on the wire). Codex 0.166 ships it on both terminal `error`
+ // notifications and turn/completed's turn.error.codexErrorInfo.
+-const codexContextCapacityInfoValue = "context_window_exceeded"
++const codexContextCapacityInfoValue = "contextWindowExceeded"
+ 
+ // codexContextCapacityMessageMarker is the distinctive fixed prose of the
+ // same failure when only the message string is available (older Codex, or a
+@@ -345,13 +346,13 @@ const codexContextCapacityMessageMarker
+ // limits, usage limits and session budgets stay out on purpose: compaction
+ // shrinks history, it does not refill quota.
+ func codexContextCapacityFailure(info, message string) bool {
+-	if strings.EqualFold(strings.TrimSpace(info), codexContextCapacityInfoValue) {
+-		return true
++	if info = strings.TrimSpace(info); info != "" {
++		return strings.EqualFold(info, codexContextCapacityInfoValue)
+ 	}
+ 	return strings.Contains(strings.ToLower(message), codexContextCapacityMessageMarker)
+ }
+ 
+-// The three compaction diagnostics below are appended to the surfaced error
++// The compaction diagnostics below are appended to the surfaced error
+ // text, which is persisted in agent_task_queue.error and re-scanned by the
+ // resume guards (CodexResumeOverflowError, CodexRetiredCompactionError) and
+ // taskfailure.Classify indefinitely. Like codexRetiredCompactionHint in
+@@ -377,6 +378,14 @@ func codexCompactTimedOutDiagnostic(deta
+ 	return msg + ". The conversation is kept; the next run retries compaction."
+ }
+ 
++func codexCompactUnavailableDiagnostic(detail string) string {
++	msg := " [multica] codex could not finish compacting this conversation"
++	if d := strings.TrimSpace(detail); d != "" {
++		msg += ": " + d
++	}
++	return msg + ". The conversation is kept; this run may continue on a fresh session and the thread recovers once codex compaction is available again."
++}
++
+ func codexCompactFailedDiagnostic(detail string) string {
+ 	msg := " [multica] codex compacted this conversation and the compaction itself failed"
+ 	if d := strings.TrimSpace(detail); d != "" {
+@@ -1938,7 +1947,7 @@ func (b *codexBackend) executeOnce(ctx c
+ 		//     carries its own diagnostics.
+ 		//   - runCtx alive: same rule enforced before the request, not only
+ 		//     inside its wait.
+-		//   - capacity classification: only the typed context_window_exceeded
++		//   - capacity classification: only the typed contextWindowExceeded
+ 		//     failure (or its exact fixed message) qualifies. Rate limits,
+ 		//     usage limits and provider 5xx stay out — compaction cures none
+ 		//     of them.
+@@ -1978,11 +1987,16 @@ func (b *codexBackend) executeOnce(ctx c
+ 				finalError += codexCompactTimedOutDiagnostic(compact.detail, codexCompactWaitTimeout())
+ 				compactResumeRejectedTransient = true
+ 			case codexCompactFailedTurn:
+-				// Compaction ran and failed — including the case where the
+-				// summarization itself hit the capacity limit. No cure remains
+-				// for this thread: retire it so the next run starts fresh.
+-				finalError += codexCompactFailedDiagnostic(compact.detail)
+-				compactResumeRejected = true
++				// A failed summarization is not evidence of a broken thread.
++				// Retire only when compaction itself cannot fit the history;
++				// configuration/provider failures remain recoverable.
++				if codexContextCapacityFailure(compact.errorInfo, compact.detail) {
++					finalError += codexCompactFailedDiagnostic(compact.detail)
++					compactResumeRejected = true
++				} else {
++					finalError += codexCompactUnavailableDiagnostic(compact.detail)
++					compactResumeRejectedTransient = true
++				}
+ 			case codexCompactAborted, codexCompactPending:
+ 				// Cancellation or process exit won. The result goes out under
+ 				// the caller's cancellation semantics unchanged — an async
+@@ -2100,7 +2114,7 @@ func (b *codexBackend) executeOnce(ctx c
+ 			SessionID:                    threadID,
+ 			DurationMs:                   duration.Milliseconds(),
+ 			Usage:                        usageMap,
+-			ResumeRejected:              compactResumeRejected,
++			ResumeRejected:               compactResumeRejected,
+ 			ResumeRejectedTransient:      compactResumeRejectedTransient,
+ 			codexStartupRefreshRetrySafe: startupRefreshRetrySafe,
+ 			codexContextCompactRetrySafe: compactRetrySafe,
+@@ -2659,7 +2673,7 @@ type codexClient struct {
+ 	turnErrorMu sync.Mutex
+ 	turnError   string // captured from turn/completed status=failed or terminal error notifications
+ 	// turnErrorInfo is the typed codexErrorInfo value (e.g.
+-	// context_window_exceeded) captured alongside turnError, when the
++	// contextWindowExceeded) captured alongside turnError, when the
+ 	// notification carried one. Empty means the failure was untyped.
+ 	turnErrorInfo string
+ 	// toolUseObserved records whether this client emitted any tool-use
+@@ -2753,12 +2767,11 @@ func (g *codexTurnNotificationGate) acce
+ //     unknown method on an old runtime, a compaction config fault, a thread
+ //     that refuses direct input. Compaction never ran, so the conversation is
+ //     intact: recoverable by fixing the config, never by retrying now.
+-//   - failedTurn: compaction ran and its turn failed (provider error, or the
+-//     summarization itself hit the capacity limit). The thread stays over
+-//     limit with no remaining cure — permanently unrecoverable.
+-//   - timedOut / aborted: the bounded wait ended without a verdict. Nothing
+-//     is known; the run gives up without a retry and the platform's next run
+-//     re-attempts compaction from scratch (bounded per run).
++//   - failedTurn: compaction ran and its turn failed. Only an explicit
++//     capacity failure proves that the history cannot be summarized; other
++//     failures keep the thread available for recovery after a provider fix.
++//   - timedOut: no verdict; keep the thread and allow the fresh-session fallback.
++//   - aborted: cancellation or process exit; do not continue the failed turn.
+ type codexCompactOutcomeKind int
+ 
+ const (
+@@ -2771,8 +2784,9 @@ const (
+ )
+ 
+ type codexCompactResult struct {
+-	kind   codexCompactOutcomeKind
+-	detail string
++	kind      codexCompactOutcomeKind
++	detail    string
++	errorInfo string
+ }
+ 
+ // codexCompactWatch observes the notifications one async compaction emits,
+@@ -2832,7 +2846,8 @@ func (w *codexCompactWatch) observe(meth
+ 		switch status {
+ 		case "failed":
+ 			detail := extractNestedString(params, "turn", "error", "message")
+-			w.resolveLocked(codexCompactResult{kind: codexCompactFailedTurn, detail: detail})
++			info := extractNestedString(params, "turn", "error", "codexErrorInfo")
++			w.resolveLocked(codexCompactResult{kind: codexCompactFailedTurn, detail: detail, errorInfo: info})
+ 		case "completed":
+ 			// The compact turn finished cleanly. Normally the
+ 			// contextCompaction item has already resolved the watch; taking
+@@ -2850,7 +2865,8 @@ func (w *codexCompactWatch) observe(meth
+ 		if detail == "" {
+ 			detail = extractNestedString(params, "message")
+ 		}
+-		w.resolveLocked(codexCompactResult{kind: codexCompactFailedTurn, detail: detail})
++		info := extractNestedString(params, "error", "codexErrorInfo")
++		w.resolveLocked(codexCompactResult{kind: codexCompactFailedTurn, detail: detail, errorInfo: info})
+ 	}
+ }
+ 
+Index: multica/server/pkg/agent/codex_context_compact_test.go
+===================================================================
+--- multica.orig/server/pkg/agent/codex_context_compact_test.go
++++ multica/server/pkg/agent/codex_context_compact_test.go
+@@ -26,8 +26,8 @@ import (
+ // string cannot carry.
+ 
+ // codexCompactCapacityTurnCompleted fails the current turn with the typed
+-// context-window capacity error exactly as Codex 0.166 reports it.
+-const codexCompactCapacityTurnCompleted = `{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr_prior","turn":{"id":"turn-1","status":"failed","error":{"message":"Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.","codexErrorInfo":"context_window_exceeded"}}}}
++// context-window capacity error exactly as the app-server v2 schema reports it.
++const codexCompactCapacityTurnCompleted = `{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr_prior","turn":{"id":"turn-1","status":"failed","error":{"message":"Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.","codexErrorInfo":"contextWindowExceeded"}}}}
+ `
+ 
+ // fakeCodexCompactHeredoc wraps a raw JSON line in a quoted heredoc so
+@@ -224,6 +224,89 @@ fi
+ 	}
+ }
+ 
++func TestCodexContextCompactTypedCapacityContinuesOriginalThread(t *testing.T) {
++	t.Parallel()
++	if runtime.GOOS == "windows" {
++		t.Skip("POSIX fixture")
++	}
++	failedTurn := strings.ReplaceAll(fakeCodexCompactStartTurnAndServeFailure("turn-1"),
++		codexContextCapacityMessageMarker, "capacity reached")
++	fakePath := writeFakeCodexAppServer(t, fakeCodexCompactPreamble+`
++if [ "$INV" = "1" ]; then
++`+failedTurn+fakeCodexCompactAcceptAndComplete+`
++  read line
++else
++`+fakeCodexCompactSucceedingTurn+`
++fi
++`)
++	result := executeFakeCodex(t, fakePath, fakeCodexCompactOptions())
++	if result.Status != "completed" || result.SessionID != "thr_prior" {
++		t.Fatalf("typed capacity error must recover without matching prose: %+v", result)
++	}
++	if n := fakeCodexInvocations(t, filepath.Dir(fakePath)); n != 2 {
++		t.Fatalf("expected one continuation, got %d launches", n)
++	}
++}
++
++// Failure events carry their own error info; the preceding capacity failure
++// must not turn an unrelated provider/configuration failure into retirement.
++func TestCodexContextCompactAsyncFailureClassification(t *testing.T) {
++	t.Parallel()
++	if runtime.GOOS == "windows" {
++		t.Skip("POSIX fixture")
++	}
++	cases := []struct {
++		name, info, detail string
++		permanent          bool
++	}{
++		{"retired route", "", codexRetiredCompactionLiveError, false},
++		{"model unavailable", "modelNotFound", "summarization model unavailable", false},
++		{"quota", "usageLimitExceeded", "quota reached", false},
++		{"network", "", "stream disconnected", false},
++		{"unknown", "other", "unspecified failure", false},
++		{"capacity", "contextWindowExceeded", "capacity reached", true},
++		{"capacity prose", "", codexContextCapacityMessageMarker, true},
++	}
++	for _, method := range []string{"turn/completed", "error"} {
++		for _, tc := range cases {
++			t.Run(method+"/"+tc.name, func(t *testing.T) {
++				t.Parallel()
++				errorData := map[string]any{"message": tc.detail}
++				if tc.info != "" {
++					errorData["codexErrorInfo"] = tc.info
++				}
++				params := map[string]any{"threadId": "thr_prior"}
++				if method == "turn/completed" {
++					params["turn"] = map[string]any{"id": "turn-compact", "status": "failed", "error": errorData}
++				} else {
++					params["turnId"], params["error"], params["willRetry"] = "turn-compact", errorData, false
++				}
++				event, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
++				if err != nil {
++					t.Fatal(err)
++				}
++				fakePath := writeFakeCodexAppServer(t, fakeCodexCompactPreamble+
++					fakeCodexCompactStartTurnAndServeFailure("turn-1")+`
++read line
++echo '{"jsonrpc":"2.0","id":4,"result":{}}'
++echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr_prior","turn":{"id":"turn-compact"}}}'
++`+fakeCodexCompactHeredoc(string(event)+"\n")+"read line\n")
++				result := executeFakeCodex(t, fakePath, fakeCodexCompactOptions())
++				if result.Status != "failed" || result.SessionID != "thr_prior" ||
++					result.ResumeRejected != tc.permanent || result.ResumeRejectedTransient == tc.permanent {
++					t.Fatalf("permanent=%v: unexpected failure classification: %+v", tc.permanent, result)
++				}
++				if !strings.Contains(result.Error, tc.detail) {
++					t.Fatalf("lost provider diagnostics: %q", result.Error)
++				}
++				if n := fakeCodexInvocations(t, filepath.Dir(fakePath)); n != 1 {
++					t.Fatalf("failed compaction must not replay the turn, got %d launches", n)
++				}
++			})
++		}
++	}
++}
++
+ // TestCodexContextCompactRequestRefusedKeepsSession covers the compaction
+ // configuration-fault class: the app-server rejects thread/compact/start
+ // itself (here: unknown method, as an old runtime would). The conversation is
+@@ -264,7 +347,7 @@ read line
+ }
+ 
+ // TestCodexContextCompactFailedTurnRetiresSession covers the permanently
+-// unrecoverable class: compaction ran and its own turn failed. The session is
++// unrecoverable class: summarization itself exceeds capacity. The session is
+ // flagged for the daemon's fresh-session fallback and retirement.
+ func TestCodexContextCompactFailedTurnRetiresSession(t *testing.T) {
+ 	t.Parallel()
+@@ -279,7 +362,7 @@ printf '%s\n' "$line" > "$DIR/compact-st
+ echo '{"jsonrpc":"2.0","id":4,"result":{}}'
+ echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr_prior","turn":{"id":"turn-compact"}}}'
+ echo '{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thr_prior","turnId":"turn-compact","item":{"type":"contextCompaction","id":"cc-1"}}}'
+-echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr_prior","turn":{"id":"turn-compact","status":"failed","error":{"message":"summarization model unavailable"}}}}'
++echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr_prior","turn":{"id":"turn-compact","status":"failed","error":{"message":"summarization exceeds capacity","codexErrorInfo":"contextWindowExceeded"}}}}'
+ read line
+ `)
+ 	dir := filepath.Dir(fakePath)
+@@ -292,7 +375,7 @@ read line
+ 		t.Fatalf("expected ResumeRejected for a failed compaction turn, got %+v", result)
+ 	}
+ 	if !strings.Contains(result.Error, "compaction itself failed") ||
+-		!strings.Contains(result.Error, "summarization model unavailable") {
++		!strings.Contains(result.Error, "summarization exceeds capacity") {
+ 		t.Fatalf("expected compaction failure diagnostics, got %q", result.Error)
+ 	}
+ 	if n := fakeCodexInvocations(t, dir); n != 1 {
+@@ -487,7 +570,7 @@ func TestCodexContextCompactNonCapacityF
+ read line
+ echo '{"jsonrpc":"2.0","id":3,"result":{}}'
+ echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr_prior","turn":{"id":"turn-1"}}}'
+-echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr_prior","turn":{"id":"turn-1","status":"failed","error":{"message":"You have hit your usage limit","codexErrorInfo":"usage_limit_exceeded"}}}}'
++echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr_prior","turn":{"id":"turn-1","status":"failed","error":{"message":"You have hit your usage limit","codexErrorInfo":"usageLimitExceeded"}}}}'
+ read line
+ `)
+ 	dir := filepath.Dir(fakePath)
+@@ -505,7 +588,7 @@ read line
+ }
+ 
+ // TestCodexContextCapacityFailure is the classifier matrix: the typed
+-// context_window_exceeded value and the exact fixed message qualify;
++// contextWindowExceeded value and the exact fixed message qualify;
+ // neighbouring error classes stay out.
+ func TestCodexContextCapacityFailure(t *testing.T) {
+ 	t.Parallel()
+@@ -516,13 +599,15 @@ func TestCodexContextCapacityFailure(t *
+ 		message string
+ 		want    bool
+ 	}{
+-		{"typed", "context_window_exceeded", "", true},
+-		{"typed with whitespace", " context_window_exceeded ", "", true},
++		{"typed", "contextWindowExceeded", "", true},
++		{"typed with whitespace", " contextWindowExceeded ", "", true},
+ 		{"fixed message", "", "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.", true},
+ 		{"fixed message case-insensitive", "", "CODEX RAN OUT OF ROOM IN THE MODEL'S CONTEXT WINDOW", true},
+-		{"usage limit", "usage_limit_exceeded", "usage limit", false},
+-		{"session budget", "session_budget_exceeded", "", false},
+-		{"rate limit", "rate_limit_exceeded", "rate limit exceeded: 429", false},
++		{"usage limit", "usageLimitExceeded", "usage limit", false},
++		{"session budget", "sessionBudgetExceeded", "", false},
++		{"rate limit", "rateLimitExceeded", "rate limit exceeded: 429", false},
++		{"typed quota overrides prose", "usageLimitExceeded", codexContextCapacityMessageMarker, false},
++		{"non-protocol enum", "context_window_exceeded", "", false},
+ 		{"untyped other", "", "internal error", false},
+ 		{"provider 400 without the marker", "", "unexpected status 400 Bad Request: context_length_exceeded", false},
+ 		{"empty", "", "", false},
+@@ -538,7 +623,7 @@ func TestCodexContextCapacityFailure(t *
+ }
+ 
+ // TestCodexCompactDiagnosticsCannotChangeMachineDecisions pins the constant
+-// parts of the three compaction diagnostics against the error-string
++// parts of the compaction diagnostics against the error-string
+ // classifiers that re-scan the persisted text: a diagnostic must never flip
+ // CodexResumeOverflowError or CodexRetiredCompactionError on a failure that
+ // is neither. (The daemon-side annotation test pins the same property for
+@@ -549,6 +634,8 @@ func TestCodexCompactDiagnosticsCannotCh
+ 	texts := []string{
+ 		codexCompactRefusedDiagnostic("Method not found"),
+ 		codexCompactRefusedDiagnostic(""),
++		codexCompactUnavailableDiagnostic("stream disconnected"),
++		codexCompactUnavailableDiagnostic(""),
+ 		codexCompactTimedOutDiagnostic("watchdog detail", 10*time.Minute),
+ 		codexCompactTimedOutDiagnostic("", 10*time.Minute),
+ 		codexCompactFailedDiagnostic("stream disconnected"),
+@@ -565,7 +652,7 @@ func TestCodexCompactDiagnosticsCannotCh
+ 	// A genuinely retired-route compaction failure must still be identifiable
+ 	// once the provider detail is embedded — that pairing is the point of
+ 	// keeping the detail verbatim.
+-	withRetiredRoute := codexCompactFailedDiagnostic(codexRetiredCompactionLiveError)
++	withRetiredRoute := codexCompactUnavailableDiagnostic(codexRetiredCompactionLiveError)
+ 	if !CodexRetiredCompactionError(withRetiredRoute) {
+ 		t.Errorf("embedded retired-route detail lost its classification: %q", withRetiredRoute)
+ 	}
+Index: multica/server/internal/daemon/codex_compaction_annotation_test.go
+===================================================================
+--- multica.orig/server/internal/daemon/codex_compaction_annotation_test.go
++++ multica/server/internal/daemon/codex_compaction_annotation_test.go
+@@ -5,6 +5,7 @@ import (
+ 	"testing"
+ 
+ 	"github.com/multica-ai/multica/server/internal/service"
++	"github.com/multica-ai/multica/server/pkg/agent"
+ 	"github.com/multica-ai/multica/server/pkg/taskfailure"
+ )
+ 
+@@ -171,3 +172,41 @@ func TestCodexRetiredCompactionKeepsSess
+ 		t.Error("compaction 404 must not be classified as a resume-unsafe transport failure")
+ 	}
+ }
++
++// The capacity-failed turn remains in the diagnostic alongside the provider
++// failure. That combined text must not override the adapter's transient verdict.
++func TestCodexCompactionConfigurationFailureFreshFallback(t *testing.T) {
++	t.Parallel()
++	for _, detail := range []string{codexRetiredCompactionError, "summarization model unavailable", "stream disconnected"} {
++		t.Run(detail, func(t *testing.T) {
++			errMsg := "Codex ran out of room in the model's context window. " +
++				"[multica] codex could not finish compacting this conversation: " + detail +
++				". The conversation is kept; this run may continue on a fresh session and the thread recovers once codex compaction is available again."
++			first := agent.Result{Status: "failed", SessionID: "original", Error: errMsg, ResumeRejectedTransient: true}
++			if !shouldRetryWithFreshSession(first, "original", 0, "codex") {
++				t.Fatal("compaction configuration failure must allow the existing fresh fallback")
++			}
++			if shouldRetryWithFreshSession(first, "original", 1, "codex") {
++				t.Fatal("fresh fallback must retain the tool-use guard")
++			}
++			if _, unsafe := classifyPoisonedError(errMsg); unsafe {
++				t.Fatal("compaction configuration failure poisoned the session")
++			}
++			if _, unsafe := classifyResumeUnsafeTransport("codex", errMsg); unsafe {
++				t.Fatal("compaction configuration failure retired the session")
++			}
++			annotated := annotateCodexRetiredCompaction(errMsg, "codex")
++			if service.ResumeUnsafeFailure(taskfailure.Classify(errMsg).String(), annotated) {
++				t.Fatal("persisted diagnostic must leave the original session resumable")
++			}
++			failedRetry, _ := reconcileFreshRetryResult(first, nil, 0, agent.Result{Status: "failed", Error: "fresh attempt failed"}, 0, nil)
++			if failedRetry.SessionID != "original" || failedRetry.ResumeRejected || !failedRetry.ResumeRejectedTransient {
++				t.Fatalf("failed fresh fallback lost the recoverable original session: %+v", failedRetry)
++			}
++			succeeded, _ := reconcileFreshRetryResult(first, nil, 0, agent.Result{Status: "completed", SessionID: "fresh"}, 0, nil)
++			if succeeded.SessionID != "fresh" || succeeded.ResumeRejected || succeeded.ResumeRejectedTransient {
++				t.Fatalf("successful fallback must use its own session: %+v", succeeded)
++			}
++		})
++	}
++}

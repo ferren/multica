@@ -39,3 +39,4 @@
 0036-odoo-daemon-websocket-wakeup.patch
 0037-odoo-codex-context-compact-recovery.patch
 0038-odoo-codex-compact-failure-classification.patch
+0039-odoo-task-credential-renewal.patch

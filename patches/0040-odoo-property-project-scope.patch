@@ -1,0 +1,109 @@
+Odoo property definitions belong to projects. Allow an explicit creation
+project and refuse ambiguous property names instead of editing the first
+company catalog entry. Native backends reject the Odoo-only project flag.
+
+Issue: 414
+Index: multica/server/cmd/multica/cmd_property.go
+===================================================================
+--- multica.orig/server/cmd/multica/cmd_property.go
++++ multica/server/cmd/multica/cmd_property.go
+@@ -179,6 +179,7 @@ func init() {
+ 	propertyCreateCmd.Flags().String("output", "table", "Output format: table or json")
+ 	propertyCreateCmd.Flags().String("name", "", "Property name (required)")
+ 	propertyCreateCmd.Flags().String("type", "", "Property type: text, number, select, multi_select, date, checkbox, url, actor, multi_actor, multi_text, multi_url (required)")
++	propertyCreateCmd.Flags().String("project", "", "Odoo target project ID or name (required when multiple projects exist)")
+ 	propertyCreateCmd.Flags().String("description", "", "Property description")
+ 	propertyCreateCmd.Flags().String("icon", "", "Property icon key from the Web picker (for example, flag, tag, or shield)")
+ 	propertyCreateCmd.Flags().StringArray("option", nil, `Select option as "Name" or "Name:#rrggbb" (repeatable; select types only)`)
+@@ -226,11 +227,20 @@ func resolvePropertyRef(properties []pro
+ 		}
+ 	}
+ 	lower := strings.ToLower(strings.TrimSpace(ref))
++	var matched *propertyDTO
+ 	for _, p := range properties {
+ 		if strings.ToLower(p.Name) == lower {
+-			return p, nil
++			if matched != nil {
++				return propertyDTO{}, fmt.Errorf("property name %q is ambiguous; use its ID", ref)
++			}
++			copy := p
++			matched = &copy
+ 		}
+ 	}
++	if matched != nil {
++		return *matched, nil
++	}
++
+ 	names := make([]string, len(properties))
+ 	for i, p := range properties {
+ 		names[i] = p.Name
+@@ -359,6 +369,17 @@ func runPropertyCreate(cmd *cobra.Comman
+ 	ctx, cancel := cli.APIContext(context.Background())
+ 	defer cancel()
+ 
++	if projectRef, _ := cmd.Flags().GetString("project"); projectRef != "" {
++		if !client.OdooBackend {
++			return fmt.Errorf("--project is only supported by the Odoo backend")
++		}
++		project, err := resolveProjectID(ctx, client, projectRef)
++		if err != nil {
++			return err
++		}
++		body["project_id"] = project.ID
++	}
++
+ 	var created propertyDTO
+ 	if err := client.PostJSON(ctx, "/api/properties", body, &created); err != nil {
+ 		return fmt.Errorf("create property: %w", err)
+Index: multica/server/cmd/multica/cmd_property_odoo_test.go
+===================================================================
+--- /dev/null
++++ multica/server/cmd/multica/cmd_property_odoo_test.go
+@@ -0,0 +1,47 @@
++package main
++
++import (
++	"encoding/json"
++	"net/http"
++	"strings"
++	"testing"
++
++	"github.com/spf13/cobra"
++)
++
++func TestPropertyNameAmbiguityRequiresID(t *testing.T) {
++	properties := []propertyDTO{{ID: "one", Name: "Severity"}, {ID: "two", Name: "severity"}}
++	if _, err := resolvePropertyRef(properties, "Severity"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
++		t.Fatalf("expected ambiguous name, got %v", err)
++	}
++	if got, err := resolvePropertyRef(properties, "two"); err != nil || got.ID != "two" {
++		t.Fatalf("exact ID must win: got %v, %v", got, err)
++	}
++}
++
++func TestPropertyCreateOdooProject(t *testing.T) {
++	var got map[string]any
++	mcpTestServer(t, func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodPost || r.URL.Path != "/multica/agent/properties" {
++			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
++		}
++		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
++			t.Fatal(err)
++		}
++		w.Header().Set("Content-Type", "application/json")
++		w.WriteHeader(http.StatusCreated)
++		_ = json.NewEncoder(w).Encode(propertyDTO{ID: "new", Name: "Severity", Type: "text"})
++	})
++	t.Setenv("MULTICA_BACKEND_MODE", "odoo")
++	cmd := &cobra.Command{}
++	for key, value := range map[string]string{"workspace-id": "", "profile": "", "server-url": "", "output": "json", "name": "Severity", "type": "text", "description": "", "icon": "", "project": "42"} {
++		cmd.Flags().String(key, value, "")
++	}
++	cmd.Flags().StringArray("option", nil, "")
++	if _, err := captureStdout(t, func() error { return runPropertyCreate(cmd, nil) }); err != nil {
++		t.Fatal(err)
++	}
++	if got["project_id"] != "42" || got["name"] != "Severity" {
++		t.Fatalf("unexpected payload: %v", got)
++	}
++}

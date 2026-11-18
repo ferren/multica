@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -5867,7 +5867,12 @@ func shouldInterruptAgent(status string,
+@@ -6196,7 +6196,12 @@ func shouldInterruptAgent(status string,
  	if err != nil {
  		return isTaskNotFoundError(err)
  	}
@@ -20,7 +20,7 @@ Index: multica/server/internal/daemon/daemon_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon_test.go
 +++ multica/server/internal/daemon/daemon_test.go
-@@ -1610,6 +1610,7 @@ func TestShouldInterruptAgent(t *testing
+@@ -1614,6 +1614,7 @@ func TestShouldInterruptAgent(t *testing
  		{name: "status cancelled", status: "cancelled", err: nil, want: true},
  		{name: "status failed (offline sweeper)", status: "failed", err: nil, want: true},
  		{name: "status completed (finished elsewhere)", status: "completed", err: nil, want: true},

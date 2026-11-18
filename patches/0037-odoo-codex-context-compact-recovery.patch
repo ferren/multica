@@ -2,7 +2,7 @@ Index: multica/server/pkg/agent/codex.go
 ===================================================================
 --- multica.orig/server/pkg/agent/codex.go
 +++ multica/server/pkg/agent/codex.go
-@@ -97,6 +97,12 @@ const (
+@@ -100,6 +100,12 @@ const (
  	// graceful shutdown, so killing it immediately (the prior behavior) drops
  	// the task's spans/metrics/logs.
  	codexGracefulShutdownTimeout = 10 * time.Second
@@ -15,7 +15,7 @@ Index: multica/server/pkg/agent/codex.go
  )
  
  // codexGracefulShutdownTimeoutNanos optionally overrides
-@@ -108,6 +114,11 @@ const (
+@@ -111,6 +117,11 @@ const (
  // the opencodeTerminateGraceNanos hook.
  var codexGracefulShutdownTimeoutNanos atomic.Int64
  var codexProcessWaitDelayNanos atomic.Int64
@@ -27,7 +27,7 @@ Index: multica/server/pkg/agent/codex.go
  var activeCodexLaunches atomic.Int64
  var maxActiveCodexLaunchesObserved atomic.Int64
  var codexCleanupConfirmationOverride atomic.Int32
-@@ -136,6 +147,13 @@ func codexGracefulShutdown() time.Durati
+@@ -139,6 +150,13 @@ func codexGracefulShutdown() time.Durati
  	return codexGracefulShutdownTimeout
  }
  
@@ -41,7 +41,7 @@ Index: multica/server/pkg/agent/codex.go
  func codexProcessWaitDelay() time.Duration {
  	if n := codexProcessWaitDelayNanos.Load(); n > 0 {
  		return time.Duration(n)
-@@ -300,6 +318,73 @@ func CodexRetiredCompactionError(errText
+@@ -303,6 +321,73 @@ func CodexRetiredCompactionError(errText
  		strings.Contains(lower, codexRetiredCompactPath)
  }
  
@@ -115,7 +115,7 @@ Index: multica/server/pkg/agent/codex.go
  // codexModelCatalogRefreshFailureSignal matches the Codex models-manager error
  // emitted when the model catalog could not be refreshed. Codex reports several
  // distinct causes under this prefix ("timeout waiting for child process to
-@@ -985,6 +1070,9 @@ func (b *codexBackend) Execute(ctx conte
+@@ -988,6 +1073,9 @@ func (b *codexBackend) Execute(ctx conte
  		defer close(resCh)
  		session := firstSession
  		attemptOpts := opts
@@ -125,7 +125,7 @@ Index: multica/server/pkg/agent/codex.go
  		for attempt := 1; attempt <= 2; attempt++ {
  			if attempt > 1 {
  				var err error
-@@ -1035,12 +1123,24 @@ func (b *codexBackend) Execute(ctx conte
+@@ -1038,12 +1126,24 @@ func (b *codexBackend) Execute(ctx conte
  				retryReason = "initialize"
  			case result.codexStartupRefreshRetrySafe:
  				retryReason = "model_catalog_refresh"
@@ -150,7 +150,7 @@ Index: multica/server/pkg/agent/codex.go
  			// The model catalog refresh reaches the network, so give the
  			// transient failure a little more room than the local initialize
  			// handshake gets. Both stay well inside the task timeout, and
-@@ -1062,6 +1162,20 @@ func (b *codexBackend) Execute(ctx conte
+@@ -1065,6 +1165,20 @@ func (b *codexBackend) Execute(ctx conte
  					attemptOpts.ResumeExpected = true
  				}
  			}
@@ -171,7 +171,7 @@ Index: multica/server/pkg/agent/codex.go
  			b.cfg.Logger.Warn("codex retry scheduled", "reason", retryReason, "attempt", attempt, "next_attempt", attempt+1, "backoff", backoff.String())
  			select {
  			case <-ctx.Done():
-@@ -1812,6 +1926,70 @@ func (b *codexBackend) executeOnce(ctx c
+@@ -1817,6 +1931,70 @@ func (b *codexBackend) executeOnce(ctx c
  			finalError = codexGuardianRateLimitError
  		}
  
@@ -242,7 +242,7 @@ Index: multica/server/pkg/agent/codex.go
  		duration := time.Since(startTime)
  		b.cfg.Logger.Info("codex finished", "pid", cmd.Process.Pid, "status", finalStatus, "duration", duration.Round(time.Millisecond).String())
  
-@@ -1922,7 +2100,10 @@ func (b *codexBackend) executeOnce(ctx c
+@@ -1927,7 +2105,10 @@ func (b *codexBackend) executeOnce(ctx c
  			SessionID:                    threadID,
  			DurationMs:                   duration.Milliseconds(),
  			Usage:                        usageMap,
@@ -253,7 +253,7 @@ Index: multica/server/pkg/agent/codex.go
  		}
  	}()
  
-@@ -1930,12 +2111,18 @@ func (b *codexBackend) executeOnce(ctx c
+@@ -1935,12 +2116,18 @@ func (b *codexBackend) executeOnce(ctx c
  		return supplementCodexTurn(supplementCtx, c, instruction)
  	}
  	supplementReady := func() bool {
@@ -273,7 +273,7 @@ Index: multica/server/pkg/agent/codex.go
  	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
  	defer cancel()
  	threadID := c.getThreadID()
-@@ -2471,6 +2658,21 @@ type codexClient struct {
+@@ -2481,6 +2668,21 @@ type codexClient struct {
  
  	turnErrorMu sync.Mutex
  	turnError   string // captured from turn/completed status=failed or terminal error notifications
@@ -295,7 +295,7 @@ Index: multica/server/pkg/agent/codex.go
  }
  
  type codexAgentMessageStream struct {
-@@ -2544,6 +2746,145 @@ func (g *codexTurnNotificationGate) acce
+@@ -2556,6 +2758,145 @@ func (g *codexTurnNotificationGate) acce
  	}
  }
  
@@ -441,7 +441,7 @@ Index: multica/server/pkg/agent/codex.go
  func (c *codexClient) setTurnError(msg string) {
  	if msg == "" {
  		return
-@@ -2555,6 +2896,56 @@ func (c *codexClient) setTurnError(msg s
+@@ -2567,6 +2908,56 @@ func (c *codexClient) setTurnError(msg s
  	}
  }
  
@@ -498,7 +498,7 @@ Index: multica/server/pkg/agent/codex.go
  func (c *codexClient) getTurnError() string {
  	c.turnErrorMu.Lock()
  	defer c.turnErrorMu.Unlock()
-@@ -2704,6 +3095,140 @@ func interruptCodexTurn(c *codexClient,
+@@ -2720,6 +3111,140 @@ func interruptCodexTurn(c *codexClient,
  	}
  }
  
@@ -639,7 +639,7 @@ Index: multica/server/pkg/agent/codex.go
  func (c *codexClient) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
  	if err := ctx.Err(); err != nil {
  		return nil, err
-@@ -3032,6 +3557,15 @@ func (c *codexClient) handleNotification
+@@ -3061,6 +3586,15 @@ func (c *codexClient) handleNotification
  	if c.isNotificationFromOtherThread(params) {
  		return
  	}
@@ -655,7 +655,7 @@ Index: multica/server/pkg/agent/codex.go
  	if c.acceptNotification != nil && !c.acceptNotification(method, params) {
  		if c.onDiscardedNotification != nil {
  			c.onDiscardedNotification(method, params)
-@@ -3431,6 +3965,7 @@ func (c *codexClient) handleEvent(msg ma
+@@ -3460,6 +3994,7 @@ func (c *codexClient) handleEvent(msg ma
  	case "exec_command_begin":
  		callID, _ := msg["call_id"].(string)
  		command, _ := msg["command"].(string)
@@ -663,7 +663,7 @@ Index: multica/server/pkg/agent/codex.go
  		if c.onMessage != nil {
  			c.onMessage(Message{
  				Type:   MessageToolUse,
-@@ -3452,6 +3987,7 @@ func (c *codexClient) handleEvent(msg ma
+@@ -3481,6 +4016,7 @@ func (c *codexClient) handleEvent(msg ma
  		}
  	case "patch_apply_begin":
  		callID, _ := msg["call_id"].(string)
@@ -671,7 +671,7 @@ Index: multica/server/pkg/agent/codex.go
  		if c.onMessage != nil {
  			c.onMessage(Message{
  				Type:   MessageToolUse,
-@@ -3545,6 +4081,7 @@ func (c *codexClient) handleRawNotificat
+@@ -3574,6 +4110,7 @@ func (c *codexClient) handleRawNotificat
  				errMsg = "codex turn failed"
  			}
  			c.setTurnError(errMsg)
@@ -679,7 +679,7 @@ Index: multica/server/pkg/agent/codex.go
  		}
  
  		// Extract usage from turn/completed if present (e.g. params.turn.usage).
-@@ -3581,6 +4118,7 @@ func (c *codexClient) handleRawNotificat
+@@ -3610,6 +4147,7 @@ func (c *codexClient) handleRawNotificat
  			}
  			if !willRetry {
  				c.setTurnError(errMsg)
@@ -687,7 +687,7 @@ Index: multica/server/pkg/agent/codex.go
  			}
  		}
  
-@@ -3767,6 +4305,7 @@ func (c *codexClient) handleItemNotifica
+@@ -3807,6 +4345,7 @@ func (c *codexClient) handleItemNotifica
  
  	case method == "item/started" && itemType == "commandExecution":
  		command, _ := item["command"].(string)
@@ -695,7 +695,7 @@ Index: multica/server/pkg/agent/codex.go
  		if c.onMessage != nil {
  			c.onMessage(Message{
  				Type:   MessageToolUse,
-@@ -3788,6 +4327,7 @@ func (c *codexClient) handleItemNotifica
+@@ -3828,6 +4367,7 @@ func (c *codexClient) handleItemNotifica
  		}
  
  	case method == "item/started" && itemType == "fileChange":
@@ -703,7 +703,7 @@ Index: multica/server/pkg/agent/codex.go
  		if c.onMessage != nil {
  			c.onMessage(Message{
  				Type:   MessageToolUse,
-@@ -3810,6 +4350,7 @@ func (c *codexClient) handleItemNotifica
+@@ -3850,6 +4390,7 @@ func (c *codexClient) handleItemNotifica
  		}
  
  	case method == "item/started" && itemType == "mcpToolCall":
@@ -711,7 +711,7 @@ Index: multica/server/pkg/agent/codex.go
  		if c.onMessage != nil {
  			c.onMessage(Message{
  				Type:   MessageToolUse,
-@@ -4072,6 +4613,28 @@ func codexResultUsageMap(startTime time.
+@@ -4112,6 +4653,28 @@ func codexResultUsageMap(startTime time.
  // filename, the metadata pass preserves exact ownership instead of silently
  // dropping usage. Filtering after globbing also keeps a provider-supplied thread
  // ID out of the glob expression.
@@ -1420,7 +1420,7 @@ Index: multica/server/pkg/agent/agent.go
 ===================================================================
 --- multica.orig/server/pkg/agent/agent.go
 +++ multica/server/pkg/agent/agent.go
-@@ -337,6 +337,13 @@ type Result struct {
+@@ -362,6 +362,13 @@ type Result struct {
  	// its model catalog, and that the process tree was reaped afterwards.
  	// Like codexInitializeRetrySafe it is not part of the public contract.
  	codexStartupRefreshRetrySafe bool

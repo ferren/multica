@@ -2,10 +2,10 @@ Index: multica/server/cmd/multica/cmd_autopilot.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_autopilot.go
 +++ multica/server/cmd/multica/cmd_autopilot.go
-@@ -1015,11 +1015,25 @@ func resolveAutopilotSubscriberInputs(ct
+@@ -1186,12 +1186,26 @@ func resolveAutopilotAssigneeFromFlags(c
+ 
  // uuidRegexp matches a canonical UUID (8-4-4-4-12 hex).
  var uuidRegexp = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
- 
 +// numericIDRegexp matches a pure positive integer. The Odoo backend keys records
 +// by integer ID rather than UUID, so in that mode a bare number is a direct ID.
 +var numericIDRegexp = regexp.MustCompile(`^[0-9]+$`)
@@ -20,8 +20,9 @@ Index: multica/server/cmd/multica/cmd_autopilot.go
 +	return os.Getenv("MULTICA_BACKEND_MODE") == "odoo" && numericIDRegexp.MatchString(strings.TrimSpace(s))
 +}
 +
- // resolveAgent accepts either a UUID or an agent name (case-insensitive substring)
- // and returns the agent's UUID. Errors on no match or ambiguous match.
+ 
+ // resolveAgent passes UUIDs through and otherwise resolves workspace agents
+ // using the shared ID, exact-name, and substring matching rules.
  func resolveAgent(ctx context.Context, client *cli.APIClient, nameOrID string) (string, error) {
 -	if uuidRegexp.MatchString(nameOrID) {
 -		return nameOrID, nil
@@ -34,7 +35,7 @@ Index: multica/server/cmd/multica/cmd_id_resolver.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_id_resolver.go
 +++ multica/server/cmd/multica/cmd_id_resolver.go
-@@ -80,7 +80,7 @@ func resolveIDByPrefix(ctx context.Conte
+@@ -86,7 +86,7 @@ func resolveIDByPrefix(ctx context.Conte
  	if trimmed == "" {
  		return resolvedID{}, fmt.Errorf("%s id is required", kind)
  	}
@@ -43,7 +44,7 @@ Index: multica/server/cmd/multica/cmd_id_resolver.go
  		return resolvedID{ID: trimmed, Display: trimmed}, nil
  	}
  
-@@ -164,6 +164,12 @@ func resolveIssueRef(ctx context.Context
+@@ -180,6 +180,12 @@ func resolveIssueRef(ctx context.Context
  		id := strings.ToLower(trimmed)
  		return resolvedID{ID: id, Display: id}, nil
  	}
@@ -56,7 +57,7 @@ Index: multica/server/cmd/multica/cmd_id_resolver.go
  
  	// Detect the common "I copied a truncated UUID" case and give a
  	// tailored hint. normalizeUUIDPrefix succeeds for any input that is
-@@ -286,7 +292,7 @@ func fetchAutopilotCandidates(ctx contex
+@@ -302,7 +308,7 @@ func fetchAutopilotCandidates(ctx contex
  
  func resolveTaskRunID(ctx context.Context, client *cli.APIClient, issueID, input string) (resolvedID, error) {
  	trimmed := strings.TrimSpace(input)
@@ -65,7 +66,7 @@ Index: multica/server/cmd/multica/cmd_id_resolver.go
  		return resolvedID{ID: trimmed, Display: trimmed}, nil
  	}
  	if strings.TrimSpace(issueID) == "" {
-@@ -319,7 +325,7 @@ func fetchTaskRunCandidatesForIssue(ctx
+@@ -335,7 +341,7 @@ func fetchTaskRunCandidatesForIssue(ctx
  
  func resolveAutopilotTriggerID(ctx context.Context, client *cli.APIClient, autopilotID, input string) (resolvedID, error) {
  	trimmed := strings.TrimSpace(input)
@@ -78,7 +79,7 @@ Index: multica/server/cmd/multica/cmd_issue.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_issue.go
 +++ multica/server/cmd/multica/cmd_issue.go
-@@ -3570,7 +3570,7 @@ func resolveAssigneeByID(ctx context.Con
+@@ -3835,7 +3835,7 @@ func resolveAssigneeByID(ctx context.Con
  		return "", "", fmt.Errorf("workspace ID is required to resolve assignees; use --workspace-id or set MULTICA_WORKSPACE_ID")
  	}
  	input := strings.TrimSpace(id)

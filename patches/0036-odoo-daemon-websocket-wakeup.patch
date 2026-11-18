@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -2195,7 +2195,9 @@ func (d *Daemon) run(ctx context.Context
+@@ -2215,7 +2215,9 @@ func (d *Daemon) run(ctx context.Context
  	go d.agentDiscoveryLoop(ctx)
  
  	taskWakeups := make(chan taskWakeup, 256)
@@ -138,7 +138,7 @@ Index: multica/server/internal/daemon/odoo_wakeup.go
 +			case "ready", "task_available":
 +				// The ready frame follows server-side subscription. An immediate
 +				// REST claim recovers work queued during the connection gap.
-+				signalTaskWakeup(wakeups, "")
++				d.signalTaskWakeup(wakeups, "")
 +			case "pong":
 +			default:
 +				readDone <- fmt.Errorf("unsupported Odoo websocket message")
@@ -371,7 +371,7 @@ Index: multica/server/internal/daemon/odoo_wakeup_test.go
 +	if err == nil || refreshes.Load() != 1 {
 +		t.Fatalf("invalid token should refresh once: %v, %d", err, refreshes.Load())
 +	}
-+	if _, err := d.ClaimTasksWSFirst(context.Background(), "daemon-test", []string{"1"}, 1); err != nil {
++	if _, _, err := d.ClaimTasksWSFirst(context.Background(), "daemon-test", []string{"1"}, 1); err != nil {
 +		t.Fatalf("REST claim must remain available: %v", err)
 +	}
 +}

@@ -1,0 +1,44 @@
+Index: b/server/cmd/multica/cmd_autopilot.go
+===================================================================
+--- a/server/cmd/multica/cmd_autopilot.go
++++ b/server/cmd/multica/cmd_autopilot.go
+@@ -1165,8 +1165,8 @@ func resolveAutopilotAssigneeFromFlags(c
+ 	if squadIDSet {
+ 		id, _ := cmd.Flags().GetString("squad-id")
+ 		id = strings.TrimSpace(id)
+-		if !uuidRegexp.MatchString(id) {
+-			return "", "", true, fmt.Errorf("--squad-id must be a canonical UUID")
++		if !uuidRegexp.MatchString(id) && !(client.OdooBackend && numericIDRegexp.MatchString(id)) {
++			return "", "", true, fmt.Errorf("--squad-id must be a canonical UUID or an Odoo numeric ID")
+ 		}
+ 		return "squad", id, true, nil
+ 	}
+@@ -1186,6 +1186,7 @@ func resolveAutopilotAssigneeFromFlags(c
+ 
+ // uuidRegexp matches a canonical UUID (8-4-4-4-12 hex).
+ var uuidRegexp = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
++
+ // numericIDRegexp matches a pure positive integer. The Odoo backend keys records
+ // by integer ID rather than UUID, so in that mode a bare number is a direct ID.
+ var numericIDRegexp = regexp.MustCompile(`^[0-9]+$`)
+@@ -1200,7 +1201,6 @@ func looksLikeDirectID(s string) bool {
+ 	return os.Getenv("MULTICA_BACKEND_MODE") == "odoo" && numericIDRegexp.MatchString(strings.TrimSpace(s))
+ }
+ 
+-
+ // resolveAgent passes UUIDs through and otherwise resolves workspace agents
+ // using the shared ID, exact-name, and substring matching rules.
+ func resolveAgent(ctx context.Context, client *cli.APIClient, nameOrID string) (string, error) {
+Index: b/server/cmd/multica/cmd_view.go
+===================================================================
+--- a/server/cmd/multica/cmd_view.go
++++ b/server/cmd/multica/cmd_view.go
+@@ -99,7 +99,7 @@ func resolveIssueView(ctx context.Contex
+ 	if ref == "" {
+ 		return nil, fmt.Errorf("view is required")
+ 	}
+-	if uuidRegexp.MatchString(ref) {
++	if uuidRegexp.MatchString(ref) || (client.OdooBackend && numericIDRegexp.MatchString(ref)) {
+ 		var view map[string]any
+ 		if err := client.GetJSON(ctx, "/api/issue-views/"+url.PathEscape(ref), &view); err != nil {
+ 			return nil, err

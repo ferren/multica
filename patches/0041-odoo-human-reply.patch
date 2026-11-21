@@ -1,0 +1,191 @@
+Index: b/server/cmd/multica/cmd_issue.go
+===================================================================
+--- a/server/cmd/multica/cmd_issue.go
++++ b/server/cmd/multica/cmd_issue.go
+@@ -1016,6 +1016,8 @@ func runIssueList(cmd *cobra.Command, _
+ 	switch {
+ 	case returned == 0:
+ 		// An empty page ends a walk whatever total says.
++	case client.OdooBackend && result["has_more"] != nil:
++		hasMore, _ = result["has_more"].(bool)
+ 	case totalTrusted:
+ 		hasMore = offset+returned < int(total)
+ 	default:
+Index: b/server/cmd/multica/cmd_issue_ask_human.go
+===================================================================
+--- /dev/null
++++ b/server/cmd/multica/cmd_issue_ask_human.go
+@@ -0,0 +1,86 @@
++package main
++
++import (
++	"fmt"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/multica-ai/multica/server/internal/cli"
++	"github.com/spf13/cobra"
++)
++
++func init() {
++	cmd := &cobra.Command{
++		Use:   "ask-human <issue-id>",
++		Short: "Ask the issue requester in Odoo Discuss and wait for their reply",
++		Args:  cobra.ExactArgs(1),
++		RunE:  runIssueAskHuman,
++	}
++	cmd.Flags().String("question-file", "", "Read the question from a UTF-8 file")
++	issueCmd.AddCommand(cmd)
++}
++
++func runIssueAskHuman(cmd *cobra.Command, args []string) error {
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		return err
++	}
++	if !client.OdooBackend || client.TaskID == "" {
++		return fmt.Errorf("ask-human requires an Odoo issue execution")
++	}
++	issueID, err := strconv.ParseInt(args[0], 10, 64)
++	if err != nil || issueID <= 0 {
++		return fmt.Errorf("ask-human requires the current numeric Odoo issue ID")
++	}
++	question, _, err := resolveTextFlag(cmd, "question")
++	if err != nil {
++		return err
++	}
++	if strings.TrimSpace(question) == "" {
++		return fmt.Errorf("--question-file is required")
++	}
++	path := fmt.Sprintf("/api/issues/%d/ask-human", issueID)
++	var sent struct {
++		QuestionID int64 `json:"question_id"`
++	}
++	ctx, cancel := cli.APIContext(cmd.Context())
++	err = client.PostJSON(ctx, path, map[string]string{"question": question}, &sent)
++	cancel()
++	if err != nil {
++		return fmt.Errorf("send Discuss question: %w", err)
++	}
++	if sent.QuestionID <= 0 {
++		return fmt.Errorf("Odoo did not return a question ID")
++	}
++	path += "/" + strconv.FormatInt(sent.QuestionID, 10)
++	ticker := time.NewTicker(2 * time.Second)
++	defer ticker.Stop()
++	for {
++		select {
++		case <-cmd.Context().Done():
++			return cmd.Context().Err()
++		case <-ticker.C:
++		}
++		var reply struct {
++			State  string `json:"state"`
++			Answer string `json:"answer"`
++		}
++		ctx, cancel := cli.APIContext(cmd.Context())
++		err := client.PostJSON(ctx, path, nil, &reply)
++		cancel()
++		if err != nil {
++			return fmt.Errorf("read Discuss reply: %w", err)
++		}
++		switch reply.State {
++		case "waiting":
++			continue
++		case "answered":
++			return cli.PrintJSON(cmd.OutOrStdout(), reply)
++		case "waiting_human":
++			return cli.PrintJSON(cmd.OutOrStdout(), reply)
++		default:
++			return fmt.Errorf("unexpected Discuss reply state %q", reply.State)
++		}
++	}
++}
+Index: b/server/internal/daemon/client.go
+===================================================================
+--- a/server/internal/daemon/client.go
++++ b/server/internal/daemon/client.go
+@@ -243,6 +243,7 @@ func daemonCommonCapabilities() []string
+ 		protocol.DaemonCapabilityJoinedWakeupsV1,
+ 		protocol.DaemonCapabilityWorkflowStatusRulesV1,
+ 		protocol.DaemonCapabilityCLICommentSteerV1,
++		"odoo-human-reply-v1",
+ 	}
+ }
+ 
+@@ -757,6 +758,10 @@ func (c *Client) MarkTaskWaitingLocalDir
+ 
+ // TaskCancelAck is the payload of the daemon's cancel acknowledgement.
+ type TaskCancelAck struct {
++	HumanWaitDispatchedAt string
++	HumanWaitSessionID    string
++	HumanWaitWorkDir      string
++	SessionRolloutMissing bool
+ 	// Nil is an older daemon with no explicit cleanup acknowledgement.
+ 	ProcessCleanupConfirmed *bool
+ 	// BranchName: a cancelled worktree task has already finalized — its
+@@ -792,6 +797,12 @@ type TaskCancelAck struct {
+ // The server never overwrites already-recorded values, so replays are safe.
+ func (c *Client) AckTaskCancelled(ctx context.Context, taskID string, ack TaskCancelAck) error {
+ 	body := map[string]any{}
++	if ack.HumanWaitDispatchedAt != "" {
++		body["human_wait_dispatched_at"] = ack.HumanWaitDispatchedAt
++		body["session_id"] = ack.HumanWaitSessionID
++		body["work_dir"] = ack.HumanWaitWorkDir
++		body["session_rollout_missing"] = ack.SessionRolloutMissing
++	}
+ 	if ack.ProcessCleanupConfirmed != nil {
+ 		body["process_cleanup_confirmed"] = *ack.ProcessCleanupConfirmed
+ 	}
+Index: b/server/internal/daemon/daemon.go
+===================================================================
+--- a/server/internal/daemon/daemon.go
++++ b/server/internal/daemon/daemon.go
+@@ -6349,7 +6349,7 @@ func shouldInterruptAgent(status string,
+ 	// part of isAgentTaskTerminal — that set drives GC cleanup (gc.go), and a
+ 	// paused task's workdir/session must survive so resume can continue it. Only
+ 	// the live-agent interrupt decision widens to include "paused".
+-	return isAgentTaskTerminal(status) || status == "paused"
++	return isAgentTaskTerminal(status) || status == "paused" || status == "waiting_human"
+ }
+ 
+ // watchTaskCancellation polls the server for the task's status on the given
+@@ -6574,7 +6574,7 @@ func (d *Daemon) handleTask(ctx context.
+ 		// RetiredSessionID rides along too: a resumed session the run never
+ 		// got a single message out of must not stay this issue's resume
+ 		// pointer (MUL-8188).
+-		ack := taskCancelAcknowledgement(result, err, provider)
++		ack := d.taskInterruptionAcknowledgement(task, result, err, provider)
+ 		if ackErr := d.client.AckTaskCancelled(finalCtx, task.ID, ack); ackErr != nil {
+ 			taskLog.Warn("cancel ack failed; server sweeper will finalize", "error", ackErr)
+ 		}
+@@ -6625,7 +6625,7 @@ func (d *Daemon) handleTask(ctx context.
+ 		// completed/failed rows the complete/fail callback is the
+ 		// authoritative channel and a stale run's late ack must not touch
+ 		// them.
+-		if ackErr := d.client.AckTaskCancelled(finalCtx, task.ID, taskCancelAcknowledgement(result, nil, provider)); ackErr != nil {
++		if ackErr := d.client.AckTaskCancelled(finalCtx, task.ID, d.taskInterruptionAcknowledgement(task, result, nil, provider)); ackErr != nil {
+ 			taskLog.Warn("cancel ack failed; server sweeper will finalize", "error", ackErr)
+ 		}
+ 		return
+@@ -6712,6 +6712,19 @@ func (e *environmentSetupError) Unwrap()
+ // except taskRunFailureReason.
+ func asEnvironmentSetupFailure(err error) error { return &environmentSetupError{err: err} }
+ 
++func (d *Daemon) taskInterruptionAcknowledgement(task Task, result TaskResult, runErr error, provider string) TaskCancelAck {
++	ack := taskCancelAcknowledgement(result, runErr, provider)
++	if d.cfg.BackendMode == "odoo" {
++		ack.HumanWaitDispatchedAt = task.DispatchedAt
++		ack.HumanWaitSessionID = result.SessionID
++		ack.HumanWaitWorkDir = result.WorkDir
++		ack.SessionRolloutMissing = result.SessionRolloutMissing
++		confirmed := result.FailureReason != taskfailure.ReasonProcessCleanupUnconfirmed.String()
++		ack.ProcessCleanupConfirmed = &confirmed
++	}
++	return ack
++}
++
+ func taskCancelAcknowledgement(result TaskResult, runErr error, provider string) TaskCancelAck {
+ 	ack := TaskCancelAck{BranchName: result.BranchName, DurableWorkDir: result.DurableWorkDir, RetiredSessionID: result.RetiredSessionID}
+ 	var preserved *worktreePreservedError

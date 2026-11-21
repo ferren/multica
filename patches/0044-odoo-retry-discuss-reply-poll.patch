@@ -1,0 +1,57 @@
+--- a/server/cmd/multica/cmd_issue_ask_human.go
++++ b/server/cmd/multica/cmd_issue_ask_human.go
+@@ -1,7 +1,10 @@
+ package main
+ 
+ import (
++	"context"
++	"errors"
+ 	"fmt"
++	"net/http"
+ 	"strconv"
+ 	"strings"
+ 	"time"
+@@ -54,30 +57,35 @@ func runIssueAskHuman(cmd *cobra.Command
+ 		return fmt.Errorf("Odoo did not return a question ID")
+ 	}
+ 	path += "/" + strconv.FormatInt(sent.QuestionID, 10)
++	waitCtx, stopWaiting := context.WithTimeout(cmd.Context(), 11*time.Minute)
++	defer stopWaiting()
+ 	ticker := time.NewTicker(2 * time.Second)
+ 	defer ticker.Stop()
+ 	for {
+ 		select {
+-		case <-cmd.Context().Done():
+-			return cmd.Context().Err()
++		case <-waitCtx.Done():
++			return fmt.Errorf("wait for Discuss reply: %w", waitCtx.Err())
+ 		case <-ticker.C:
+ 		}
+ 		var reply struct {
+ 			State  string `json:"state"`
+ 			Answer string `json:"answer"`
+ 		}
+-		ctx, cancel := cli.APIContext(cmd.Context())
+-		err := client.PostJSON(ctx, path, nil, &reply)
++		ctx, cancel := cli.APIContext(waitCtx)
++		err := client.PostJSON(ctx, path, struct{}{}, &reply)
+ 		cancel()
+ 		if err != nil {
+-			return fmt.Errorf("read Discuss reply: %w", err)
++			var response *cli.HTTPError
++			if errors.As(err, &response) && response.StatusCode < 500 &&
++				response.StatusCode != http.StatusTooManyRequests {
++				return fmt.Errorf("read Discuss reply: %w", err)
++			}
++			continue
+ 		}
+ 		switch reply.State {
+ 		case "waiting":
+ 			continue
+-		case "answered":
+-			return cli.PrintJSON(cmd.OutOrStdout(), reply)
+-		case "waiting_human":
++		case "answered", "waiting_human":
+ 			return cli.PrintJSON(cmd.OutOrStdout(), reply)
+ 		default:
+ 			return fmt.Errorf("unexpected Discuss reply state %q", reply.State)

@@ -1,0 +1,10 @@
+--- a/server/internal/daemon/client.go
++++ b/server/internal/daemon/client.go
+@@ -244,6 +244,7 @@ func daemonCommonCapabilities() []string
+ 		protocol.DaemonCapabilityWorkflowStatusRulesV1,
+ 		protocol.DaemonCapabilityCLICommentSteerV1,
+ 		"odoo-human-reply-v1",
++		"odoo-chat-wakeup-v1",
+ 	}
+ }
+ 

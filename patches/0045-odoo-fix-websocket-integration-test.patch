@@ -1,0 +1,11 @@
+--- a/server/internal/daemon/odoo_wakeup_integration_test.go
++++ b/server/internal/daemon/odoo_wakeup_integration_test.go
+@@ -113,7 +113,7 @@ func TestOdooWebsocketIntegration(t *tes
+ 		return d
+ 	}
+ 	d := newDaemon(0, time.Hour)
+-	if _, err := d.ClaimTasksWSFirst(context.Background(), f[0].DaemonID, []string{f[0].RuntimeID}, 1); err != nil {
++	if _, _, err := d.ClaimTasksWSFirst(context.Background(), f[0].DaemonID, []string{f[0].RuntimeID}, 1); err != nil {
+ 		t.Fatalf("no-session REST authentication failed: %v", err)
+ 	}
+ 	starts := make(chan Task, 32)

@@ -41,3 +41,9 @@
 0038-odoo-codex-compact-failure-classification.patch
 0039-odoo-task-credential-renewal.patch
 0040-odoo-property-project-scope.patch
+0041-odoo-human-reply.patch
+0042-odoo-chat-wakeup-capability.patch
+0043-odoo-cli-record-ids.patch
+0044-odoo-retry-discuss-reply-poll.patch
+0045-odoo-fix-websocket-integration-test.patch
+0046-odoo-advertise-chat-wakeup-capability.patch

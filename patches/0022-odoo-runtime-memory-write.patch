@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/client.go
 ===================================================================
 --- multica.orig/server/internal/daemon/client.go
 +++ multica/server/internal/daemon/client.go
-@@ -1063,6 +1063,7 @@ type (
+@@ -1064,6 +1064,7 @@ type (
  	PendingLocalSkills      = protocol.DaemonHeartbeatPendingLocalSkills
  	PendingLocalSkillImport = protocol.DaemonHeartbeatPendingLocalSkillImport
  	PendingMemoryScan       = protocol.DaemonHeartbeatPendingMemoryScan
@@ -10,7 +10,7 @@ Index: multica/server/internal/daemon/client.go
  )
  
  func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*HeartbeatResponse, error) {
-@@ -1102,6 +1103,13 @@ func (c *Client) ReportMemoryScanResult(
+@@ -1104,6 +1105,13 @@ func (c *Client) ReportMemoryScanResult(
  	return c.postJSON(ctx, fmt.Sprintf("%s/daemon/runtimes/%s/memories/%s/result", c.pathPrefix, runtimeID, requestID), result, nil)
  }
  
@@ -28,7 +28,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -5005,6 +5005,11 @@ func (d *Daemon) handleHeartbeatActions(
+@@ -5043,6 +5043,11 @@ func (d *Daemon) handleHeartbeatActions(
  			go d.handleMemoryScan(ctx, *rt, *resp.PendingMemoryScan)
  		}
  	}
@@ -40,7 +40,7 @@ Index: multica/server/internal/daemon/daemon.go
  	// Prefer the batch field (new backend); fall back to singular (old backend).
  	if len(resp.PendingLocalSkillImports) > 0 {
  		if rt := d.findRuntime(runtimeID); rt != nil {
-@@ -5369,6 +5374,61 @@ func (d *Daemon) reportMemoryScanResult(
+@@ -5416,6 +5421,61 @@ func (d *Daemon) reportMemoryScanResult(
  	})
  }
  
@@ -699,7 +699,7 @@ Index: multica/server/pkg/protocol/messages.go
 ===================================================================
 --- multica.orig/server/pkg/protocol/messages.go
 +++ multica/server/pkg/protocol/messages.go
-@@ -495,6 +495,11 @@ type DaemonHeartbeatAckPayload struct {
+@@ -510,6 +510,11 @@ type DaemonHeartbeatAckPayload struct {
  	// files for a set of local directories (Odoo backend only). Daemons that
  	// predate it ignore the field, so the server just never gets a report.
  	PendingMemoryScan *DaemonHeartbeatPendingMemoryScan `json:"pending_memory_scan,omitempty"`
@@ -711,7 +711,7 @@ Index: multica/server/pkg/protocol/messages.go
  }
  
  // HeartbeatStatusRuntimeGone is the ack Status used when the runtime row no
-@@ -541,3 +546,34 @@ type DaemonHeartbeatMemoryScanPath struc
+@@ -562,3 +567,34 @@ type DaemonHeartbeatMemoryScanPath struc
  	LocalDirectoryID string `json:"local_directory_id"`
  	Path             string `json:"path"`
  }

@@ -35,7 +35,7 @@ Index: multica/server/cmd/multica/cmd_id_resolver.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_id_resolver.go
 +++ multica/server/cmd/multica/cmd_id_resolver.go
-@@ -86,7 +86,7 @@ func resolveIDByPrefix(ctx context.Conte
+@@ -95,7 +95,7 @@ func resolveIDByPrefixWithListHint(ctx c
  	if trimmed == "" {
  		return resolvedID{}, fmt.Errorf("%s id is required", kind)
  	}
@@ -44,7 +44,7 @@ Index: multica/server/cmd/multica/cmd_id_resolver.go
  		return resolvedID{ID: trimmed, Display: trimmed}, nil
  	}
  
-@@ -180,6 +180,12 @@ func resolveIssueRef(ctx context.Context
+@@ -193,6 +193,12 @@ func resolveIssueRef(ctx context.Context
  		id := strings.ToLower(trimmed)
  		return resolvedID{ID: id, Display: id}, nil
  	}
@@ -57,7 +57,7 @@ Index: multica/server/cmd/multica/cmd_id_resolver.go
  
  	// Detect the common "I copied a truncated UUID" case and give a
  	// tailored hint. normalizeUUIDPrefix succeeds for any input that is
-@@ -302,7 +308,7 @@ func fetchAutopilotCandidates(ctx contex
+@@ -315,7 +321,7 @@ func fetchAutopilotCandidates(ctx contex
  
  func resolveTaskRunID(ctx context.Context, client *cli.APIClient, issueID, input string) (resolvedID, error) {
  	trimmed := strings.TrimSpace(input)
@@ -66,7 +66,7 @@ Index: multica/server/cmd/multica/cmd_id_resolver.go
  		return resolvedID{ID: trimmed, Display: trimmed}, nil
  	}
  	if strings.TrimSpace(issueID) == "" {
-@@ -335,7 +341,7 @@ func fetchTaskRunCandidatesForIssue(ctx
+@@ -348,7 +354,7 @@ func fetchTaskRunCandidatesForIssue(ctx
  
  func resolveAutopilotTriggerID(ctx context.Context, client *cli.APIClient, autopilotID, input string) (resolvedID, error) {
  	trimmed := strings.TrimSpace(input)
@@ -79,7 +79,7 @@ Index: multica/server/cmd/multica/cmd_issue.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_issue.go
 +++ multica/server/cmd/multica/cmd_issue.go
-@@ -3835,7 +3835,7 @@ func resolveAssigneeByID(ctx context.Con
+@@ -4057,7 +4057,7 @@ func resolveAssigneeByID(ctx context.Con
  		return "", "", fmt.Errorf("workspace ID is required to resolve assignees; use --workspace-id or set MULTICA_WORKSPACE_ID")
  	}
  	input := strings.TrimSpace(id)
@@ -92,7 +92,7 @@ Index: multica/server/cmd/multica/cmd_workspace.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_workspace.go
 +++ multica/server/cmd/multica/cmd_workspace.go
-@@ -465,7 +465,7 @@ func runWorkspaceSwitch(cmd *cobra.Comma
+@@ -466,7 +466,7 @@ func runWorkspaceSwitch(cmd *cobra.Comma
  func resolveWorkspaceArg(cmd *cobra.Command, args []string) (string, error) {
  	if len(args) > 0 {
  		trimmed := strings.TrimSpace(args[0])

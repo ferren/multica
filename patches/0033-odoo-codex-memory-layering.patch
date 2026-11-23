@@ -20,7 +20,7 @@ Index: multica/server/internal/daemon/execenv/codex_home.go
  
  	// Symlink shared files (auth).
  	for _, name := range codexSymlinkedFiles {
-@@ -307,10 +318,10 @@ func prepareCodexHomeWithOpts(codexHome
+@@ -317,10 +328,10 @@ func prepareCodexHomeWithOpts(codexHome
  		logger.Warn("execenv: codex-home ensure multi-agent config failed", "error", err)
  	}
  
@@ -35,7 +35,7 @@ Index: multica/server/internal/daemon/execenv/codex_home.go
  	if err := ensureCodexMemoryConfig(filepath.Join(codexHome, "config.toml"), logger); err != nil {
  		logger.Warn("execenv: codex-home ensure memory config failed", "error", err)
  	}
-@@ -371,6 +382,60 @@ func codexSessionStoreDir(sharedHome, ke
+@@ -381,6 +392,60 @@ func codexSessionStoreDir(sharedHome, ke
  	return filepath.Join(sharedHome, codexSessionStoreRoot, key)
  }
  
@@ -642,7 +642,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv_test.go
 +++ multica/server/internal/daemon/execenv/execenv_test.go
-@@ -3402,8 +3402,8 @@ func TestPrepareCodexHomeSkipsMissingFil
+@@ -3421,8 +3421,8 @@ func TestPrepareCodexHomeSkipsMissingFil
  		t.Fatalf("prepareCodexHome failed: %v", err)
  	}
  
@@ -653,7 +653,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
  	entries, err := os.ReadDir(codexHome)
  	if err != nil {
  		t.Fatalf("failed to read codex-home: %v", err)
-@@ -3415,6 +3415,9 @@ func TestPrepareCodexHomeSkipsMissingFil
+@@ -3434,6 +3434,9 @@ func TestPrepareCodexHomeSkipsMissingFil
  	if !entryNames["sessions"] {
  		t.Error("expected sessions directory")
  	}
@@ -663,7 +663,7 @@ Index: multica/server/internal/daemon/execenv/execenv_test.go
  	if !entryNames["config.toml"] {
  		t.Error("expected config.toml (auto-generated for network access)")
  	}
-@@ -3425,7 +3428,7 @@ func TestPrepareCodexHomeSkipsMissingFil
+@@ -3444,7 +3447,7 @@ func TestPrepareCodexHomeSkipsMissingFil
  		t.Error("expected models cache config binding")
  	}
  	for name := range entryNames {

@@ -1,0 +1,149 @@
+Subject: [PATCH] Guard unsupported write preconditions in Odoo CLI mode
+
+Odoo has no comment replay store or skill revision checks yet. Preserve
+the existing write routes without promising that these prerequisites hold.
+--- a/server/cmd/multica/cmd_issue.go
++++ b/server/cmd/multica/cmd_issue.go
+@@ -2974,6 +2974,12 @@
+ 		return err
+ 	}
+ 
++	idempotencyKey, _ := cmd.Flags().GetString("idempotency-key")
++	idempotencyKey = strings.TrimSpace(idempotencyKey)
++	if client.OdooBackend && idempotencyKey != "" {
++		return fmt.Errorf("--idempotency-key requires comment replay support, which this Odoo backend does not provide")
++	}
++
+ 	// Use a longer timeout when attachments are present (file uploads can be slow).
+ 	timeout := cli.APITimeout()
+ 	steerInputs, _ := cmd.Flags().GetStringSlice("steer")
+@@ -3009,9 +3015,7 @@
+ 		return err
+ 	}
+ 	parentID, _ := cmd.Flags().GetString("parent")
+-	idempotencyKey, _ := cmd.Flags().GetString("idempotency-key")
+-	idempotencyKey = strings.TrimSpace(idempotencyKey)
+-	if idempotencyKey == "" && client.TaskID != "" {
++	if !client.OdooBackend && idempotencyKey == "" && client.TaskID != "" {
+ 		idempotencyKey = deriveCommentIdempotencyKey(client.TaskID, issueID, parentID, content, steerInputs, steerActive, pending)
+ 	}
+ 	if idempotencyKey != "" && len(pending) > 0 {
+--- /dev/null
++++ b/server/cmd/multica/cmd_odoo_write_preconditions_test.go
+@@ -0,0 +1,72 @@
++package main
++
++import (
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync/atomic"
++	"testing"
++
++	"github.com/spf13/cobra"
++)
++
++func TestOdooCommentAddDoesNotPromiseReplay(t *testing.T) {
++	var posts atomic.Int32
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch {
++		case r.Method == http.MethodGet && r.URL.Path == "/multica/agent/issues/1":
++			fmt.Fprint(w, `{"id":1,"identifier":"TASK-1"}`)
++		case r.Method == http.MethodPost && r.URL.Path == "/multica/agent/issues/1/comments":
++			posts.Add(1)
++			if r.Header.Get("Idempotency-Key") != "" {
++				t.Error("Odoo comment unexpectedly used a replay key")
++			}
++			http.Error(w, "uncertain write", http.StatusBadGateway)
++		default:
++			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++	setCLITestServerEnv(t, server.URL)
++	t.Setenv("MULTICA_BACKEND_MODE", "odoo")
++	t.Setenv("MULTICA_TASK_ID", "2")
++
++	cmd := newIssueCommentAddTestCmd()
++	if err := cmd.Flags().Set("content", "result"); err != nil {
++		t.Fatal(err)
++	}
++	stderr := captureStderr(t)
++	defer stderr.restore()
++	err := runIssueCommentAdd(cmd, []string{"1"})
++	if err == nil || !strings.Contains(err.Error(), "502") || strings.Contains(stderr.read(), "is safe") {
++		t.Fatalf("Odoo comment should report uncertain delivery without a safe replay hint: %v", err)
++	}
++	if err := cmd.Flags().Set("idempotency-key", "requested-key"); err != nil {
++		t.Fatal(err)
++	}
++	if err := runIssueCommentAdd(cmd, []string{"1"}); err == nil || !strings.Contains(err.Error(), "does not provide") {
++		t.Fatalf("unsupported replay key should fail before posting: %v", err)
++	}
++	if got := posts.Load(); got != 1 {
++		t.Fatalf("posted %d times, want one", got)
++	}
++}
++
++func TestOdooSkillBaseRevisionRejectsUnsupportedPrecondition(t *testing.T) {
++	cmd := &cobra.Command{}
++	cmd.Flags().Int64("base-revision", 0, "")
++	if _, hasBase, err := skillBaseRevision(cmd, true); err != nil || hasBase {
++		t.Fatalf("legacy Odoo skill write should work without the flag: %v", err)
++	}
++	if err := cmd.Flags().Set("base-revision", "7"); err != nil {
++		t.Fatal(err)
++	}
++	if _, _, err := skillBaseRevision(cmd, true); err == nil || !strings.Contains(err.Error(), "does not provide") {
++		t.Fatalf("unsupported precondition should fail before writing: %v", err)
++	}
++	if base, hasBase, err := skillBaseRevision(cmd, false); err != nil || !hasBase || base != 7 {
++		t.Fatalf("native precondition = %d, present=%v, err=%v", base, hasBase, err)
++	}
++}
+--- a/server/cmd/multica/cmd_skill.go
++++ b/server/cmd/multica/cmd_skill.go
+@@ -184,10 +184,13 @@
+ 
+ // skillBaseRevision reads --base-revision. Unset means "no precondition", which
+ // keeps last-write-wins for scripts written before skill revisions existed.
+-func skillBaseRevision(cmd *cobra.Command) (int64, bool, error) {
++func skillBaseRevision(cmd *cobra.Command, odooBackend bool) (int64, bool, error) {
+ 	if !cmd.Flags().Changed("base-revision") {
+ 		return 0, false, nil
+ 	}
++	if odooBackend {
++		return 0, false, fmt.Errorf("--base-revision requires skill revision checks, which this Odoo backend does not provide")
++	}
+ 	base, _ := cmd.Flags().GetInt64("base-revision")
+ 	if base <= 0 {
+ 		return 0, false, fmt.Errorf("--base-revision must be a positive revision from `multica skill get`")
+@@ -456,7 +459,7 @@
+ 	if len(body) == 0 {
+ 		return fmt.Errorf("no fields to update; use --name, --description, --content, or --config")
+ 	}
+-	base, hasBase, err := skillBaseRevision(cmd)
++	base, hasBase, err := skillBaseRevision(cmd, client.OdooBackend)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -810,7 +813,7 @@
+ 		"path":    filePath,
+ 		"content": content,
+ 	}
+-	base, hasBase, err := skillBaseRevision(cmd)
++	base, hasBase, err := skillBaseRevision(cmd, client.OdooBackend)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -842,7 +845,7 @@
+ 	}
+ 
+ 	path := "/api/skills/" + args[0] + "/files/" + args[1]
+-	base, hasBase, err := skillBaseRevision(cmd)
++	base, hasBase, err := skillBaseRevision(cmd, client.OdooBackend)
+ 	if err != nil {
+ 		return err
+ 	}

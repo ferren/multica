@@ -2,7 +2,7 @@ Index: b/server/cmd/multica/cmd_issue.go
 ===================================================================
 --- a/server/cmd/multica/cmd_issue.go
 +++ b/server/cmd/multica/cmd_issue.go
-@@ -1016,6 +1016,8 @@ func runIssueList(cmd *cobra.Command, _
+@@ -1043,6 +1043,8 @@ func runIssueList(cmd *cobra.Command, _
  	switch {
  	case returned == 0:
  		// An empty page ends a walk whatever total says.
@@ -106,15 +106,15 @@ Index: b/server/internal/daemon/client.go
 ===================================================================
 --- a/server/internal/daemon/client.go
 +++ b/server/internal/daemon/client.go
-@@ -243,6 +243,7 @@ func daemonCommonCapabilities() []string
- 		protocol.DaemonCapabilityJoinedWakeupsV1,
+@@ -244,6 +244,7 @@ func daemonCommonCapabilities() []string
  		protocol.DaemonCapabilityWorkflowStatusRulesV1,
+ 		protocol.DaemonCapabilityWorkflowStatusMapV1,
  		protocol.DaemonCapabilityCLICommentSteerV1,
 +		"odoo-human-reply-v1",
  	}
  }
  
-@@ -757,6 +758,10 @@ func (c *Client) MarkTaskWaitingLocalDir
+@@ -758,6 +759,10 @@ func (c *Client) MarkTaskWaitingLocalDir
  
  // TaskCancelAck is the payload of the daemon's cancel acknowledgement.
  type TaskCancelAck struct {
@@ -125,7 +125,7 @@ Index: b/server/internal/daemon/client.go
  	// Nil is an older daemon with no explicit cleanup acknowledgement.
  	ProcessCleanupConfirmed *bool
  	// BranchName: a cancelled worktree task has already finalized — its
-@@ -792,6 +797,12 @@ type TaskCancelAck struct {
+@@ -793,6 +798,12 @@ type TaskCancelAck struct {
  // The server never overwrites already-recorded values, so replays are safe.
  func (c *Client) AckTaskCancelled(ctx context.Context, taskID string, ack TaskCancelAck) error {
  	body := map[string]any{}
@@ -142,7 +142,7 @@ Index: b/server/internal/daemon/daemon.go
 ===================================================================
 --- a/server/internal/daemon/daemon.go
 +++ b/server/internal/daemon/daemon.go
-@@ -6349,7 +6349,7 @@ func shouldInterruptAgent(status string,
+@@ -6413,7 +6413,7 @@ func shouldInterruptAgent(status string,
  	// part of isAgentTaskTerminal — that set drives GC cleanup (gc.go), and a
  	// paused task's workdir/session must survive so resume can continue it. Only
  	// the live-agent interrupt decision widens to include "paused".
@@ -151,7 +151,7 @@ Index: b/server/internal/daemon/daemon.go
  }
  
  // watchTaskCancellation polls the server for the task's status on the given
-@@ -6574,7 +6574,7 @@ func (d *Daemon) handleTask(ctx context.
+@@ -6638,7 +6638,7 @@ func (d *Daemon) handleTask(ctx context.
  		// RetiredSessionID rides along too: a resumed session the run never
  		// got a single message out of must not stay this issue's resume
  		// pointer (MUL-8188).
@@ -160,7 +160,7 @@ Index: b/server/internal/daemon/daemon.go
  		if ackErr := d.client.AckTaskCancelled(finalCtx, task.ID, ack); ackErr != nil {
  			taskLog.Warn("cancel ack failed; server sweeper will finalize", "error", ackErr)
  		}
-@@ -6625,7 +6625,7 @@ func (d *Daemon) handleTask(ctx context.
+@@ -6689,7 +6689,7 @@ func (d *Daemon) handleTask(ctx context.
  		// completed/failed rows the complete/fail callback is the
  		// authoritative channel and a stale run's late ack must not touch
  		// them.
@@ -169,7 +169,7 @@ Index: b/server/internal/daemon/daemon.go
  			taskLog.Warn("cancel ack failed; server sweeper will finalize", "error", ackErr)
  		}
  		return
-@@ -6712,6 +6712,19 @@ func (e *environmentSetupError) Unwrap()
+@@ -6776,6 +6776,19 @@ func (e *environmentSetupError) Unwrap()
  // except taskRunFailureReason.
  func asEnvironmentSetupFailure(err error) error { return &environmentSetupError{err: err} }
  

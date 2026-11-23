@@ -47,3 +47,4 @@
 0044-odoo-retry-discuss-reply-poll.patch
 0045-odoo-fix-websocket-integration-test.patch
 0046-odoo-advertise-chat-wakeup-capability.patch
+0047-odoo-guard-unavailable-write-preconditions.patch

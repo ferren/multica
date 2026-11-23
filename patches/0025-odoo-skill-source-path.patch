@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -11681,6 +11681,7 @@ func convertSkillsForEnv(skills []SkillD
+@@ -11813,6 +11813,7 @@ func convertSkillsForEnv(skills []SkillD
  			Name:        s.Name,
  			Description: s.Description,
  			Content:     s.Content,
@@ -37,7 +37,7 @@ Index: multica/server/internal/daemon/execenv/context.go
  				if err != nil {
  					return nil, fmt.Errorf("write skill files: %w", err)
  				}
-@@ -962,6 +969,63 @@ func sanitizeSkillName(name string) stri
+@@ -962,6 +969,58 @@ func sanitizeSkillName(name string) stri
  // overwrite user bytes (the bug PR #3444 review caught) or skip the
  // skill entirely (which would silently drop a Multica skill the agent
  // expects to see).
@@ -93,11 +93,6 @@ Index: multica/server/internal/daemon/execenv/context.go
 +	return p
 +}
 +
-+func dirExists(p string) bool {
-+	info, err := os.Stat(p)
-+	return err == nil && info.IsDir()
-+}
-+
  func writeSkillFiles(skillsDir string, skills []SkillContextForEnv, manifest *sidecarManifest) error {
  	return writeSkillFilesTracked(skillsDir, skills, manifest, nil)
  }
@@ -105,7 +100,7 @@ Index: multica/server/internal/daemon/execenv/execenv.go
 ===================================================================
 --- multica.orig/server/internal/daemon/execenv/execenv.go
 +++ multica/server/internal/daemon/execenv/execenv.go
-@@ -300,6 +300,11 @@ type SkillContextForEnv struct {
+@@ -308,6 +308,11 @@ type SkillContextForEnv struct {
  	Description string
  	Content     string
  	Files       []SkillFileContextForEnv
@@ -121,7 +116,7 @@ Index: multica/server/internal/daemon/types.go
 ===================================================================
 --- multica.orig/server/internal/daemon/types.go
 +++ multica/server/internal/daemon/types.go
-@@ -296,6 +296,13 @@ type SkillData struct {
+@@ -300,6 +300,13 @@ type SkillData struct {
  	SizeBytes   int64           `json:"size_bytes,omitempty"`
  	Content     string          `json:"content"`
  	Files       []SkillFileData `json:"files,omitempty"`

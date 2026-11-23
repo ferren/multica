@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/local_directory.go
 ===================================================================
 --- multica.orig/server/internal/daemon/local_directory.go
 +++ multica/server/internal/daemon/local_directory.go
-@@ -350,14 +350,17 @@ func isSameOrUnderPath(target, base stri
+@@ -358,14 +358,17 @@ func isSameOrUnderPath(target, base stri
  	if base == "" {
  		return false
  	}
@@ -28,7 +28,7 @@ Index: multica/server/internal/daemon/local_directory_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/local_directory_test.go
 +++ multica/server/internal/daemon/local_directory_test.go
-@@ -428,6 +428,30 @@ func TestIsSameOrUnderPath(t *testing.T)
+@@ -431,6 +431,30 @@ func TestIsSameOrUnderPath(t *testing.T)
  	}
  }
  

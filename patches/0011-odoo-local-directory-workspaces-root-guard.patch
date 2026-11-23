@@ -2,20 +2,29 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -6715,7 +6715,7 @@ func (d *Daemon) acquireLocalDirectoryLo
+@@ -6791,7 +6791,7 @@ func (d *Daemon) acquireLocalDirectoryLo
+ 			taskLog.Error("fail task after local_directory validation error", "error", failErr)
  		}
- 		return nil, true
  	}
 -	if err := validateLocalPath(assignment.AbsPath); err != nil {
 +	if err := validateLocalPath(assignment.AbsPath, d.cfg.WorkspacesRoot); err != nil {
- 		taskLog.Error("local_directory: path validation failed", "error", err)
- 		if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
- 			kind:          terminalTaskReportFail,
+ 		reportInvalidPath(err)
+ 		return nil, true
+ 	}
+@@ -6968,7 +6968,7 @@ func (d *Daemon) acquireLocalDirectoryLo
+ 	// The linked directory can move while this task is queued. Check again
+ 	// before execution setup creates context files at the old path.
+ 	if waitCounted {
+-		if err := validateLocalPath(assignment.AbsPath); err != nil {
++		if err := validateLocalPath(assignment.AbsPath, d.cfg.WorkspacesRoot); err != nil {
+ 			release()
+ 			reportInvalidPath(err)
+ 			return nil, true
 Index: multica/server/internal/daemon/local_directory.go
 ===================================================================
 --- multica.orig/server/internal/daemon/local_directory.go
 +++ multica/server/internal/daemon/local_directory.go
-@@ -254,13 +254,19 @@ func resolveRealPath(absPath string) (st
+@@ -262,13 +262,19 @@ var errLocalDirectoryMissing = errors.Ne
  //     this a symlink like /Users/me/proj/home -> /Users/me would slip the
  //     literal-equality check above while still routing every daemon write
  //     into $HOME;
@@ -36,7 +45,7 @@ Index: multica/server/internal/daemon/local_directory.go
  	if absPath == "" {
  		return errors.New("local_directory: local_path is empty")
  	}
-@@ -306,12 +312,54 @@ func validateLocalPath(absPath string) e
+@@ -314,12 +320,54 @@ func validateLocalPath(absPath string) e
  		}
  		return fmt.Errorf("local_directory: %s (canonical path %q)", reason, absPath)
  	}
@@ -95,7 +104,7 @@ Index: multica/server/internal/daemon/local_directory_test.go
 ===================================================================
 --- multica.orig/server/internal/daemon/local_directory_test.go
 +++ multica/server/internal/daemon/local_directory_test.go
-@@ -223,26 +223,26 @@ func TestValidateLocalPath(t *testing.T)
+@@ -226,26 +226,26 @@ func TestValidateLocalPath(t *testing.T)
  	dir := t.TempDir()
  
  	t.Run("accepts a writable directory", func(t *testing.T) {
@@ -126,7 +135,7 @@ Index: multica/server/internal/daemon/local_directory_test.go
  				t.Errorf("expected error for %q", banned)
  			}
  		}
-@@ -253,14 +253,14 @@ func TestValidateLocalPath(t *testing.T)
+@@ -256,14 +256,14 @@ func TestValidateLocalPath(t *testing.T)
  		if err != nil || home == "" {
  			t.Skip("no home dir")
  		}
@@ -143,7 +152,7 @@ Index: multica/server/internal/daemon/local_directory_test.go
  			t.Errorf("expected error")
  		}
  	})
-@@ -270,7 +270,7 @@ func TestValidateLocalPath(t *testing.T)
+@@ -273,7 +273,7 @@ func TestValidateLocalPath(t *testing.T)
  		if err := os.WriteFile(f, []byte("hi"), 0o644); err != nil {
  			t.Fatalf("write: %v", err)
  		}
@@ -152,7 +161,7 @@ Index: multica/server/internal/daemon/local_directory_test.go
  			t.Errorf("expected error")
  		}
  	})
-@@ -285,7 +285,7 @@ func TestValidateLocalPath(t *testing.T)
+@@ -288,7 +288,7 @@ func TestValidateLocalPath(t *testing.T)
  			t.Fatalf("mkdir: %v", err)
  		}
  		t.Cleanup(func() { _ = os.Chmod(ro, 0o755) })
@@ -161,7 +170,7 @@ Index: multica/server/internal/daemon/local_directory_test.go
  			t.Errorf("expected error for read-only directory")
  		}
  	})
-@@ -301,7 +301,7 @@ func TestValidateLocalPath(t *testing.T)
+@@ -304,7 +304,7 @@ func TestValidateLocalPath(t *testing.T)
  		}
  		// The literal cleaned path is dir/home-link, which is NOT in the
  		// blacklist. Without the realpath check this used to pass.
@@ -170,7 +179,7 @@ Index: multica/server/internal/daemon/local_directory_test.go
  		if err == nil {
  			t.Fatal("expected error for symlink pointing at $HOME")
  		}
-@@ -319,7 +319,7 @@ func TestValidateLocalPath(t *testing.T)
+@@ -322,7 +322,7 @@ func TestValidateLocalPath(t *testing.T)
  		if err := os.Symlink(target, link); err != nil {
  			t.Fatalf("symlink: %v", err)
  		}
@@ -179,7 +188,7 @@ Index: multica/server/internal/daemon/local_directory_test.go
  		if err == nil {
  			t.Fatal("expected error for symlink pointing at a system root")
  		}
-@@ -337,7 +337,7 @@ func TestValidateLocalPath(t *testing.T)
+@@ -340,7 +340,7 @@ func TestValidateLocalPath(t *testing.T)
  		if err := os.Symlink(target, link); err != nil {
  			t.Fatalf("symlink: %v", err)
  		}
@@ -188,7 +197,7 @@ Index: multica/server/internal/daemon/local_directory_test.go
  			t.Errorf("symlink to a regular directory should pass, got %v", err)
  		}
  	})
-@@ -357,7 +357,7 @@ func TestValidateLocalPath(t *testing.T)
+@@ -360,7 +360,7 @@ func TestValidateLocalPath(t *testing.T)
  				t.Logf("skipping %q: %v", p, statErr)
  				continue
  			}
@@ -197,7 +206,7 @@ Index: multica/server/internal/daemon/local_directory_test.go
  			if err == nil {
  				t.Errorf("expected error for canonical %q", p)
  				continue
-@@ -368,6 +368,64 @@ func TestValidateLocalPath(t *testing.T)
+@@ -371,6 +371,64 @@ func TestValidateLocalPath(t *testing.T)
  		}
  	})
  

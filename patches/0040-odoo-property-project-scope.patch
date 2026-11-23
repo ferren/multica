@@ -15,7 +15,7 @@ Index: multica/server/cmd/multica/cmd_property.go
  	propertyCreateCmd.Flags().String("description", "", "Property description")
  	propertyCreateCmd.Flags().String("icon", "", "Property icon key from the Web picker (for example, flag, tag, or shield)")
  	propertyCreateCmd.Flags().StringArray("option", nil, `Select option as "Name" or "Name:#rrggbb" (repeatable; select types only)`)
-@@ -226,11 +227,20 @@ func resolvePropertyRef(properties []pro
+@@ -237,11 +238,20 @@ func resolvePropertyRef(properties []pro
  		}
  	}
  	lower := strings.ToLower(strings.TrimSpace(ref))
@@ -37,7 +37,7 @@ Index: multica/server/cmd/multica/cmd_property.go
  	names := make([]string, len(properties))
  	for i, p := range properties {
  		names[i] = p.Name
-@@ -359,6 +369,17 @@ func runPropertyCreate(cmd *cobra.Comman
+@@ -370,6 +380,17 @@ func runPropertyCreate(cmd *cobra.Comman
  	ctx, cancel := cli.APIContext(context.Background())
  	defer cancel()
  

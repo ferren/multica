@@ -2,7 +2,7 @@ Index: multica/server/internal/daemon/client.go
 ===================================================================
 --- multica.orig/server/internal/daemon/client.go
 +++ multica/server/internal/daemon/client.go
-@@ -1160,10 +1160,11 @@ func (c *Client) ListWorkspaces(ctx cont
+@@ -1162,10 +1162,11 @@ func (c *Client) ListWorkspaces(ctx cont
  	if err != nil {
  		return nil, err
  	}

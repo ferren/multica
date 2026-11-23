@@ -2,7 +2,7 @@ Index: multica/server/cmd/multica/cmd_project.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_project.go
 +++ multica/server/cmd/multica/cmd_project.go
-@@ -860,6 +860,10 @@ func runProjectResourceList(cmd *cobra.C
+@@ -908,6 +908,10 @@ func runProjectResourceList(cmd *cobra.C
  }
  
  func runProjectResourceAdd(cmd *cobra.Command, args []string) error {
@@ -13,7 +13,7 @@ Index: multica/server/cmd/multica/cmd_project.go
  	resourceType, _ := cmd.Flags().GetString("type")
  	resourceType = strings.TrimSpace(resourceType)
  	if resourceType == "" {
-@@ -911,11 +915,6 @@ func runProjectResourceAdd(cmd *cobra.Co
+@@ -959,11 +963,6 @@ func runProjectResourceAdd(cmd *cobra.Co
  		body["label"] = label
  	}
  
@@ -29,7 +29,7 @@ Index: multica/server/internal/cli/client.go
 ===================================================================
 --- multica.orig/server/internal/cli/client.go
 +++ multica/server/internal/cli/client.go
-@@ -804,7 +804,9 @@ func (c *APIClient) UploadPrivatePlugin(
+@@ -845,7 +845,9 @@ func (c *APIClient) UploadPrivatePlugin(
  		return fmt.Errorf("close Plugin artifact upload: %w", err)
  	}
  
@@ -44,7 +44,7 @@ Index: multica/server/cmd/multica/cmd_skill_test.go
 ===================================================================
 --- multica.orig/server/cmd/multica/cmd_skill_test.go
 +++ multica/server/cmd/multica/cmd_skill_test.go
-@@ -637,6 +637,40 @@ func TestRunSkillRefreshPostsToRefreshEn
+@@ -639,6 +639,40 @@ func TestRunSkillRefreshPostsToRefreshEn
  	}
  }
  
@@ -89,7 +89,7 @@ Index: multica/server/internal/daemon/client.go
 ===================================================================
 --- multica.orig/server/internal/daemon/client.go
 +++ multica/server/internal/daemon/client.go
-@@ -380,19 +380,19 @@ func (c *Client) OdooExpiresIn() int {
+@@ -381,19 +381,19 @@ func (c *Client) OdooExpiresIn() int {
  }
  
  // MintAgentToken exchanges the daemon's shared Odoo credentials for a fresh
@@ -154,7 +154,7 @@ Index: multica/server/internal/daemon/daemon.go
 ===================================================================
 --- multica.orig/server/internal/daemon/daemon.go
 +++ multica/server/internal/daemon/daemon.go
-@@ -8701,18 +8701,18 @@ func (d *Daemon) runTask(ctx context.Con
+@@ -8778,18 +8778,18 @@ func (d *Daemon) runTask(ctx context.Con
  	// Repos are passed as metadata only — the agent checks them out on demand
  	// via `multica repo checkout <url>`.
  	accessToken, apiKey := d.client.OdooCredentials()

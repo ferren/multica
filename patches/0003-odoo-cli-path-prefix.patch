@@ -42,7 +42,7 @@ Index: multica/server/internal/cli/client.go
  }
  
  // clientCapabilities is the X-Client-Capabilities value every CLI request
-@@ -266,7 +285,7 @@ func (c *APIClient) setHeaders(req *http
+@@ -269,7 +288,7 @@ func (c *APIClient) setHeaders(req *http
  // given endpoint and degrade gracefully). The error string format
  // ("GET <path> returned <code>: <body>") is preserved by HTTPError.Error().
  func (c *APIClient) GetJSON(ctx context.Context, path string, out any) error {
@@ -51,7 +51,7 @@ Index: multica/server/internal/cli/client.go
  	if err != nil {
  		return err
  	}
-@@ -292,7 +311,7 @@ func (c *APIClient) GetJSON(ctx context.
+@@ -295,7 +314,7 @@ func (c *APIClient) GetJSON(ctx context.
  // returns the response headers. Useful when callers need header values like
  // X-Total-Count for pagination.
  func (c *APIClient) GetJSONWithHeaders(ctx context.Context, path string, out any) (http.Header, error) {
@@ -60,7 +60,16 @@ Index: multica/server/internal/cli/client.go
  	if err != nil {
  		return nil, err
  	}
-@@ -334,7 +353,7 @@ func (c *APIClient) DeleteJSONWithConfli
+@@ -322,7 +341,7 @@ func (c *APIClient) GetJSONWithHeaders(c
+ // GetJSONWithRequestHeaders performs a GET request with extra request headers
+ // (for example Idempotency-Key) and returns the response headers on success.
+ func (c *APIClient) GetJSONWithRequestHeaders(ctx context.Context, path string, headers map[string]string, out any) (http.Header, error) {
+-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url(path), nil)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -365,7 +384,7 @@ func (c *APIClient) DeleteJSONWithConfli
  }
  
  func (c *APIClient) deleteJSON(ctx context.Context, path string, out any, onConflict func(io.Reader) error) error {
@@ -69,7 +78,7 @@ Index: multica/server/internal/cli/client.go
  	if err != nil {
  		return err
  	}
-@@ -365,7 +384,7 @@ func (c *APIClient) DeleteJSONWithBody(c
+@@ -396,7 +415,7 @@ func (c *APIClient) DeleteJSONWithBody(c
  	if err != nil {
  		return err
  	}
@@ -78,16 +87,16 @@ Index: multica/server/internal/cli/client.go
  	if err != nil {
  		return err
  	}
-@@ -392,7 +411,7 @@ func (c *APIClient) PostJSON(ctx context
- 		return err
+@@ -430,7 +449,7 @@ func (c *APIClient) PostJSONWithHeaders(
+ 		return nil, err
  	}
  
 -	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(data))
 +	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(path), bytes.NewReader(data))
  	if err != nil {
- 		return err
+ 		return nil, err
  	}
-@@ -422,7 +441,7 @@ func (c *APIClient) PutJSON(ctx context.
+@@ -463,7 +482,7 @@ func (c *APIClient) PutJSON(ctx context.
  		return err
  	}
  
@@ -96,7 +105,7 @@ Index: multica/server/internal/cli/client.go
  	if err != nil {
  		return err
  	}
-@@ -452,7 +471,7 @@ func (c *APIClient) PatchJSON(ctx contex
+@@ -493,7 +512,7 @@ func (c *APIClient) PatchJSON(ctx contex
  		return err
  	}
  
@@ -105,7 +114,7 @@ Index: multica/server/internal/cli/client.go
  	if err != nil {
  		return err
  	}
-@@ -526,7 +545,7 @@ func (c *APIClient) UploadIssueAttachmen
+@@ -567,7 +586,7 @@ func (c *APIClient) UploadIssueAttachmen
  		return AttachmentResponse{}, fmt.Errorf("close multipart writer: %w", err)
  	}
  
@@ -114,7 +123,7 @@ Index: multica/server/internal/cli/client.go
  	if err != nil {
  		return AttachmentResponse{}, err
  	}
-@@ -591,7 +610,7 @@ func (c *APIClient) UploadChatAttachment
+@@ -632,7 +651,7 @@ func (c *APIClient) UploadChatAttachment
  		return AttachmentResponse{}, fmt.Errorf("close multipart writer: %w", err)
  	}
  
@@ -123,7 +132,7 @@ Index: multica/server/internal/cli/client.go
  	if err != nil {
  		return AttachmentResponse{}, err
  	}
-@@ -649,7 +668,7 @@ func (c *APIClient) UploadFileWithURL(ct
+@@ -690,7 +709,7 @@ func (c *APIClient) UploadFileWithURL(ct
  		return "", "", fmt.Errorf("close multipart writer: %w", err)
  	}
  

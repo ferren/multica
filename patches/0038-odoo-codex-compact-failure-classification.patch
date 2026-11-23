@@ -2,15 +2,7 @@ Index: multica/server/pkg/agent/codex.go
 ===================================================================
 --- multica.orig/server/pkg/agent/codex.go
 +++ multica/server/pkg/agent/codex.go
-@@ -117,6 +117,7 @@ const (
- // the opencodeTerminateGraceNanos hook.
- var codexGracefulShutdownTimeoutNanos atomic.Int64
- var codexProcessWaitDelayNanos atomic.Int64
-+
- // codexCompactWaitNanos optionally overrides defaultCodexCompactWaitTimeout
- // for tests, in nanoseconds. Zero or negative keeps the production default.
- // Compaction-recovery tests shrink it so a "compaction never completes"
-@@ -322,10 +323,10 @@ func CodexRetiredCompactionError(errText
+@@ -322,10 +322,10 @@ func CodexRetiredCompactionError(errText
  }
  
  // codexContextCapacityInfoValue is the wire value of the typed
@@ -24,7 +16,7 @@ Index: multica/server/pkg/agent/codex.go
  
  // codexContextCapacityMessageMarker is the distinctive fixed prose of the
  // same failure when only the message string is available (older Codex, or a
-@@ -348,13 +349,13 @@ const codexContextCapacityMessageMarker
+@@ -348,13 +348,13 @@ const codexContextCapacityMessageMarker
  // limits, usage limits and session budgets stay out on purpose: compaction
  // shrinks history, it does not refill quota.
  func codexContextCapacityFailure(info, message string) bool {
@@ -41,7 +33,7 @@ Index: multica/server/pkg/agent/codex.go
  // text, which is persisted in agent_task_queue.error and re-scanned by the
  // resume guards (CodexResumeOverflowError, CodexRetiredCompactionError) and
  // taskfailure.Classify indefinitely. Like codexRetiredCompactionHint in
-@@ -380,6 +381,14 @@ func codexCompactTimedOutDiagnostic(deta
+@@ -380,6 +380,14 @@ func codexCompactTimedOutDiagnostic(deta
  	return msg + ". The conversation is kept; the next run retries compaction."
  }
  
@@ -56,7 +48,7 @@ Index: multica/server/pkg/agent/codex.go
  func codexCompactFailedDiagnostic(detail string) string {
  	msg := " [multica] codex compacted this conversation and the compaction itself failed"
  	if d := strings.TrimSpace(detail); d != "" {
-@@ -1943,7 +1952,7 @@ func (b *codexBackend) executeOnce(ctx c
+@@ -1783,7 +1791,7 @@ func (b *codexBackend) executeOnce(ctx c
  		//     carries its own diagnostics.
  		//   - runCtx alive: same rule enforced before the request, not only
  		//     inside its wait.
@@ -65,7 +57,7 @@ Index: multica/server/pkg/agent/codex.go
  		//     failure (or its exact fixed message) qualifies. Rate limits,
  		//     usage limits and provider 5xx stay out — compaction cures none
  		//     of them.
-@@ -1983,11 +1992,16 @@ func (b *codexBackend) executeOnce(ctx c
+@@ -1824,11 +1832,16 @@ func (b *codexBackend) executeOnce(ctx c
  				finalError += codexCompactTimedOutDiagnostic(compact.detail, codexCompactWaitTimeout())
  				compactResumeRejectedTransient = true
  			case codexCompactFailedTurn:
@@ -87,16 +79,7 @@ Index: multica/server/pkg/agent/codex.go
  			case codexCompactAborted, codexCompactPending:
  				// Cancellation or process exit won. The result goes out under
  				// the caller's cancellation semantics unchanged — an async
-@@ -2105,7 +2119,7 @@ func (b *codexBackend) executeOnce(ctx c
- 			SessionID:                    threadID,
- 			DurationMs:                   duration.Milliseconds(),
- 			Usage:                        usageMap,
--			ResumeRejected:              compactResumeRejected,
-+			ResumeRejected:               compactResumeRejected,
- 			ResumeRejectedTransient:      compactResumeRejectedTransient,
- 			codexStartupRefreshRetrySafe: startupRefreshRetrySafe,
- 			codexContextCompactRetrySafe: compactRetrySafe,
-@@ -2669,7 +2683,7 @@ type codexClient struct {
+@@ -2529,7 +2542,7 @@ type codexClient struct {
  	turnErrorMu sync.Mutex
  	turnError   string // captured from turn/completed status=failed or terminal error notifications
  	// turnErrorInfo is the typed codexErrorInfo value (e.g.
@@ -105,7 +88,7 @@ Index: multica/server/pkg/agent/codex.go
  	// notification carried one. Empty means the failure was untyped.
  	turnErrorInfo string
  	// toolUseObserved records whether this client emitted any tool-use
-@@ -2765,12 +2779,11 @@ func (g *codexTurnNotificationGate) acce
+@@ -2625,12 +2638,11 @@ func (g *codexTurnNotificationGate) acce
  //     unknown method on an old runtime, a compaction config fault, a thread
  //     that refuses direct input. Compaction never ran, so the conversation is
  //     intact: recoverable by fixing the config, never by retrying now.
@@ -123,7 +106,7 @@ Index: multica/server/pkg/agent/codex.go
  type codexCompactOutcomeKind int
  
  const (
-@@ -2783,8 +2796,9 @@ const (
+@@ -2643,8 +2655,9 @@ const (
  )
  
  type codexCompactResult struct {
@@ -135,7 +118,7 @@ Index: multica/server/pkg/agent/codex.go
  }
  
  // codexCompactWatch observes the notifications one async compaction emits,
-@@ -2844,7 +2858,8 @@ func (w *codexCompactWatch) observe(meth
+@@ -2704,7 +2717,8 @@ func (w *codexCompactWatch) observe(meth
  		switch status {
  		case "failed":
  			detail := extractNestedString(params, "turn", "error", "message")
@@ -145,7 +128,7 @@ Index: multica/server/pkg/agent/codex.go
  		case "completed":
  			// The compact turn finished cleanly. Normally the
  			// contextCompaction item has already resolved the watch; taking
-@@ -2862,7 +2877,8 @@ func (w *codexCompactWatch) observe(meth
+@@ -2722,7 +2736,8 @@ func (w *codexCompactWatch) observe(meth
  		if detail == "" {
  			detail = extractNestedString(params, "message")
  		}

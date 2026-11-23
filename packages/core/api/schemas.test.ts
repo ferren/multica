@@ -42,17 +42,18 @@ import {
   EMPTY_CREATE_FEEDBACK_RESPONSE,
   EMPTY_INBOX_ITEMS,
   EMPTY_INBOX_UNREAD_SUMMARY,
+  EMPTY_SNOOZED_INBOX,
   EMPTY_SEARCH_PROJECTS_RESPONSE,
   EMPTY_USER,
   InboxItemListSchema,
   InboxUnreadSummarySchema,
+  SnoozedInboxListSchema,
   IssueTriggerPreviewSchema,
   ListIssuesResponseSchema,
   ListPropertiesResponseSchema,
   MALFORMED_RUNTIME_MODEL_LIST_REQUEST,
   RuntimeModelListRequestSchema,
   SearchProjectsResponseSchema,
-  RuntimeHourlyActivityListSchema,
   RuntimeUsageByAgentListSchema,
   RuntimeUsageByHourListSchema,
   RuntimeUsageListSchema,
@@ -1286,7 +1287,6 @@ describe("dashboard + runtime usage schema drift", () => {
 
   it("coerces missing fields on every runtime usage schema", () => {
     expect(RuntimeUsageListSchema.parse([{ date: "2026-05-19" }])[0]?.input_tokens).toBe(0);
-    expect(RuntimeHourlyActivityListSchema.parse([{ hour: 9 }])[0]?.count).toBe(0);
     expect(RuntimeUsageByAgentListSchema.parse([{ model: "x" }])[0]?.agent_id).toBe("");
     expect(RuntimeUsageByHourListSchema.parse([{ hour: 9 }])[0]?.model).toBe("");
   });
@@ -1525,6 +1525,28 @@ describe("InboxUnreadSummarySchema", () => {
   });
 });
 
+describe("SnoozedInboxListSchema", () => {
+  const ENDPOINT = { endpoint: "GET /api/inbox/snoozed" };
+  const row = (overrides: Record<string, unknown> = {}) => ({
+    issue_id: "issue-1",
+    item_id: "inbox-1",
+    snoozed_until: "2026-06-16T08:00:00Z",
+    snoozed_at: "2026-06-15T08:00:00Z",
+    updates: 0,
+    ...overrides,
+  });
+
+  it("keeps a row whose issue identifier is missing or unusable", () => {
+    const parsed = parseWithFallback(
+      [row(), row({ issue_id: "issue-2", issue_identifier: 7 }), row({ issue_id: "issue-3", issue_identifier: "MUL-3" })],
+      SnoozedInboxListSchema,
+      EMPTY_SNOOZED_INBOX,
+      ENDPOINT,
+    );
+    expect(parsed.map((item) => item.issue_identifier)).toEqual([undefined, null, "MUL-3"]);
+  });
+});
+
 describe("InboxItemListSchema", () => {
   const ENDPOINT = { endpoint: "GET /api/inbox/archived" };
 
@@ -1584,6 +1606,16 @@ describe("InboxItemListSchema", () => {
     expect(
       parseWithFallback([withoutOptionals], InboxItemListSchema, EMPTY_INBOX_ITEMS, ENDPOINT),
     ).toHaveLength(1);
+  });
+
+  it("keeps the row when the issue identifier is unusable", () => {
+    const parsed = parseWithFallback(
+      [row({ issue_identifier: 7 }), row({ id: "inbox-2", issue_identifier: "MUL-7" })],
+      InboxItemListSchema,
+      EMPTY_INBOX_ITEMS,
+      ENDPOINT,
+    );
+    expect(parsed.map((item) => item.issue_identifier)).toEqual([null, "MUL-7"]);
   });
 
   it("returns the empty fallback when an issue projection is wrong-typed", () => {

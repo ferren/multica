@@ -539,8 +539,10 @@ WHERE id = $1 AND issue_id IS NULL
 -- Claims fence on agent.runtime_id = task.runtime_id, so a retry stamped with a
 -- runtime the agent moved off while the parent ran would be claimable by neither
 -- daemon (#10717); UpdateAgent re-stamps only rows queued at switch time. An
--- unbound agent keeps the parent's runtime. Resume needs no change here: claim
--- resumes a session only on the runtime that recorded it.
+-- unbound agent keeps the parent's runtime. A retry that moves leaves the
+-- parent's session behind: it belongs to the runtime that recorded it, and an
+-- attempt that ends before reporting its own would file it under the new one,
+-- where the next claim would be told to resume it.
 --
 -- Keep work_dir for every retry, but clear resume context for unsafe sessions.
 -- Keep failure predicates aligned with resumeUnsafeFailureReason and resume lookups.
@@ -569,7 +571,9 @@ SELECT
     CASE WHEN sqlc.narg(fire_at)::timestamptz IS NOT NULL THEN 'deferred' ELSE 'queued' END,
     CASE WHEN p.chat_session_id IS NOT NULL THEN GREATEST(p.priority, 3) ELSE p.priority END,
     p.trigger_comment_id, p.coalesced_comment_ids, p.trigger_summary, p.context,
-    CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity' THEN NULL ELSE p.session_id END,
+    CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity'
+              OR COALESCE(a.runtime_id, p.runtime_id) IS DISTINCT FROM p.runtime_id THEN NULL
+         ELSE p.session_id END,
     p.work_dir,
     p.attempt + 1, COALESCE(sqlc.narg(max_attempts)::int, p.max_attempts), p.id,
     p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity',
@@ -1879,6 +1883,9 @@ SET coalesced_comment_ids = (
         FROM unnest(array_append(coalesced_comment_ids, trigger_comment_id)) AS e
         WHERE e IS NOT NULL AND e <> @new_trigger_comment_id::uuid
     ),
+    is_leader_task = CASE WHEN sqlc.narg('new_leader_squad_id')::uuid IS NOT NULL
+        THEN TRUE ELSE is_leader_task END,
+    squad_id = COALESCE(sqlc.narg('new_leader_squad_id')::uuid, squad_id),
     trigger_comment_id = @new_trigger_comment_id::uuid,
     trigger_summary = COALESCE(sqlc.narg('new_trigger_summary'), trigger_summary),
     -- Re-attribution is ATOMIC (MUL-4302): folding a newly-arrived comment moves the
@@ -1901,6 +1908,13 @@ WHERE id = (
     SELECT t.id FROM agent_task_queue t
     WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = @issue_id
       AND t.agent_id = @agent_id
+      -- An unclaimed generic turn can become a leader turn. Never overwrite
+      -- a worker obligation or a different squad's leader context.
+      AND (
+          sqlc.narg('new_leader_squad_id')::uuid IS NULL
+          OR (t.is_leader_task AND t.squad_id = sqlc.narg('new_leader_squad_id')::uuid)
+          OR (NOT t.is_leader_task AND t.squad_id IS NULL)
+      )
       AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@new_trigger_comment_id::uuid)
       AND (
           t.status = 'queued'
@@ -1917,6 +1931,7 @@ WHERE id = (
       )
     ORDER BY t.created_at DESC
     LIMIT 1
+    FOR UPDATE OF t
 )
 RETURNING *;
 
@@ -2628,6 +2643,8 @@ WHERE a.workspace_id = $1;
 -- (NULL = workspace); when set it narrows issue work to the direct children
 -- of that issue, so an issue detail's sub-issue header reads the same
 -- projection as the Issues list header instead of deriving its own count.
+-- project_id is optional (NULL = workspace); when set it narrows issue work to
+-- that project's issues, for the project page's working-agents section.
 SELECT
   a.id,
   a.name,
@@ -2695,33 +2712,11 @@ WHERE a.workspace_id = $1
                 AND EXISTS (
                   SELECT 1
                   FROM squad s
+                  JOIN agent leader ON leader.id = s.leader_id
                   WHERE s.id = i.assignee_id
                     AND s.workspace_id = a.workspace_id
-                    AND (
-                      EXISTS (
-                        SELECT 1
-                        FROM squad_member sm
-                        WHERE sm.squad_id = s.id
-                          AND sm.member_type = 'member'
-                          AND sm.member_id = @member_id::uuid
-                      )
-                      OR EXISTS (
-                        SELECT 1
-                        FROM agent leader
-                        WHERE leader.id = s.leader_id
-                          AND leader.workspace_id = a.workspace_id
-                          AND leader.owner_id = @member_id::uuid
-                      )
-                      OR EXISTS (
-                        SELECT 1
-                        FROM squad_member sm
-                        JOIN agent owned_member ON owned_member.id = sm.member_id
-                        WHERE sm.squad_id = s.id
-                          AND sm.member_type = 'agent'
-                          AND owned_member.workspace_id = a.workspace_id
-                          AND owned_member.owner_id = @member_id::uuid
-                      )
-                    )
+                    AND leader.workspace_id = a.workspace_id
+                    AND leader.owner_id = @member_id::uuid
                 )
               )
             )
@@ -2737,6 +2732,16 @@ WHERE a.workspace_id = $1
       WHERE child.id = atq.issue_id
         AND child.workspace_id = a.workspace_id
         AND child.parent_issue_id = @parent_issue_id::uuid
+    )
+  )
+  AND (
+    sqlc.narg('project_id')::uuid IS NULL
+    OR EXISTS (
+      SELECT 1
+      FROM issue pi
+      WHERE pi.id = atq.issue_id
+        AND pi.workspace_id = a.workspace_id
+        AND pi.project_id = sqlc.narg('project_id')::uuid
     )
   )
 GROUP BY a.id, a.name, a.avatar_url, a.created_at

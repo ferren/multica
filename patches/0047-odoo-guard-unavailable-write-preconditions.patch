@@ -1,10 +1,14 @@
-Subject: [PATCH] Gate Odoo comment replay on the server capability
+Subject: [PATCH] Gate Odoo write preconditions on server capabilities
 
 Odoo advertises comment replay on issue detail after the receipt table is
 available. Use keyed uploads and check the receipt before sending files.
-Keep legacy comments and guard unsupported skill revision writes.
+
+Check skill detail for revision support before forwarding an explicit base
+revision. Older servers may ignore the precondition, so refuse the write
+when they do not advertise support. Keep legacy writes without the flag.
 
 Issue: TASK-1-1-8
+Issue: TASK-1-1-9
 --- a/server/cmd/multica/cmd_issue.go
 +++ b/server/cmd/multica/cmd_issue.go
 @@ -2974,6 +2974,9 @@ func runIssueCommentAdd(cmd *cobra.Comma
@@ -158,10 +162,11 @@ Issue: TASK-1-1-8
  		Path   string `json:"path"`
 --- /dev/null
 +++ b/server/cmd/multica/cmd_odoo_write_preconditions_test.go
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,204 @@
 +package main
 +
 +import (
++	"encoding/json"
 +	"fmt"
 +	"net/http"
 +	"net/http/httptest"
@@ -169,8 +174,6 @@ Issue: TASK-1-1-8
 +	"strings"
 +	"sync/atomic"
 +	"testing"
-+
-+	"github.com/spf13/cobra"
 +)
 +
 +func TestOdooCommentAddReplaysBeforeUploading(t *testing.T) {
@@ -294,65 +297,189 @@ Issue: TASK-1-1-8
 +	}
 +}
 +
-+func TestOdooSkillBaseRevisionRejectsUnsupportedPrecondition(t *testing.T) {
-+	cmd := &cobra.Command{}
-+	cmd.Flags().Int64("base-revision", 0, "")
-+	if _, hasBase, err := skillBaseRevision(cmd, true); err != nil || hasBase {
-+		t.Fatalf("legacy Odoo skill write should work without the flag: %v", err)
++func TestOdooSkillBaseRevisionCapability(t *testing.T) {
++	var reads, writes atomic.Int32
++	var supported atomic.Bool
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/multica/agent/skills/1" {
++			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
++			http.NotFound(w, r)
++			return
++		}
++		switch r.Method {
++		case http.MethodGet:
++			reads.Add(1)
++			if r.URL.Query().Get("include") != "metadata" {
++				t.Error("capability check should only fetch metadata")
++			}
++			if supported.Load() {
++				fmt.Fprint(w, `{"revision":8,"capabilities":["odoo-skill-revision-v1"]}`)
++			} else {
++				fmt.Fprint(w, `{"id":1}`)
++			}
++		case http.MethodPut:
++			var body struct {
++				Base *int64 `json:"base_revision"`
++			}
++			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
++				t.Error(err)
++			}
++			if writes.Add(1) == 1 {
++				if body.Base != nil {
++					t.Error("legacy write sent a base revision")
++				}
++				fmt.Fprint(w, `{"id":1}`)
++				return
++			}
++			if body.Base == nil || *body.Base != 7 {
++				t.Error("write did not preserve the caller's stale base")
++			}
++			http.Error(w, `{"code":"revision_conflict","actual_revision":8}`, http.StatusConflict)
++		default:
++			t.Errorf("unexpected method: %s", r.Method)
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++	setCLITestServerEnv(t, server.URL)
++	t.Setenv("MULTICA_BACKEND_MODE", "odoo")
++
++	cmd := newSkillUpdateTestCmd()
++	_ = cmd.Flags().Set("content", "new body")
++	if _, err := captureStdout(t, func() error { return runSkillUpdate(cmd, []string{"1"}) }); err != nil {
++		t.Fatalf("legacy write failed: %v", err)
 +	}
-+	if err := cmd.Flags().Set("base-revision", "7"); err != nil {
-+		t.Fatal(err)
++	if reads.Load() != 0 || writes.Load() != 1 {
++		t.Fatal("legacy write should skip capability detection")
 +	}
-+	if _, _, err := skillBaseRevision(cmd, true); err == nil || !strings.Contains(err.Error(), "does not provide") {
-+		t.Fatalf("unsupported precondition should fail before writing: %v", err)
++	_ = cmd.Flags().Set("base-revision", "7")
++	if err := runSkillUpdate(cmd, []string{"1"}); err == nil || !strings.Contains(err.Error(), "does not provide") {
++		t.Fatalf("unsupported precondition was not refused: %v", err)
 +	}
-+	if base, hasBase, err := skillBaseRevision(cmd, false); err != nil || !hasBase || base != 7 {
-+		t.Fatalf("native precondition = %d, present=%v, err=%v", base, hasBase, err)
++	if reads.Load() != 1 || writes.Load() != 1 {
++		t.Fatal("unsupported Odoo must receive no conditional write")
++	}
++	supported.Store(true)
++	if err := runSkillUpdate(cmd, []string{"1"}); err == nil || !strings.Contains(err.Error(), "changed since revision 7") {
++		t.Fatalf("expected conflict recovery guidance: %v", err)
++	}
++	if reads.Load() != 2 || writes.Load() != 2 {
++		t.Fatal("supported Odoo must receive the conditional write")
 +	}
 +}
 --- a/server/cmd/multica/cmd_skill.go
 +++ b/server/cmd/multica/cmd_skill.go
-@@ -184,10 +184,13 @@ func init() {
+@@ -11,6 +11,7 @@ import (
+ 	"net/url"
+ 	"os"
+ 	"path/filepath"
++	"slices"
+ 	"strconv"
+ 	"strings"
+ 	"time"
+@@ -184,7 +185,7 @@ func init() {
  
  // skillBaseRevision reads --base-revision. Unset means "no precondition", which
  // keeps last-write-wins for scripts written before skill revisions existed.
 -func skillBaseRevision(cmd *cobra.Command) (int64, bool, error) {
-+func skillBaseRevision(cmd *cobra.Command, odooBackend bool) (int64, bool, error) {
++func skillBaseRevision(ctx context.Context, cmd *cobra.Command, client *cli.APIClient, skillPath string) (int64, bool, error) {
  	if !cmd.Flags().Changed("base-revision") {
  		return 0, false, nil
  	}
-+	if odooBackend {
-+		return 0, false, fmt.Errorf("--base-revision requires skill revision checks, which this Odoo backend does not provide")
-+	}
- 	base, _ := cmd.Flags().GetInt64("base-revision")
+@@ -192,6 +193,17 @@ func skillBaseRevision(cmd *cobra.Comman
  	if base <= 0 {
  		return 0, false, fmt.Errorf("--base-revision must be a positive revision from `multica skill get`")
-@@ -456,7 +459,7 @@ func runSkillUpdate(cmd *cobra.Command,
+ 	}
++	if client.OdooBackend {
++		var detail struct {
++			Capabilities []string `json:"capabilities"`
++		}
++		if err := client.GetJSON(ctx, skillPath+"?include=metadata", &detail); err != nil {
++			return 0, false, fmt.Errorf("check skill revision support: %w", err)
++		}
++		if !slices.Contains(detail.Capabilities, "odoo-skill-revision-v1") {
++			return 0, false, fmt.Errorf("--base-revision requires skill revision checks, which this Odoo backend does not provide")
++		}
++	}
+ 	return base, true, nil
+ }
+ 
+@@ -456,7 +468,11 @@ func runSkillUpdate(cmd *cobra.Command,
  	if len(body) == 0 {
  		return fmt.Errorf("no fields to update; use --name, --description, --content, or --config")
  	}
 -	base, hasBase, err := skillBaseRevision(cmd)
-+	base, hasBase, err := skillBaseRevision(cmd, client.OdooBackend)
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++
++	skillPath := "/api/skills/" + args[0]
++	base, hasBase, err := skillBaseRevision(ctx, cmd, client, skillPath)
  	if err != nil {
  		return err
  	}
-@@ -810,7 +813,7 @@ func runSkillFilesUpsert(cmd *cobra.Comm
+@@ -464,11 +480,8 @@ func runSkillUpdate(cmd *cobra.Command,
+ 		body["base_revision"] = base
+ 	}
+ 
+-	ctx, cancel := cli.APIContext(context.Background())
+-	defer cancel()
+-
+ 	var result map[string]any
+-	if err := client.PutJSON(ctx, "/api/skills/"+args[0], body, &result); err != nil {
++	if err := client.PutJSON(ctx, skillPath, body, &result); err != nil {
+ 		return skillWriteError("update skill", base, err)
+ 	}
+ 
+@@ -810,7 +823,11 @@ func runSkillFilesUpsert(cmd *cobra.Comm
  		"path":    filePath,
  		"content": content,
  	}
 -	base, hasBase, err := skillBaseRevision(cmd)
-+	base, hasBase, err := skillBaseRevision(cmd, client.OdooBackend)
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++
++	skillPath := "/api/skills/" + args[0]
++	base, hasBase, err := skillBaseRevision(ctx, cmd, client, skillPath)
  	if err != nil {
  		return err
  	}
-@@ -842,7 +845,7 @@ func runSkillFilesDelete(cmd *cobra.Comm
+@@ -818,11 +835,8 @@ func runSkillFilesUpsert(cmd *cobra.Comm
+ 		body["base_revision"] = base
  	}
  
- 	path := "/api/skills/" + args[0] + "/files/" + args[1]
+-	ctx, cancel := cli.APIContext(context.Background())
+-	defer cancel()
+-
+ 	var result map[string]any
+-	if err := client.PutJSON(ctx, "/api/skills/"+args[0]+"/files", body, &result); err != nil {
++	if err := client.PutJSON(ctx, skillPath+"/files", body, &result); err != nil {
+ 		return skillWriteError("upsert skill file", base, err)
+ 	}
+ 
+@@ -841,18 +855,19 @@ func runSkillFilesDelete(cmd *cobra.Comm
+ 		return err
+ 	}
+ 
+-	path := "/api/skills/" + args[0] + "/files/" + args[1]
 -	base, hasBase, err := skillBaseRevision(cmd)
-+	base, hasBase, err := skillBaseRevision(cmd, client.OdooBackend)
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++
++	skillPath := "/api/skills/" + args[0]
++	base, hasBase, err := skillBaseRevision(ctx, cmd, client, skillPath)
  	if err != nil {
  		return err
+ 	}
++	path := skillPath + "/files/" + args[1]
+ 	if hasBase {
+ 		path += "?base_revision=" + strconv.FormatInt(base, 10)
+ 	}
+ 
+-	ctx, cancel := cli.APIContext(context.Background())
+-	defer cancel()
+-
+ 	if err := client.DeleteJSON(ctx, path); err != nil {
+ 		return skillWriteError("delete skill file", base, err)
  	}
 --- a/server/cmd/multica/cmd_id_resolver.go
 +++ b/server/cmd/multica/cmd_id_resolver.go

@@ -1,0 +1,325 @@
+--- a/server/cmd/multica/cmd_doc.go
++++ b/server/cmd/multica/cmd_doc.go
+@@ -29,9 +29,8 @@ var docCmd = &cobra.Command{
+ 		"People may be editing a doc while you work on it. For targeted changes prefer " +
+ 		"`multica doc edit`: it replaces text you quote and lands wherever that text now is. " +
+ 		"`multica doc update` replaces the whole doc and needs --base-revision, the revision you read " +
+-		"with `multica doc get`; edits made since then are usually merged in. The update is refused, with nothing " +
+-		"written, when you and someone else changed the same paragraph, and also when your revision is too old " +
+-		"to merge from or the live-editing service is unavailable. " +
++		"with `multica doc get`. Multica's live-editing service can merge disjoint changes. " +
++		"Odoo rejects a stale revision. Read the current content before retrying a rejected update. " +
+ 		"Pass --message to say what changed and why — it shows in the doc's history.",
+ }
+ 
+@@ -100,7 +99,7 @@ var docHistoryCmd = &cobra.Command{
+ 	Use:   "history <doc-id>",
+ 	Short: "List a doc's versions, or show one with --version",
+ 	Long: "List the saved versions of a doc, newest first: who saved each one, its action " +
+-		"(edit or restore) and the change summary. --output json adds the run and issue an agent saved it from.\n\n" +
++		"(edit or restore) and the change summary. On Multica, --output json also includes the run and issue an agent saved it from.\n\n" +
+ 		"Pass --version <n> to get that version with its full content (`--output content` prints only the Markdown), " +
+ 		"for example to compare it with `multica doc get --output content` or to pick one for `multica doc restore`.",
+ 	Args: exactArgs(1),
+@@ -122,9 +121,8 @@ var docRestoreCmd = &cobra.Command{
+ 
+ var docCommentCmd = &cobra.Command{
+ 	Use:   "comment",
+-	Short: "Read the discussion on a doc",
+-	Long: "Read the comment threads people left on a doc. Writing in doc discussions " +
+-		"(commenting, replying, resolving) is reserved for people, so there are no write commands.",
++	Short: "Read or participate in the discussion on a doc",
++	Long:  "Read the comment threads on a doc. A workspace member credential is required to post a comment or reply.",
+ }
+ 
+ var docCommentListCmd = &cobra.Command{
+@@ -138,6 +136,13 @@ var docCommentListCmd = &cobra.Command{
+ 	RunE: runDocCommentList,
+ }
+ 
++var docCommentAddCmd = &cobra.Command{
++	Use:   "add <doc-id>",
++	Short: "Comment on selected text or reply to a discussion",
++	Args:  exactArgs(1),
++	RunE:  runDocCommentAdd,
++}
++
+ var docFolderCmd = &cobra.Command{
+ 	Use:   "folder",
+ 	Short: "Manage knowledge base doc folders",
+@@ -182,7 +187,7 @@ func init() {
+ 	docCmd.AddCommand(docListCmd, docSearchCmd, docGetCmd, docCreateCmd, docUpdateCmd, docEditCmd, docMoveCmd,
+ 		docHistoryCmd, docRestoreCmd, docCommentCmd, docFolderCmd)
+ 	docFolderCmd.AddCommand(docFolderListCmd, docFolderCreateCmd, docFolderUpdateCmd, docFolderMoveCmd)
+-	docCommentCmd.AddCommand(docCommentListCmd)
++	docCommentCmd.AddCommand(docCommentListCmd, docCommentAddCmd)
+ 	docHistoryCmd.Flags().Int("version", 0, "Show this version with its content instead of listing versions")
+ 	docHistoryCmd.Flags().String("output", "", "Output format: table or json for the list (default table); json or content with --version (default json)")
+ 	docRestoreCmd.Flags().Int("version", 0, "Version number from doc history to restore (required)")
+@@ -191,6 +196,14 @@ func init() {
+ 	docRestoreCmd.Flags().String("output", "json", "Output format: table or json")
+ 	docCommentListCmd.Flags().Bool("include-resolved", false, "Include resolved threads")
+ 	docCommentListCmd.Flags().String("output", "table", "Output format: table or json")
++	docCommentAddCmd.Flags().String("content", "", "Comment text")
++	docCommentAddCmd.Flags().String("content-file", "", "Read comment text from a UTF-8 file")
++	docCommentAddCmd.Flags().Bool("content-stdin", false, "Read comment text from stdin")
++	docCommentAddCmd.Flags().String("quote", "", "Exact selection in the document")
++	docCommentAddCmd.Flags().String("prefix", "", "Text immediately before the selection")
++	docCommentAddCmd.Flags().String("suffix", "", "Text immediately after the selection")
++	docCommentAddCmd.Flags().String("parent", "", "Full ID of a comment to reply to")
++	docCommentAddCmd.Flags().String("output", "json", "Output format: table or json")
+ 	docMoveCmd.Flags().String("folder", "", "Destination folder id, or `root` for the top level (required)")
+ 	docMoveCmd.Flags().String("output", "json", "Output format: table or json")
+ 	docListCmd.Flags().String("output", "table", "Output format: table or json")
+@@ -720,6 +733,57 @@ func runDocRestore(cmd *cobra.Command, a
+ 	return printDocSummary(doc, output)
+ }
+ 
++func runDocCommentAdd(cmd *cobra.Command, args []string) error {
++	output, _ := cmd.Flags().GetString("output")
++	if output != "table" && output != "json" {
++		return fmt.Errorf("--output must be table or json")
++	}
++	content, _, err := resolveSkillContentFlag(cmd)
++	if err != nil {
++		return err
++	}
++	if strings.TrimSpace(content) == "" {
++		return fmt.Errorf("pass comment text with --content, --content-file, or --content-stdin")
++	}
++	parent, _ := cmd.Flags().GetString("parent")
++	quote, _ := cmd.Flags().GetString("quote")
++	prefix, _ := cmd.Flags().GetString("prefix")
++	suffix, _ := cmd.Flags().GetString("suffix")
++	body := map[string]string{"content": content}
++	if strings.TrimSpace(parent) != "" {
++		if quote != "" || prefix != "" || suffix != "" {
++			return fmt.Errorf("--parent cannot be combined with --quote, --prefix, or --suffix")
++		}
++		body["parent_id"] = strings.TrimSpace(parent)
++	} else {
++		if strings.TrimSpace(quote) == "" {
++			return fmt.Errorf("--quote is required for a new discussion")
++		}
++		body["anchor_quote"] = quote
++		body["anchor_prefix"] = prefix
++		body["anchor_suffix"] = suffix
++	}
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		return err
++	}
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++	id, err := resolveDocRef(ctx, client, args[0], false)
++	if err != nil {
++		return err
++	}
++	var comment map[string]any
++	if err := client.PostJSON(ctx, "/api/docs/"+id+"/comments", body, &comment); err != nil {
++		return fmt.Errorf("add doc comment: %w", err)
++	}
++	if output == "table" {
++		printDocCommentTable([]map[string]any{comment})
++		return nil
++	}
++	return cli.PrintJSON(os.Stdout, comment)
++}
++
+ func runDocCommentList(cmd *cobra.Command, args []string) error {
+ 	client, err := newAPIClient(cmd)
+ 	if err != nil {
+@@ -761,8 +825,13 @@ func runDocCommentList(cmd *cobra.Comman
+ 	if output, _ := cmd.Flags().GetString("output"); output == "json" {
+ 		return cli.PrintJSON(os.Stdout, threads)
+ 	}
+-	rows := make([][]string, 0, len(threads))
+-	for _, c := range threads {
++	printDocCommentTable(threads)
++	return nil
++}
++
++func printDocCommentTable(comments []map[string]any) {
++	rows := make([][]string, 0, len(comments))
++	for _, c := range comments {
+ 		replyTo, status, quote := strVal(c, "parent_id"), "", ""
+ 		if replyTo == "" {
+ 			replyTo, status, quote = "-", "open", oneLine(strVal(c, "anchor_quote"), 40)
+@@ -776,7 +845,6 @@ func runDocCommentList(cmd *cobra.Comman
+ 		})
+ 	}
+ 	cli.PrintTable(os.Stdout, []string{"ID", "REPLY TO", "AUTHOR", "STATUS", "QUOTE", "COMMENT"}, rows)
+-	return nil
+ }
+ 
+ func printDocFolderSummary(folder map[string]any, output string) error {
+--- a/server/cmd/multica/cmd_doc_test.go
++++ b/server/cmd/multica/cmd_doc_test.go
+@@ -15,7 +15,7 @@ import (
+ 	"github.com/multica-ai/multica/server/internal/cli"
+ )
+ 
+-func TestDocCommandsExposeOnlyAgentReadWrite(t *testing.T) {
++func TestDocCommandsExposeSupportedOperations(t *testing.T) {
+ 	expected := map[string]bool{
+ 		"list": true, "search": true, "get": true, "create": true,
+ 		"edit": true, "update": true, "move": true, "history": true,
+@@ -41,9 +41,8 @@ func TestDocCommandsExposeOnlyAgentReadW
+ 	if len(expectedFolder) != 0 {
+ 		t.Fatalf("missing doc folder commands: %v", expectedFolder)
+ 	}
+-	// Writing in doc discussions is human-only on the server.
+-	if names := commandNames(docCommentCmd); len(names) != 1 || names[0] != "list" {
+-		t.Fatalf("doc comment commands = %v, want only list", names)
++	if names := commandNames(docCommentCmd); strings.Join(names, ",") != "add,list" {
++		t.Fatalf("doc comment commands = %v, want add and list", names)
+ 	}
+ 	if !docFolderUpdateCmd.HasAlias("rename") {
+ 		t.Fatal("doc folder update should accept rename as an alias")
+@@ -586,6 +585,44 @@ func TestRunDocRestoreSendsRestoreAction
+ 	}
+ }
+ 
++func TestRunDocCommentAddSendsSelectionOrParent(t *testing.T) {
++	const docID = "11111111-2222-3333-4444-555555555555"
++	var requests []map[string]string
++	setDocTestServer(t, func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodPost || r.URL.Path != "/api/docs/"+docID+"/comments" {
++			t.Errorf("request = %s %s", r.Method, r.URL.Path)
++		}
++		var body map[string]string
++		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
++			t.Errorf("read request: %v", err)
++		}
++		requests = append(requests, body)
++		_ = json.NewEncoder(w).Encode(map[string]string{"id": "new-comment", "content": body["content"]})
++	})
++
++	setDocFlag(t, docCommentAddCmd, "content", "Check this section")
++	setDocFlag(t, docCommentAddCmd, "quote", "selected text")
++	setDocFlag(t, docCommentAddCmd, "prefix", "before ")
++	out, err := captureStdout(t, func() error { return runDocCommentAdd(docCommentAddCmd, []string{docID}) })
++	if err != nil || !strings.Contains(out, "new-comment") {
++		t.Fatalf("add comment = %q, %v", out, err)
++	}
++	if body := requests[0]; body["anchor_quote"] != "selected text" || body["anchor_prefix"] != "before " ||
++		body["content"] != "Check this section" || body["parent_id"] != "" {
++		t.Fatalf("selection request = %v", body)
++	}
++	setDocFlag(t, docCommentAddCmd, "quote", "")
++	setDocFlag(t, docCommentAddCmd, "prefix", "")
++	setDocFlag(t, docCommentAddCmd, "parent", "root-comment")
++	_, err = captureStdout(t, func() error { return runDocCommentAdd(docCommentAddCmd, []string{docID}) })
++	if err != nil {
++		t.Fatal(err)
++	}
++	if body := requests[1]; body["parent_id"] != "root-comment" || body["anchor_quote"] != "" {
++		t.Fatalf("reply request = %v", body)
++	}
++}
++
+ func TestRunDocCommentListGroupsThreadsAndHidesResolved(t *testing.T) {
+ 	const docID = "11111111-2222-3333-4444-555555555555"
+ 	var gotPath string
+--- a/server/internal/daemon/execenv/runtime_config_kind_test.go
++++ b/server/internal/daemon/execenv/runtime_config_kind_test.go
+@@ -1,6 +1,7 @@
+ package execenv
+ 
+ import (
++	"encoding/json"
+ 	"strings"
+ 	"testing"
+ )
+@@ -82,11 +83,22 @@ func TestBuildMetaSkillContentBriefConte
+ func TestBuildMetaSkillContentDocsFollowFlag(t *testing.T) {
+ 	t.Parallel()
+ 
+-	for _, enabled := range []bool{false, true} {
+-		out := buildMetaSkillContent("claude", TaskContextForEnv{IssueID: "issue-1", DocsEnabled: enabled})
+-		for _, line := range []string{"`multica doc list|search|get|create|edit|update|move|history|restore|comment|folder`", "mention://doc/<doc-id>"} {
+-			if got := strings.Contains(out, line); got != enabled {
+-				t.Errorf("DocsEnabled=%v: brief contains %q = %v\n---\n%s", enabled, line, got, out)
++	for _, backend := range []string{"multica", "odoo"} {
++		for _, claim := range []string{`{}`, `{"docs_enabled":true}`} {
++			var task struct {
++				DocsEnabled bool `json:"docs_enabled"`
++			}
++			if err := json.Unmarshal([]byte(claim), &task); err != nil {
++				t.Fatal(err)
++			}
++			out := buildMetaSkillContent("claude", TaskContextForEnv{
++				IssueID: "issue-1", BackendMode: backend, DocsEnabled: task.DocsEnabled,
++			})
++			if got := strings.Contains(out, "`multica doc list|search|get|create|edit|update|move|history|restore|comment|folder`"); got != task.DocsEnabled {
++				t.Errorf("%s claim %s: brief lists Docs commands = %v", backend, claim, got)
++			}
++			if got := strings.Contains(out, "mention://doc/<doc-id>"); got != (task.DocsEnabled && backend == "multica") {
++				t.Errorf("%s claim %s: brief advertises Docs links = %v", backend, claim, got)
+ 			}
+ 		}
+ 	}
+--- a/server/internal/daemon/execenv/runtime_config_sections.go
++++ b/server/internal/daemon/execenv/runtime_config_sections.go
+@@ -1225,7 +1225,7 @@ func buildMetaSkillContentSlim(provider
+ 	writeSkills(&b, provider, ctx)
+ 
+ 	if kind == kindIssue {
+-		writeMentions(&b, ctx.DocsEnabled)
++		writeMentions(&b, ctx.DocsEnabled && ctx.BackendMode != "odoo")
+ 		writeAttachments(&b)
+ 	}
+ 
+--- a/server/internal/service/builtin_skills/multica-platform/references/docs.md
++++ b/server/internal/service/builtin_skills/multica-platform/references/docs.md
+@@ -22,8 +22,8 @@ multica doc history <doc-id> --version 3
+ ```
+ 
+ Doc and folder arguments take a full id or a unique id prefix from
+-`doc list`. A doc's `revision` is what writes check against; a `version` is a
+-saved snapshot in its history. They are different numbers.
++`doc list`. A doc's `revision` is what writes check against. Use the version
++number from history to pick a saved snapshot.
+ 
+ ## Write
+ 
+@@ -47,9 +47,13 @@ service is unavailable. On any refusal,
+ on top of it; never retry the same body with a newer revision, which would
+ erase their work.
+ 
++On Odoo, each successful content change creates a numbered snapshot. A stale
++`--base-revision` is rejected, and `doc edit` can still apply to exact current
++text after unrelated edits.
++
+ Pass `--message` on every `create`, `edit`, `update` and `restore`. It is what
+-the doc's history shows next to your name, and your run and issue are recorded
+-with it. Moves and folder commands do not take it.
++the doc's history shows next to your name. On Multica, history also records
++the run and issue. Moves and folder commands do not take it.
+ 
+ ## Review comments
+ 
+@@ -59,10 +63,11 @@ Resolved threads are hidden unless you p
+ comment's `anchor_quote` is the text it was left on, and `--output json` has
+ the full comment text.
+ 
+-Writing in doc discussions is reserved for people: commenting, replying,
+-resolving and reopening all answer `403` to agent credentials, and the CLI has
+-no command for them. Report which threads you addressed in your issue
+-comment, so the reviewer can resolve them.
++Writing in doc discussions is reserved for people. With a workspace member credential, run
++`multica doc comment add <doc-id> --quote "<selected text>" --content "<comment>"`
++to start a thread or use `--parent <comment-id>` in place of `--quote` to reply.
++Agents can report which threads they addressed in their issue comment so a
++reviewer can resolve them.
+ 
+ ## History and restore
+ 
+@@ -93,5 +98,5 @@ the file is delivered instead.
+ 
+ ## Linking
+ 
+-`[Doc title](mention://doc/<doc-id>)` is a clickable link with no side effect:
+-it notifies no one and starts no run.
++On Multica, use `[Doc title](mention://doc/<doc-id>)` to link to a doc without
++sending a notification. On Odoo, share the doc ID for use with `doc get`.
